@@ -1,0 +1,40 @@
+[package]
+name = "marker"
+version = "0.1.0"
+edition = "2021"
+description = "A fast, minimal PDF annotator"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+directories = "6"
+eframe = "0.33"
+egui = "0.33"
+mitex = "0.2.4"
+mupdf = { version = "0.8.0", default-features = false, features = [
+    "base14-fonts",
+    "brotli",
+    "system-fonts",
+    "sys-lib-brotli",
+    "sys-lib-freetype",
+    "sys-lib-harfbuzz",
+    "sys-lib-jbig2dec",
+    "sys-lib-lcms2",
+    "sys-lib-libjpeg",
+    "sys-lib-openjpeg",
+    "sys-lib-zlib",
+] }
+resvg = "0.45"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+typst = "0.15"
+typst-as-lib = { version = "0.16", default-features = false, features = [
+    "typst-kit-embed-fonts",
+    "typst-kit-fonts",
+] }
+typst-layout = "0.15"
+typst-pdf = "0.15"
+typst-svg = "0.15"
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -10,10 +10,48 @@ use crate::geom::{normalize_latex, Rgb};
 
 const TEMPLATE: &str = r#"
 #import sys: inputs
-#set page(width: auto, height: auto, margin: (x: 2pt, y: 3pt), fill: none)
+#set page(width: auto, height: auto, margin: (x: 6pt, y: 5pt), fill: none)
 #set text(size: inputs.size * 1pt, fill: rgb(inputs.fill), top-edge: "ascender", bottom-edge: "descender")
-#eval("$" + str(inputs.expr) + "$", mode: "markup")
+#eval(str(inputs.wrapped), mode: "markup")
 "#;
+
+/// Cycle-able LaTeX starters for the math editor (Tab).
+pub const MATH_TEMPLATES: &[&str] = &[
+    "",
+    r"\frac{a}{b}",
+    r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+    r"\begin{aligned}
+a &= b \\
+c &= d
+\end{aligned}",
+    r"\begin{bmatrix}
+a & b \\
+c & d
+\end{bmatrix}",
+    r"\nabla^2 f = \begin{bmatrix}
+f_{11} & f_{12} & \dots & f_{1n} \\
+\vdots & \vdots & \ddots & \vdots \\
+f_{n1} & f_{n2} & \dots & f_{nn}
+\end{bmatrix}",
+];
+
+pub fn cycle_math_template(current: &str) -> &'static str {
+    let trimmed = current.trim();
+    let idx = MATH_TEMPLATES
+        .iter()
+        .position(|t| t.trim() == trimmed)
+        .unwrap_or(0);
+    MATH_TEMPLATES[(idx + 1) % MATH_TEMPLATES.len()]
+}
+
+pub fn wants_display_math(latex: &str) -> bool {
+    let s = latex.trim();
+    s.contains(r"\begin{")
+        || s.contains(r"\\")
+        || s.contains('\n')
+        || s.starts_with(r"\[")
+        || (s.starts_with("$$") && s.ends_with("$$"))
+}
 
 pub struct RgbaImage {
     pub width: u32,
@@ -135,8 +173,12 @@ fn math_loop(jobs: Receiver<Job>, replies: Sender<MathRender>) {
                     }
                 }
                 let (gen, source, size, color, req) = current;
-                let rendered =
-                    render_equation(engine.get_or_insert_with(build_engine), &source, size, color);
+                let rendered = render_equation(
+                    engine.get_or_insert_with(build_engine),
+                    &source,
+                    size,
+                    color,
+                );
                 let _ = replies.send(to_reply(gen, id, req, rendered));
             }
         }
@@ -197,8 +239,9 @@ fn render_equation(
             error: None,
         };
     }
+    let display = wants_display_math(source) || wants_display_math(&latex);
     let expr = match mitex::convert_math(&latex, None) {
-        Ok(expr) => expr,
+        Ok(expr) => mitex_to_typst(&expr),
         Err(err) => {
             return Rendered {
                 preview: None,
@@ -209,9 +252,14 @@ fn render_equation(
             };
         }
     };
+    let wrapped = if display {
+        format!("$ {expr} $")
+    } else {
+        format!("${expr}$")
+    };
 
     let mut inputs = Dict::new();
-    inputs.insert("expr".into(), expr.into_value());
+    inputs.insert("wrapped".into(), wrapped.into_value());
     inputs.insert("size".into(), f64::from(size.max(6.0)).into_value());
     inputs.insert("fill".into(), color.hex().into_value());
 
@@ -267,6 +315,120 @@ fn render_equation(
         height_pt,
         error: None,
     }
+}
+
+/// MiTeX emits helpers (`bmatrix`, `zws`, `aligned`, …) that only exist in the
+/// MiTeX Typst package. Rewrite them to native Typst math so we stay offline.
+fn mitex_to_typst(expr: &str) -> String {
+    let mut s = expr.to_string();
+    s = s.replace(" zws ", " ");
+    s = s.replace("zws", "");
+    s = s.replace("dots.h.c", "dots.c");
+    s = s.replace("dots.h", "dots");
+    // Prefer display-friendly matrix delimiters and unwrap alignment envs.
+    s = rewrite_call(&s, "bmatrix", |args| format!("mat(delim: \"[\", {args})"));
+    s = rewrite_call(&s, "Bmatrix", |args| format!("mat(delim: \"{{\", {args})"));
+    s = rewrite_call(&s, "pmatrix", |args| format!("mat(delim: \"(\", {args})"));
+    s = rewrite_call(&s, "vmatrix", |args| format!("mat(delim: \"|\", {args})"));
+    s = rewrite_call(&s, "Vmatrix", |args| format!("mat(delim: \"||\", {args})"));
+    s = rewrite_call(&s, "matrix", |args| format!("mat({args})"));
+    s = rewrite_call(&s, "aligned", |args| args);
+    s = rewrite_call(&s, "alignedat", |args| strip_first_arg(args));
+    s = rewrite_call(&s, "align", |args| args);
+    s = rewrite_call(&s, "alignat", |args| strip_first_arg(args));
+    s = rewrite_call(&s, "gather", |args| args);
+    s = rewrite_call(&s, "gathered", |args| args);
+    s = rewrite_call(&s, "split", |args| args);
+    collapse_ws(&s)
+}
+
+fn strip_first_arg(args: String) -> String {
+    // alignedat/alignat lead with a column count: `2, a &= b \ c &= d`
+    if let Some((_, rest)) = args.split_once(',') {
+        rest.trim().to_string()
+    } else {
+        args
+    }
+}
+
+fn rewrite_call(input: &str, name: &str, map: impl Fn(String) -> String) -> String {
+    let mut out = String::with_capacity(input.len());
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    let name_bytes = name.as_bytes();
+    while i < bytes.len() {
+        if bytes[i..].starts_with(name_bytes) {
+            let after = i + name_bytes.len();
+            let boundary_ok = after >= bytes.len()
+                || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_';
+            if boundary_ok {
+                let mut j = after;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    if let Some((args, end)) = take_parens(input, j) {
+                        out.push_str(&map(args));
+                        i = end;
+                        continue;
+                    }
+                }
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn take_parens(input: &str, open: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    if open >= bytes.len() || bytes[open] != b'(' {
+        return None;
+    }
+    let mut depth = 0i32;
+    let mut i = open;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' => depth += 1,
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let args = input[open + 1..i].trim().to_string();
+                    return Some((args, i + 1));
+                }
+            }
+            b'"' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn collapse_ws(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch);
+            prev_space = false;
+        }
+    }
+    out.trim().to_string()
 }
 
 fn rasterize_svg(svg: &str) -> (Option<RgbaImage>, f32, f32) {
@@ -342,5 +504,53 @@ mod tests {
             (image_aspect - box_aspect).abs() < 0.08,
             "preview aspect {image_aspect} diverges from {box_aspect}"
         );
+    }
+
+    #[test]
+    fn renders_bmatrix_with_ellipsis() {
+        let latex = r"\nabla^2 f = \begin{bmatrix} f_{11} & f_{12} & \dots & f_{1n} \\ \vdots & \vdots & \ddots & \vdots \\ f_{n1} & f_{n2} & \dots & f_{nn} \end{bmatrix}";
+        let rendered = render_equation_blocking(latex, 11.0, Rgb::new(200, 40, 40));
+        assert!(
+            rendered.error.is_none(),
+            "render error: {:?}",
+            rendered.error
+        );
+        assert!(rendered.width_pt > 10.0 && rendered.height_pt > 10.0);
+        let preview = rendered.preview.expect("preview");
+        let opaque = preview
+            .pixels
+            .chunks_exact(4)
+            .filter(|px| px[3] > 20)
+            .count();
+        assert!(opaque > 200, "matrix should paint visible ink, got {opaque}");
+    }
+
+    #[test]
+    fn renders_aligned_multiline() {
+        let latex = r"\begin{aligned} a &= b \\ c &= d \end{aligned}";
+        let rendered = render_equation_blocking(latex, 14.0, Rgb::new(0, 0, 0));
+        assert!(
+            rendered.error.is_none(),
+            "render error: {:?}",
+            rendered.error
+        );
+        assert!(rendered.height_pt > rendered.width_pt * 0.2);
+    }
+
+    #[test]
+    fn mitex_rewrite_maps_matrix_helpers() {
+        let expr = r"bmatrix( f _(1 1 ) zws , dots.h  zws ; dots.v  zws , dots.down  )";
+        let out = mitex_to_typst(expr);
+        assert!(out.contains("mat(delim: \"[\""));
+        assert!(!out.contains("bmatrix"));
+        assert!(!out.contains("zws"));
+        assert!(out.contains("dots"));
+    }
+
+    #[test]
+    fn template_cycle_wraps() {
+        assert_eq!(cycle_math_template(""), MATH_TEMPLATES[1]);
+        let last = MATH_TEMPLATES.last().unwrap();
+        assert_eq!(cycle_math_template(last), MATH_TEMPLATES[0]);
     }
 }

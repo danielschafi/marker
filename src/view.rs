@@ -1,14 +1,15 @@
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke, TextEdit,
-    Vec2,
+    Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke,
+    TextEdit, Vec2,
 };
 
 use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind};
 use crate::app::{CreateKind, DocState, Drag, MarkerApp, Tab, Tool};
 use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
+use crate::ui::BACKDROP;
 
 const GAP: f32 = 16.0;
 const PAD: f32 = 24.0;
@@ -111,7 +112,8 @@ impl DocState {
             let info = self.pages[page];
             let top = self.tops[page];
             self.scale = new_scale;
-            self.scroll_y = view.top() + top * new_scale + (point.y - info.y0) * new_scale - cursor.y;
+            self.scroll_y =
+                view.top() + top * new_scale + (point.y - info.y0) * new_scale - cursor.y;
             let page_w = info.width() * new_scale;
             if page_w + PAD * 2.0 > view.width() {
                 self.scroll_x = view.left() + PAD + (point.x - info.x0) * new_scale - cursor.x;
@@ -172,7 +174,7 @@ pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui) {
     handle_pointer(app, &response);
 
     let painter = ui.painter_at(response.rect);
-    painter.rect_filled(response.rect, 0.0, Color32::from_rgb(28, 28, 32));
+    painter.rect_filled(response.rect, 0.0, BACKDROP);
     paint_document(app, &painter, response.rect);
     paint_scrollbar(app, ui, response.rect);
     inline_editors(app, ui.ctx(), response.rect);
@@ -245,7 +247,12 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         }
     }
     if middle.1 {
-        if let Some(Drag::Pan { scroll_x, scroll_y, pos }) = app.tab().and_then(|tab| tab.drag.clone()) {
+        if let Some(Drag::Pan {
+            scroll_x,
+            scroll_y,
+            pos,
+        }) = app.tab().and_then(|tab| tab.drag.clone())
+        {
             if let Some(now) = middle.3 {
                 if let Some(tab) = app.tab_mut() {
                     tab.doc.scroll_x = scroll_x - (now.x - pos.x);
@@ -257,7 +264,10 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         return;
     }
     if middle.2 {
-        if matches!(app.tab().and_then(|tab| tab.drag.as_ref()), Some(Drag::Pan { .. })) {
+        if matches!(
+            app.tab().and_then(|tab| tab.drag.as_ref()),
+            Some(Drag::Pan { .. })
+        ) {
             if let Some(tab) = app.tab_mut() {
                 tab.drag = None;
             }
@@ -292,7 +302,10 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         }
     }
 
-    if matches!(app.tab().and_then(|tab| tab.drag.as_ref()), Some(Drag::Pan { .. })) {
+    if matches!(
+        app.tab().and_then(|tab| tab.drag.as_ref()),
+        Some(Drag::Pan { .. })
+    ) {
         response.ctx.set_cursor_icon(CursorIcon::Grabbing);
     } else if matches!(app.tool, Tool::Highlight | Tool::Text | Tool::Math) {
         response.clone().on_hover_cursor(CursorIcon::Text);
@@ -482,7 +495,11 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         return;
     };
     match drag {
-        Drag::Pan { scroll_x, scroll_y, pos: start } => {
+        Drag::Pan {
+            scroll_x,
+            scroll_y,
+            pos: start,
+        } => {
             if let Some(tab) = app.tab_mut() {
                 tab.doc.scroll_x = scroll_x - (pos.x - start.x);
                 tab.doc.scroll_y = scroll_y - (pos.y - start.y);
@@ -523,7 +540,9 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 replace,
             });
         }
-        Drag::Shape { page, kind, origin, .. } => {
+        Drag::Shape {
+            page, kind, origin, ..
+        } => {
             let Some(tab) = app.tab_mut() else {
                 return;
             };
@@ -540,7 +559,9 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 current,
             });
         }
-        Drag::Create { page, origin, kind, .. } => {
+        Drag::Create {
+            page, origin, kind, ..
+        } => {
             let Some(tab) = app.tab_mut() else {
                 return;
             };
@@ -557,7 +578,13 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 kind,
             });
         }
-        Drag::Move { id, origin, grab, page, .. } => {
+        Drag::Move {
+            id,
+            origin,
+            grab,
+            page,
+            ..
+        } => {
             app.seal_then_arm();
             {
                 let Some(tab) = app.tab_mut() else {
@@ -576,11 +603,17 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                     annot.kind = kind;
                 }
             }
-            if let Some(Drag::Move { moved, .. }) = app.tab_mut().and_then(|tab| tab.drag.as_mut()) {
+            if let Some(Drag::Move { moved, .. }) = app.tab_mut().and_then(|tab| tab.drag.as_mut())
+            {
                 *moved = true;
             }
         }
-        Drag::Resize { id, handle, origin, page } => {
+        Drag::Resize {
+            id,
+            handle,
+            origin,
+            page,
+        } => {
             app.seal_then_arm();
             let Some(tab) = app.tab_mut() else {
                 return;
@@ -615,8 +648,12 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool)
     };
     if !drag_moved(&drag, app, pos, view) {
         match &drag {
-            Drag::Highlight { anchor: Some(_), .. } => commit_drag(app, drag, view),
-            Drag::Create { page, origin, kind, .. } => {
+            Drag::Highlight {
+                anchor: Some(_), ..
+            } => commit_drag(app, drag, view),
+            Drag::Create {
+                page, origin, kind, ..
+            } => {
                 place_box(app, *page, *origin, None, *kind);
             }
             Drag::Move { id, .. } => {
@@ -638,12 +675,28 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
     };
     match drag {
         Drag::Pan { pos: start, .. } => start.distance(pos) > 3.0,
-        Drag::Highlight { page, origin, current_pt, .. } => {
+        Drag::Highlight {
+            page,
+            origin,
+            current_pt,
+            ..
+        } => {
             let a = tab.doc.page_to_screen(*page, *origin, view);
             let b = tab.doc.page_to_screen(*page, *current_pt, view);
             a.distance(b) > 3.0
         }
-        Drag::Shape { page, origin, current, .. } | Drag::Create { page, origin, current, .. } => {
+        Drag::Shape {
+            page,
+            origin,
+            current,
+            ..
+        }
+        | Drag::Create {
+            page,
+            origin,
+            current,
+            ..
+        } => {
             let a = tab.doc.page_to_screen(*page, *origin, view);
             let b = tab.doc.page_to_screen(*page, *current, view);
             a.distance(b) > 3.0
@@ -655,9 +708,7 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
 
 fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
     let tool = app.tool;
-    let located = app
-        .tab()
-        .and_then(|tab| tab.doc.screen_to_page(pos, view));
+    let located = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view));
     let Some((page, point)) = located else {
         if let Some(tab) = app.tab_mut() {
             if tab.editing.take().is_some() {
@@ -710,7 +761,10 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
         Tool::Text => {
             let text = hit.filter(|id| {
                 app.tab().is_some_and(|tab| {
-                    matches!(tab.doc.session.get(*id).map(|annot| &annot.kind), Some(AnnotKind::Text { .. }))
+                    matches!(
+                        tab.doc.session.get(*id).map(|annot| &annot.kind),
+                        Some(AnnotKind::Text { .. })
+                    )
                 })
             });
             if let Some(id) = text {
@@ -728,7 +782,10 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
         Tool::Math => {
             let math = hit.filter(|id| {
                 app.tab().is_some_and(|tab| {
-                    matches!(tab.doc.session.get(*id).map(|annot| &annot.kind), Some(AnnotKind::Math { .. }))
+                    matches!(
+                        tab.doc.session.get(*id).map(|annot| &annot.kind),
+                        Some(AnnotKind::Math { .. })
+                    )
                 })
             });
             if let Some(id) = math {
@@ -868,7 +925,9 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             let sized = rect.width() >= 12.0 && rect.height() >= 8.0;
             place_box(app, page, origin, sized.then_some(rect), kind);
         }
-        Drag::Move { id, origin, moved, .. } => {
+        Drag::Move {
+            id, origin, moved, ..
+        } => {
             let changed = moved
                 && app
                     .tab()
@@ -942,8 +1001,15 @@ fn place_box_tab(
     let size = settings.text_size;
     let color = settings.text_color;
     let rect = rect.unwrap_or_else(|| match kind {
-        CreateKind::Text => PdfRect::new(point.x, point.y, point.x + 200.0, point.y + size * 1.8 + 4.0),
-        CreateKind::Math => PdfRect::new(point.x, point.y, point.x + 88.0, point.y + size * 1.6 + 8.0),
+        CreateKind::Text => PdfRect::new(
+            point.x,
+            point.y,
+            point.x + 200.0,
+            point.y + size * 1.8 + 4.0,
+        ),
+        CreateKind::Math => {
+            PdfRect::new(point.x, point.y, point.x + 88.0, point.y + size * 1.6 + 8.0)
+        }
     });
     let id = match kind {
         CreateKind::Text => tab.doc.session.insert(
@@ -976,7 +1042,12 @@ fn place_box_tab(
     }
 }
 
-fn place_note_tab(tab: &mut Tab, page: usize, point: PdfPoint, settings: &crate::settings::Settings) {
+fn place_note_tab(
+    tab: &mut Tab,
+    page: usize,
+    point: PdfPoint,
+    settings: &crate::settings::Settings,
+) {
     let color = settings.highlight_color;
     let rect = PdfRect::new(point.x, point.y, point.x + 26.0, point.y + 26.0);
     let id = tab.doc.session.insert(
@@ -1014,10 +1085,14 @@ fn place_note(app: &mut MarkerApp, page: usize, point: PdfPoint) {
 
 fn handle_at(doc: &DocState, id: u64, screen: Pos2, view: Rect, radius: f32) -> Option<Handle> {
     let annot = doc.session.get(id)?;
-    annot.kind.handles().into_iter().find_map(|(handle, point)| {
-        let at = doc.page_to_screen(annot.page, point, view);
-        (at.distance(screen) <= radius).then_some(handle)
-    })
+    annot
+        .kind
+        .handles()
+        .into_iter()
+        .find_map(|(handle, point)| {
+            let at = doc.page_to_screen(annot.page, point, view);
+            (at.distance(screen) <= radius).then_some(handle)
+        })
 }
 
 fn resize_target(
@@ -1064,8 +1139,8 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
     let (first, last) = visible_pages(&tab.doc, view);
     for page in first..=last {
         let rect = tab.doc.page_rect(page, view);
-        let shadow = rect.translate(Vec2::new(0.0, 2.0));
-        painter.rect_filled(shadow, 2.0, Color32::from_black_alpha(50));
+        let shadow = rect.expand(2.0).translate(Vec2::new(0.0, 4.0));
+        painter.rect_filled(shadow, 6.0, Color32::from_black_alpha(28));
         painter.rect_filled(rect, 1.0, Color32::WHITE);
         paint_tiles(&tab.doc, painter, page, view, render_scale);
         paint_search_hits(tab, painter, page, view);
@@ -1075,7 +1150,7 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
             egui::Align2::CENTER_TOP,
             format!("{}", page + 1),
             FontId::new(11.0, FontFamily::Proportional),
-            Color32::from_white_alpha(90),
+            Color32::from_white_alpha(120),
         );
     }
     paint_drag_preview(app, painter, view);
@@ -1100,9 +1175,19 @@ fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
     (first.unwrap_or(0), last)
 }
 
-fn paint_tiles(doc: &DocState, painter: &egui::Painter, page: usize, view: Rect, render_scale: f32) {
+fn paint_tiles(
+    doc: &DocState,
+    painter: &egui::Painter,
+    page: usize,
+    view: Rect,
+    render_scale: f32,
+) {
     let target_bits = render_scale.to_bits();
-    let mut tiles: Vec<_> = doc.tiles.iter().filter(|(key, _)| key.page == page).collect();
+    let mut tiles: Vec<_> = doc
+        .tiles
+        .iter()
+        .filter(|(key, _)| key.page == page)
+        .collect();
     tiles.sort_by_key(|(key, _)| (key.scale_bits == target_bits, key.scale_bits));
     for (_key, tile) in tiles {
         let x0 = tile.x as f32 / tile.scale;
@@ -1150,7 +1235,13 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
     };
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
-    for annot in tab.doc.session.annotations.iter().filter(|annot| annot.page == page) {
+    for annot in tab
+        .doc
+        .session
+        .annotations
+        .iter()
+        .filter(|annot| annot.page == page)
+    {
         let selected = tab.selected == Some(annot.id);
         let editing = tab.editing == Some(annot.id);
         match &annot.kind {
@@ -1161,7 +1252,12 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                     painter.rect_filled(pdf_rect_screen(&tab.doc, page, *quad, view), 1.0, fill);
                 }
             }
-            AnnotKind::Text { rect, content, size, color } => {
+            AnnotKind::Text {
+                rect,
+                content,
+                size,
+                color,
+            } => {
                 if !editing {
                     let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
                     let text_painter = painter.with_clip_rect(screen);
@@ -1201,7 +1297,11 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                     ShapeKind::Rect => {
                         let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
                         if let Some(fill) = fill {
-                            painter.rect_filled(screen, 0.0, fill.to_color32().gamma_multiply(0.25));
+                            painter.rect_filled(
+                                screen,
+                                0.0,
+                                fill.to_color32().gamma_multiply(0.25),
+                            );
                         }
                         painter.rect_stroke(screen, 0.0, stroke, egui::StrokeKind::Inside);
                     }
@@ -1231,7 +1331,8 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                 let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
                 if let Some(preview) = tab.previews.get(&annot.id) {
                     if let Some(texture) = preview.texture.as_ref() {
-                        let dest = fit_math(screen, preview.width_pt, preview.height_pt, tab.doc.scale);
+                        let dest =
+                            fit_math(screen, preview.width_pt, preview.height_pt, tab.doc.scale);
                         painter.image(
                             texture.id(),
                             dest,
@@ -1346,11 +1447,21 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
                     painter.line_segment([a, b], stroke);
                 }
                 ShapeKind::Rect => {
-                    let rect = pdf_rect_screen(&tab.doc, *page, PdfRect::from_points(*origin, *current), view);
+                    let rect = pdf_rect_screen(
+                        &tab.doc,
+                        *page,
+                        PdfRect::from_points(*origin, *current),
+                        view,
+                    );
                     painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
                 }
                 ShapeKind::Ellipse => {
-                    let rect = pdf_rect_screen(&tab.doc, *page, PdfRect::from_points(*origin, *current), view);
+                    let rect = pdf_rect_screen(
+                        &tab.doc,
+                        *page,
+                        PdfRect::from_points(*origin, *current),
+                        view,
+                    );
                     painter.add(egui::Shape::ellipse_stroke(
                         rect.center(),
                         rect.size() * 0.5,
@@ -1365,7 +1476,12 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
             current,
             ..
         }) => {
-            let rect = pdf_rect_screen(&tab.doc, *page, PdfRect::from_points(*origin, *current), view);
+            let rect = pdf_rect_screen(
+                &tab.doc,
+                *page,
+                PdfRect::from_points(*origin, *current),
+                view,
+            );
             painter.rect_stroke(
                 rect,
                 1.0,
@@ -1422,13 +1538,17 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
             tab.doc.gen,
             tab.doc.scale,
             tab.focus_edit,
-            tab.previews.get(&id).and_then(|preview| preview.error.clone()),
+            tab.previews
+                .get(&id)
+                .and_then(|preview| preview.error.clone()),
             annot.kind.clone(),
         )
     };
     let (id, page, gen, scale, focus, error, kind) = snapshot;
     match kind {
-        AnnotKind::Text { rect, size, color, .. } => {
+        AnnotKind::Text {
+            rect, size, color, ..
+        } => {
             let screen = {
                 let Some(tab) = app.tab() else {
                     return;
@@ -1453,7 +1573,10 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                     };
                     let response = ui.add(
                         TextEdit::multiline(content)
-                            .font(FontId::new((size * scale).max(8.0), FontFamily::Proportional))
+                            .font(FontId::new(
+                                (size * scale).max(8.0),
+                                FontFamily::Proportional,
+                            ))
                             .text_color(color.to_color32())
                             .desired_width(screen.width().max(24.0))
                             .desired_rows(1)
@@ -1495,12 +1618,13 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 pdf_rect_screen(&tab.doc, page, rect, view)
             };
             let mut changed = false;
+            let mut cycled = false;
             egui::Area::new(Id::new(("marker-math", gen, id)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(Pos2::new(screen.min.x, screen.max.y + 4.0))
                 .constrain(false)
                 .show(ctx, |ui| {
-                    ui.set_max_width(screen.width().max(180.0).max(240.0));
+                    ui.set_max_width(screen.width().max(180.0).max(280.0));
                     let Some(tab) = app.tab_mut() else {
                         return;
                     };
@@ -1509,20 +1633,46 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                     else {
                         return;
                     };
-                    ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
+                        ui.label(
+                            egui::RichText::new("Tab cycles templates · math mode")
+                                .weak()
+                                .size(10.0),
+                        );
+                    });
                     let response = ui.add(
                         TextEdit::multiline(source)
                             .font(FontId::new(13.0, FontFamily::Monospace))
-                            .desired_width(screen.width().max(240.0))
-                            .desired_rows(2)
-                            .hint_text(r"\frac{1}{2}"),
+                            .desired_width(screen.width().max(280.0))
+                            .desired_rows(3)
+                            .hint_text(r"\frac{1}{2}  or  Tab for templates"),
                     );
                     if focus {
                         response.request_focus();
                     }
                     changed = response.changed();
+                    if response.has_focus() {
+                        let tabbed = ui.input_mut(|input| {
+                            if input.key_pressed(egui::Key::Tab) && !input.modifiers.command {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                                true
+                            } else {
+                                false
+                            }
+                        });
+                        if tabbed {
+                            *source = crate::math::cycle_math_template(source).to_string();
+                            changed = true;
+                            cycled = true;
+                        }
+                    }
                     if let Some(error) = &error {
-                        ui.label(egui::RichText::new(error).color(Color32::from_rgb(220, 110, 100)).size(11.0));
+                        ui.label(
+                            egui::RichText::new(error)
+                                .color(Color32::from_rgb(220, 110, 100))
+                                .size(11.0),
+                        );
                     }
                 });
             if let Some(tab) = app.tab_mut() {
@@ -1538,6 +1688,13 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
             }
             if changed {
                 app.queue_math(id);
+            }
+            if cycled {
+                // Keep focus after replacing the source via Tab.
+                if let Some(tab) = app.tab_mut() {
+                    tab.focus_edit = true;
+                    tab.editing = Some(id);
+                }
             }
         }
         AnnotKind::Note { rect, .. } => {
@@ -1664,7 +1821,8 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
         Pos2::new(track.left(), track.top() + travel * t),
         Vec2::new(track.width(), thumb_h),
     );
-    ui.painter().rect_filled(thumb, 3.0, Color32::from_white_alpha(80));
+    ui.painter()
+        .rect_filled(thumb, 3.0, Color32::from_white_alpha(80));
     let response = ui.interact(track, Id::new("marker-scroll"), Sense::click_and_drag());
     if response.dragged() {
         tab.doc.scroll_y += response.drag_delta().y / travel * (height - view.height());

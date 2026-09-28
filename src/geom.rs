@@ -36,7 +36,10 @@ impl PdfRect {
         }
     }
 
-    pub fn from_minmax(xs: impl IntoIterator<Item = f32>, ys: impl IntoIterator<Item = f32>) -> Self {
+    pub fn from_minmax(
+        xs: impl IntoIterator<Item = f32>,
+        ys: impl IntoIterator<Item = f32>,
+    ) -> Self {
         let mut xs = xs.into_iter();
         let mut ys = ys.into_iter();
         let (Some(mut min_x), Some(mut min_y)) = (xs.next(), ys.next()) else {
@@ -83,7 +86,6 @@ impl PdfRect {
             self.y1 + amount,
         )
     }
-
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -9,8 +9,13 @@ use crate::geom::PdfRect;
 use super::engine::{DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage};
 
 pub enum PdfJob {
-    Open { gen: u64, path: PathBuf },
-    Close { gen: u64 },
+    Open {
+        gen: u64,
+        path: PathBuf,
+    },
+    Close {
+        gen: u64,
+    },
     Tile {
         gen: u64,
         page: usize,
@@ -18,20 +23,33 @@ pub enum PdfJob {
         col: i32,
         row: i32,
     },
-    Glyphs { gen: u64, page: usize },
+    Glyphs {
+        gen: u64,
+        page: usize,
+    },
     Search {
         gen: u64,
         seq: u64,
         needle: String,
         from: usize,
     },
-    Save { gen: u64, snapshot: SaveSnapshot },
+    Save {
+        gen: u64,
+        snapshot: SaveSnapshot,
+    },
+    InsertPage {
+        gen: u64,
+        after: usize,
+    },
     Shutdown,
 }
 
 pub enum PdfReply {
     Opened(Result<OpenedDoc, String>),
-    Tile { gen: u64, tile: TileImage },
+    Tile {
+        gen: u64,
+        tile: TileImage,
+    },
     TileMiss {
         gen: u64,
         page: usize,
@@ -50,8 +68,19 @@ pub enum PdfReply {
         hits: Vec<(usize, Vec<PdfRect>)>,
         done: bool,
     },
-    Saved { gen: u64, result: Result<Vec<SavedXref>, String> },
-    Failed { gen: Option<u64>, message: String },
+    Saved {
+        gen: u64,
+        result: Result<Vec<SavedXref>, String>,
+    },
+    PageInserted {
+        gen: u64,
+        index: usize,
+        pages: Vec<PageInfo>,
+    },
+    Failed {
+        gen: Option<u64>,
+        message: String,
+    },
 }
 
 pub struct OpenedDoc {
@@ -117,6 +146,10 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::Save { gen, snapshot });
     }
 
+    pub fn insert_page(&self, gen: u64, after: usize) {
+        let _ = self.jobs.send(PdfJob::InsertPage { gen, after });
+    }
+
     pub fn poll(&self) -> Vec<PdfReply> {
         let mut replies = Vec::new();
         while let Ok(reply) = self.replies.try_recv() {
@@ -134,7 +167,11 @@ impl Drop for PdfWorker {
 
 fn job_rank(job: &PdfJob) -> u8 {
     match job {
-        PdfJob::Shutdown | PdfJob::Open { .. } | PdfJob::Close { .. } | PdfJob::Save { .. } => 0,
+        PdfJob::Shutdown
+        | PdfJob::Open { .. }
+        | PdfJob::Close { .. }
+        | PdfJob::Save { .. }
+        | PdfJob::InsertPage { .. } => 0,
         PdfJob::Tile { .. } => 1,
         PdfJob::Search { .. } => 2,
         PdfJob::Glyphs { .. } => 3,
@@ -297,6 +334,26 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                 };
                 let result = engine.save(&snapshot);
                 let _ = replies.send(PdfReply::Saved { gen, result });
+            }
+            PdfJob::InsertPage { gen, after } => {
+                let Some(engine) = engines.get_mut(&gen) else {
+                    let _ = replies.send(PdfReply::Failed {
+                        gen: Some(gen),
+                        message: "No document is open.".into(),
+                    });
+                    continue;
+                };
+                match engine.insert_blank_page(after) {
+                    Ok((index, pages)) => {
+                        let _ = replies.send(PdfReply::PageInserted { gen, index, pages });
+                    }
+                    Err(message) => {
+                        let _ = replies.send(PdfReply::Failed {
+                            gen: Some(gen),
+                            message,
+                        });
+                    }
+                }
             }
         }
     }

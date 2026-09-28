@@ -131,6 +131,46 @@ pub(crate) enum Tool {
     Math,
 }
 
+impl Tool {
+    pub(crate) const ALL: [Tool; 8] = [
+        Tool::Select,
+        Tool::Highlight,
+        Tool::Text,
+        Tool::Note,
+        Tool::Rect,
+        Tool::Ellipse,
+        Tool::Line,
+        Tool::Math,
+    ];
+
+    /// Bare letter that selects this tool. `H` and `L` stay as vim panning.
+    pub(crate) fn shortcut(self) -> Key {
+        match self {
+            Tool::Select => Key::V,
+            Tool::Highlight => Key::A,
+            Tool::Text => Key::T,
+            Tool::Note => Key::N,
+            Tool::Rect => Key::R,
+            Tool::Ellipse => Key::E,
+            Tool::Line => Key::I,
+            Tool::Math => Key::M,
+        }
+    }
+
+    pub(crate) fn hint(self) -> &'static str {
+        match self {
+            Tool::Select => "Move and resize",
+            Tool::Highlight => "Mark text",
+            Tool::Text => "Write on the page",
+            Tool::Note => "Sticky note",
+            Tool::Rect => "Rectangle",
+            Tool::Ellipse => "Ellipse",
+            Tool::Line => "Line",
+            Tool::Math => "Equation",
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CreateKind {
     Text,
@@ -240,7 +280,8 @@ impl MarkerApp {
 
     pub(crate) fn queue_math(&mut self, id: u64) {
         if let Some(tab) = self.tab() {
-            self.math_deadline = Some((tab.doc.gen, id, Instant::now() + Duration::from_millis(160)));
+            self.math_deadline =
+                Some((tab.doc.gen, id, Instant::now() + Duration::from_millis(160)));
         }
     }
 
@@ -435,7 +476,10 @@ impl MarkerApp {
         tab.editing = None;
         tab.undo_edit = None;
         tab.menu = None;
-        if tab.selected.is_some_and(|id| tab.doc.session.get(id).is_none()) {
+        if tab
+            .selected
+            .is_some_and(|id| tab.doc.session.get(id).is_none())
+        {
             tab.selected = None;
         }
         if !matches!(tab.save, SaveState::Saving) {
@@ -459,7 +503,10 @@ impl MarkerApp {
         tab.editing = None;
         tab.undo_edit = None;
         tab.menu = None;
-        if tab.selected.is_some_and(|id| tab.doc.session.get(id).is_none()) {
+        if tab
+            .selected
+            .is_some_and(|id| tab.doc.session.get(id).is_none())
+        {
             tab.selected = None;
         }
         if !matches!(tab.save, SaveState::Saving) {
@@ -525,7 +572,10 @@ impl MarkerApp {
                 let count = self.vim_count;
                 self.vim_count = 0;
                 self.vim_g = false;
-                let last = self.doc().map(|doc| doc.pages.len().saturating_sub(1)).unwrap_or(0);
+                let last = self
+                    .doc()
+                    .map(|doc| doc.pages.len().saturating_sub(1))
+                    .unwrap_or(0);
                 let page = if count == 0 {
                     last
                 } else {
@@ -567,9 +617,11 @@ impl MarkerApp {
             self.nudge(step * n, 0.0);
             return true;
         }
-        if input.events.iter().any(|event| {
-            matches!(event, egui::Event::Key { pressed: true, .. })
-        }) {
+        if input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::Key { pressed: true, .. }))
+        {
             self.vim_count = 0;
             self.vim_g = false;
         }
@@ -638,7 +690,7 @@ impl eframe::App for MarkerApp {
         self.autosave(ctx);
         ui::chrome(self, ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(22, 22, 24)))
+            .frame(egui::Frame::NONE.fill(ui::BACKDROP))
             .show(ctx, |ui| {
                 if self.tab().is_some() {
                     viewport(self, ui);
@@ -693,7 +745,8 @@ impl MarkerApp {
                     self.opening.remove(&opened.gen);
                     if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
                         self.worker.close(opened.gen);
-                        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.path == opened.path)
+                        if let Some(index) =
+                            self.tabs.iter().position(|tab| tab.doc.path == opened.path)
                         {
                             self.active = index;
                         }
@@ -800,7 +853,12 @@ impl MarkerApp {
                     tab.doc.glyphs.insert(page, glyphs);
                 }
             }
-            PdfReply::Search { gen, seq, hits, done } => {
+            PdfReply::Search {
+                gen,
+                seq,
+                hits,
+                done,
+            } => {
                 if let Some(tab) = self.tab_by_gen_mut(gen) {
                     if tab.search.seq == seq {
                         let first = tab.search.hits.is_empty() && !hits.is_empty();
@@ -816,6 +874,9 @@ impl MarkerApp {
                 }
             }
             PdfReply::Saved { gen, result } => self.on_saved(gen, result),
+            PdfReply::PageInserted { gen, index, pages } => {
+                self.on_page_inserted(gen, index, pages);
+            }
             PdfReply::Failed { gen, message } => {
                 if let Some(gen) = gen {
                     self.opening.remove(&gen);
@@ -827,6 +888,44 @@ impl MarkerApp {
                 self.error = Some(message);
             }
         }
+    }
+
+    fn on_page_inserted(&mut self, gen: u64, index: usize, pages: Vec<crate::pdf::PageInfo>) {
+        let Some(tab) = self.tab_by_gen_mut(gen) else {
+            return;
+        };
+        tab.doc.session.shift_pages_from(index);
+        tab.doc.pages = pages;
+        tab.doc.tops = DocState::rebuild_tops(&tab.doc.pages);
+        tab.doc.tiles.clear();
+        tab.inflight.clear();
+        tab.glyphs_waiting.clear();
+        // Glyphs after the insert point move with the pages.
+        let glyphs = std::mem::take(&mut tab.doc.glyphs);
+        tab.doc.glyphs.clear();
+        for (page, list) in glyphs {
+            let page = if page >= index { page + 1 } else { page };
+            tab.doc.glyphs.insert(page, list);
+        }
+        for (page, _) in &mut tab.search.hits {
+            if *page >= index {
+                *page += 1;
+            }
+        }
+        tab.pending_jump = Some((index, Some(0.0)));
+        self.error = None;
+    }
+
+    pub(crate) fn insert_page_after_current(&mut self) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        if matches!(tab.save, SaveState::Saving) {
+            return;
+        }
+        let gen = tab.doc.gen;
+        let after = tab.doc.current_page(self.view_rect.height().max(1.0));
+        self.worker.insert_page(gen, after);
     }
 
     fn on_saved(&mut self, gen: u64, result: Result<Vec<crate::pdf::SavedXref>, String>) {
@@ -876,26 +975,24 @@ impl MarkerApp {
     }
 
     fn on_math(&mut self, ctx: &egui::Context, render: MathRender) {
-        let snapshot = self.tabs.iter().find(|tab| tab.doc.gen == render.gen).and_then(|tab| {
-            let annot = tab.doc.session.get(render.id)?;
-            let AnnotKind::Math {
-                source,
-                size,
-                color,
-                auto_size,
-                rect,
-            } = &annot.kind
-            else {
-                return None;
-            };
-            Some((
-                source.clone(),
-                *size,
-                *color,
-                *auto_size,
-                *rect,
-            ))
-        });
+        let snapshot = self
+            .tabs
+            .iter()
+            .find(|tab| tab.doc.gen == render.gen)
+            .and_then(|tab| {
+                let annot = tab.doc.session.get(render.id)?;
+                let AnnotKind::Math {
+                    source,
+                    size,
+                    color,
+                    auto_size,
+                    rect,
+                } = &annot.kind
+                else {
+                    return None;
+                };
+                Some((source.clone(), *size, *color, *auto_size, *rect))
+            });
         let Some((source, size, color, auto_size, rect)) = snapshot else {
             if let Some(tab) = self.tab_by_gen_mut(render.gen) {
                 tab.previews.remove(&render.id);
@@ -1008,7 +1105,13 @@ impl MarkerApp {
             let Some(annot) = tab.doc.session.get(id) else {
                 return;
             };
-            let AnnotKind::Math { source, size, color, .. } = &annot.kind else {
+            let AnnotKind::Math {
+                source,
+                size,
+                color,
+                ..
+            } = &annot.kind
+            else {
                 return;
             };
             if source.trim().is_empty() {
@@ -1133,6 +1236,13 @@ impl MarkerApp {
         if ctx.input(|input| input.key_pressed(Key::G) && input.modifiers.command) {
             self.page_focus = true;
         }
+        if ctx.input(|input| {
+            input.key_pressed(Key::Enter)
+                && input.modifiers.command
+                && input.modifiers.shift
+        }) {
+            self.insert_page_after_current();
+        }
         if ctx.input(|input| input.key_pressed(Key::W) && input.modifiers.command) {
             let active = self.active;
             self.close_tab(active);
@@ -1187,39 +1297,40 @@ impl MarkerApp {
             if input.key_pressed(Key::Slash) {
                 self.open_search();
             }
-            if !vim && input.key_pressed(Key::N) && !input.modifiers.shift {
-                if self.tab().is_some_and(|tab| tab.search.open && !tab.search.hits.is_empty()) {
-                    search_delta = Some(1);
-                } else {
-                    self.tool = Tool::Note;
+            if !vim {
+                for tool in Tool::ALL {
+                    if !input.key_pressed(tool.shortcut()) {
+                        continue;
+                    }
+                    if tool == Tool::Note && input.modifiers.shift {
+                        continue;
+                    }
+                    if tool == Tool::Note
+                        && self
+                            .tab()
+                            .is_some_and(|tab| tab.search.open && !tab.search.hits.is_empty())
+                    {
+                        search_delta = Some(1);
+                        continue;
+                    }
+                    self.tool = tool;
                 }
             }
-            if input.key_pressed(Key::N) && input.modifiers.shift {
+            if input.key_pressed(Tool::Note.shortcut()) && input.modifiers.shift {
                 if self.tab().is_some_and(|tab| tab.search.open) {
                     search_delta = Some(-1);
                 }
             }
-            if !vim && input.key_pressed(Key::T) {
-                self.tool = Tool::Text;
-            }
-            if !vim && input.key_pressed(Key::R) {
-                self.tool = Tool::Rect;
-            }
-            if !vim && input.key_pressed(Key::E) {
-                self.tool = Tool::Ellipse;
-            }
-            if !vim && input.key_pressed(Key::M) {
-                self.tool = Tool::Math;
-            }
-            if !vim && input.key_pressed(Key::V) {
-                self.tool = Tool::Select;
-            }
             if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
-                if self.tab().is_some_and(|tab| tab.editing.is_none() && tab.selected.is_some()) {
+                if self
+                    .tab()
+                    .is_some_and(|tab| tab.editing.is_none() && tab.selected.is_some())
+                {
                     delete_selected = true;
                 }
             }
-            if input.modifiers.command && (input.key_pressed(Key::Equals) || input.key_pressed(Key::Plus))
+            if input.modifiers.command
+                && (input.key_pressed(Key::Equals) || input.key_pressed(Key::Plus))
             {
                 zoom = Some(1.1);
             }
@@ -1284,7 +1395,9 @@ impl MarkerApp {
                 }
                 tab.force_save
                     || match tab.save {
-                        SaveState::Dirty { since } => since.elapsed() >= Duration::from_millis(1500),
+                        SaveState::Dirty { since } => {
+                            since.elapsed() >= Duration::from_millis(1500)
+                        }
                         SaveState::Failed { .. } => true,
                         _ => false,
                     }
@@ -1335,7 +1448,10 @@ impl MarkerApp {
                 let mut math_pdfs = HashMap::new();
                 for annot in &upserts {
                     if let AnnotKind::Math { .. } = annot.kind {
-                        if let Some(pdf) = tab.previews.get(&annot.id).and_then(|preview| preview.pdf.clone())
+                        if let Some(pdf) = tab
+                            .previews
+                            .get(&annot.id)
+                            .and_then(|preview| preview.pdf.clone())
                         {
                             math_pdfs.insert(annot.id, pdf);
                         }
@@ -1444,7 +1560,9 @@ impl MarkerApp {
             if let Some(id) = tab.selected {
                 if let Some(annot) = tab.doc.session.get(id) {
                     match &annot.kind {
-                        AnnotKind::Text { size, .. } | AnnotKind::Math { size, .. } => return *size,
+                        AnnotKind::Text { size, .. } | AnnotKind::Math { size, .. } => {
+                            return *size
+                        }
                         _ => {}
                     }
                 }
@@ -1456,7 +1574,9 @@ impl MarkerApp {
     fn active_stroke(&self) -> f32 {
         if let Some(tab) = self.tab() {
             if let Some(id) = tab.selected {
-                if let Some(AnnotKind::Shape { width, .. }) = tab.doc.session.get(id).map(|a| &a.kind) {
+                if let Some(AnnotKind::Shape { width, .. }) =
+                    tab.doc.session.get(id).map(|a| &a.kind)
+                {
                     return *width;
                 }
             }
@@ -1597,7 +1717,11 @@ impl MarkerApp {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .unwrap_or("document.pdf");
-                let dirty = if tab.doc.session.is_dirty() { " •" } else { "" };
+                let dirty = if tab.doc.session.is_dirty() {
+                    " •"
+                } else {
+                    ""
+                };
                 format!("Marker — {name}{dirty}")
             }
             None => "Marker".into(),
@@ -1618,7 +1742,9 @@ fn math_ready(tab: &Tab) -> bool {
             return true;
         }
         match tab.previews.get(&annot.id) {
-            Some(preview) if !preview.pending && (preview.pdf.is_some() || preview.error.is_some()) => {
+            Some(preview)
+                if !preview.pending && (preview.pdf.is_some() || preview.error.is_some()) =>
+            {
                 true
             }
             _ => false,
@@ -1630,7 +1756,13 @@ fn needs_math(tab: &Tab, id: u64) -> bool {
     let Some(annot) = tab.doc.session.get(id) else {
         return false;
     };
-    let AnnotKind::Math { source, size, color, .. } = &annot.kind else {
+    let AnnotKind::Math {
+        source,
+        size,
+        color,
+        ..
+    } = &annot.kind
+    else {
         return false;
     };
     if source.trim().is_empty() {

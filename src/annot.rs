@@ -27,7 +27,9 @@ pub enum ShapeKind {
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 pub enum FutureKind {
-    Image { rect: PdfRect },
+    Image {
+        rect: PdfRect,
+    },
     Ink {
         color: Rgb,
         width: f32,
@@ -96,12 +98,14 @@ impl AnnotKind {
         match self {
             Self::Highlight { quads, .. } => {
                 let first = *quads.first()?;
-                Some(quads.iter().skip(1).fold(first, |acc, q| PdfRect::new(
-                    acc.x0.min(q.x0),
-                    acc.y0.min(q.y0),
-                    acc.x1.max(q.x1),
-                    acc.y1.max(q.y1),
-                )))
+                Some(quads.iter().skip(1).fold(first, |acc, q| {
+                    PdfRect::new(
+                        acc.x0.min(q.x0),
+                        acc.y0.min(q.y0),
+                        acc.x1.max(q.x1),
+                        acc.y1.max(q.y1),
+                    )
+                }))
             }
             Self::Text { rect, .. } | Self::Note { rect, .. } | Self::Math { rect, .. } => {
                 Some(*rect)
@@ -150,7 +154,9 @@ impl AnnotKind {
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
                 *rect = rect.translate(dx, dy);
             }
-            Self::Shape { rect, start, end, .. } => {
+            Self::Shape {
+                rect, start, end, ..
+            } => {
                 *rect = rect.translate(dx, dy);
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
@@ -267,6 +273,20 @@ impl Session {
     pub fn is_dirty(&self) -> bool {
         !self.pending_deletes.is_empty() || self.annotations.iter().any(|a| a.dirty)
     }
+
+    /// After a blank page is inserted at `at`, bump later page indices.
+    pub fn shift_pages_from(&mut self, at: usize) {
+        for annot in &mut self.annotations {
+            if annot.page >= at {
+                annot.page += 1;
+            }
+        }
+        for (page, _) in &mut self.pending_deletes {
+            if *page >= at {
+                *page += 1;
+            }
+        }
+    }
 }
 
 /// Put `snap` back in place of `current`, keeping xrefs learned since the snapshot
@@ -380,9 +400,7 @@ impl AnnotKind {
                 end,
                 ..
             } => vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)],
-            Self::Text { rect, .. }
-            | Self::Math { rect, .. }
-            | Self::Shape { rect, .. } => {
+            Self::Text { rect, .. } | Self::Math { rect, .. } | Self::Shape { rect, .. } => {
                 vec![
                     (Handle::Nw, PdfPoint::new(rect.x0, rect.y0)),
                     (Handle::Ne, PdfPoint::new(rect.x1, rect.y0)),
@@ -411,9 +429,7 @@ impl AnnotKind {
                 }
                 *rect = PdfRect::from_points(*start, *end);
             }
-            Self::Text { rect, .. }
-            | Self::Math { rect, .. }
-            | Self::Shape { rect, .. } => {
+            Self::Text { rect, .. } | Self::Math { rect, .. } | Self::Shape { rect, .. } => {
                 let mut x0 = rect.x0;
                 let mut y0 = rect.y0;
                 let mut x1 = rect.x1;

@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
-    AnnotationDefaultAppearance, AnnotationFlags, AnnotationTextAlign, PdfAnnotation, PdfAnnotationType,
-    PdfDocument, PdfObject, PdfPage, PdfWriteOptions,
+    AnnotationDefaultAppearance, AnnotationFlags, AnnotationTextAlign, PdfAnnotation,
+    PdfAnnotationType, PdfDocument, PdfObject, PdfPage, PdfWriteOptions,
 };
 use mupdf::{
-    Colorspace, DestinationKind, Device, DisplayList, IRect, Matrix, Outline, Pixmap, Point, Quad, Rect,
-    StructuredText, TextBlockContent, TextPageFlags,
+    Colorspace, DestinationKind, Device, DisplayList, IRect, Matrix, Outline, Pixmap, Point, Quad,
+    Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
 };
 
 use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind, Word};
@@ -101,10 +101,7 @@ impl DocumentEngine {
                 y1: bounds.y1,
             });
         }
-        let outline = doc
-            .outlines()
-            .map(convert_outline)
-            .unwrap_or_default();
+        let outline = doc.outlines().map(convert_outline).unwrap_or_default();
         let annotations = import_annotations(&doc).map_err(show)?;
         Ok(LoadedPdf {
             engine: Self {
@@ -219,6 +216,52 @@ impl DocumentEngine {
         saved
     }
 
+    /// Insert a blank page after `after` (0-based). Returns the new page index.
+    /// Size matches `after` when present, otherwise the first page / A4.
+    pub fn insert_blank_page(&mut self, after: usize) -> Result<(usize, Vec<PageInfo>), String> {
+        let template = self
+            .pages
+            .get(after.min(self.pages.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(PageInfo {
+                x0: 0.0,
+                y0: 0.0,
+                x1: Size::A4.width,
+                y1: Size::A4.height,
+            });
+        let insert_at = if self.pages.is_empty() {
+            0
+        } else {
+            (after + 1).min(self.pages.len())
+        };
+        let size = Size::new(template.width().max(1.0), template.height().max(1.0));
+        self.doc
+            .new_page_at(insert_at as i32, size)
+            .map_err(show)?;
+        self.lists.clear();
+        self.list_order.clear();
+        self.refresh_pages()?;
+        self.persist()?;
+        Ok((insert_at, self.pages.clone()))
+    }
+
+    fn refresh_pages(&mut self) -> Result<(), String> {
+        let count = self.doc.page_count().map_err(show)?;
+        let mut pages = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let page = self.doc.load_pdf_page(index).map_err(show)?;
+            let bounds = page.bounds().map_err(show)?;
+            pages.push(PageInfo {
+                x0: bounds.x0,
+                y0: bounds.y0,
+                x1: bounds.x1,
+                y1: bounds.y1,
+            });
+        }
+        self.pages = pages;
+        Ok(())
+    }
+
     fn display_list(&mut self, page: usize) -> Result<&DisplayList, String> {
         if !self.lists.contains_key(&page) {
             let pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
@@ -233,7 +276,9 @@ impl DocumentEngine {
                 }
             }
         }
-        self.lists.get(&page).ok_or_else(|| "Missing page cache.".into())
+        self.lists
+            .get(&page)
+            .ok_or_else(|| "Missing page cache.".into())
     }
 
     fn apply(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, String> {
@@ -473,12 +518,16 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         .flatten()
         .and_then(|value| value.as_float().ok())
         .filter(|size| size.is_finite() && *size > 0.0);
-    let text_color = marker.get_dict("TextColor").ok().flatten().and_then(|array| {
-        let r = array.get_array(0).ok().flatten()?.as_float().ok()?;
-        let g = array.get_array(1).ok().flatten()?.as_float().ok()?;
-        let b = array.get_array(2).ok().flatten()?.as_float().ok()?;
-        Some(Rgb::from_unit([r, g, b]))
-    });
+    let text_color = marker
+        .get_dict("TextColor")
+        .ok()
+        .flatten()
+        .and_then(|array| {
+            let r = array.get_array(0).ok().flatten()?.as_float().ok()?;
+            let g = array.get_array(1).ok().flatten()?.as_float().ok()?;
+            let b = array.get_array(2).ok().flatten()?.as_float().ok()?;
+            Some(Rgb::from_unit([r, g, b]))
+        });
     let source = marker
         .get_dict("Source")
         .ok()
@@ -623,11 +672,10 @@ fn import_kind(
                 .or(appearance.as_ref().map(|value| value.size))
                 .filter(|size| *size > 0.0)
                 .unwrap_or(12.0);
-            let color = marker.text_color.or_else(|| {
-                appearance
-                    .and_then(|value| value.color)
-                    .and_then(color_rgb)
-            }).unwrap_or(Rgb::new(24, 24, 24));
+            let color = marker
+                .text_color
+                .or_else(|| appearance.and_then(|value| value.color).and_then(color_rgb))
+                .unwrap_or(Rgb::new(24, 24, 24));
             Ok(Some(AnnotKind::Text {
                 rect,
                 content,
@@ -703,7 +751,8 @@ fn upsert(
 }
 
 fn find_annot(page: &PdfPage, xref: i32) -> Option<PdfAnnotation> {
-    page.annotations().find(|annot| annot.xref().ok() == Some(xref))
+    page.annotations()
+        .find(|annot| annot.xref().ok() == Some(xref))
 }
 
 fn delete_xref(page: &mut PdfPage, xref: i32) -> Result<(), mupdf::Error> {
@@ -738,7 +787,12 @@ fn apply_existing(
             write_marker(doc, annot, "Highlight", source.id, None, Some(*color), None)?;
             annot.update()?;
         }
-        AnnotKind::Text { rect, content, size, color } => {
+        AnnotKind::Text {
+            rect,
+            content,
+            size,
+            color,
+        } => {
             if annot.r#type()? != PdfAnnotationType::FreeText {
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
@@ -746,10 +800,22 @@ fn apply_existing(
             annot.set_contents(content)?;
             annot.set_default_appearance("Helv", *size, Some(rgb_color(*color)))?;
             annot.set_quadding(AnnotationTextAlign::Left)?;
-            write_marker(doc, annot, "Text", source.id, Some(*size), Some(*color), None)?;
+            write_marker(
+                doc,
+                annot,
+                "Text",
+                source.id,
+                Some(*size),
+                Some(*color),
+                None,
+            )?;
             annot.update()?;
         }
-        AnnotKind::Note { rect, content, color } => {
+        AnnotKind::Note {
+            rect,
+            content,
+            color,
+        } => {
             if annot.r#type()? != PdfAnnotationType::Text {
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
@@ -759,12 +825,26 @@ fn apply_existing(
             write_marker(doc, annot, "Note", source.id, None, Some(*color), None)?;
             annot.update()?;
         }
-        AnnotKind::Shape { kind, rect, start, end, stroke, fill, width } => {
+        AnnotKind::Shape {
+            kind,
+            rect,
+            start,
+            end,
+            stroke,
+            fill,
+            width,
+        } => {
             apply_shape(annot, *kind, *rect, *start, *end, *stroke, *fill, *width)?;
             write_marker(doc, annot, "Shape", source.id, None, Some(*stroke), None)?;
             annot.update()?;
         }
-        AnnotKind::Math { rect, source: latex, size, color, .. } => {
+        AnnotKind::Math {
+            rect,
+            source: latex,
+            size,
+            color,
+            ..
+        } => {
             if annot.r#type()? != PdfAnnotationType::Stamp {
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
@@ -835,22 +915,50 @@ fn create_annot(
             let mut annot = page.add_highlight_annotation(pdf_quads).map_err(show)?;
             annot.set_color(rgb_color(*color)).map_err(show)?;
             annot.set_opacity(0.45).map_err(show)?;
-            write_marker(doc, &annot, "Highlight", source.id, None, Some(*color), None).map_err(show)?;
+            write_marker(
+                doc,
+                &annot,
+                "Highlight",
+                source.id,
+                None,
+                Some(*color),
+                None,
+            )
+            .map_err(show)?;
             annot
         }
-        AnnotKind::Text { rect, content, size, color } => {
+        AnnotKind::Text {
+            rect,
+            content,
+            size,
+            color,
+        } => {
             let mut annot = page
                 .add_free_text_annotation(to_rect(*rect), content)
                 .map_err(show)?;
             annot
                 .set_default_appearance("Helv", *size, Some(rgb_color(*color)))
                 .map_err(show)?;
-            annot.set_quadding(AnnotationTextAlign::Left).map_err(show)?;
-            write_marker(doc, &annot, "Text", source.id, Some(*size), Some(*color), None)
+            annot
+                .set_quadding(AnnotationTextAlign::Left)
                 .map_err(show)?;
+            write_marker(
+                doc,
+                &annot,
+                "Text",
+                source.id,
+                Some(*size),
+                Some(*color),
+                None,
+            )
+            .map_err(show)?;
             annot
         }
-        AnnotKind::Note { rect, content, color } => {
+        AnnotKind::Note {
+            rect,
+            content,
+            color,
+        } => {
             let mut annot = page
                 .add_text_annotation(to_rect(*rect), content)
                 .map_err(show)?;
@@ -859,7 +967,15 @@ fn create_annot(
             write_marker(doc, &annot, "Note", source.id, None, Some(*color), None).map_err(show)?;
             annot
         }
-        AnnotKind::Shape { kind, rect, start, end, stroke, fill, width } => {
+        AnnotKind::Shape {
+            kind,
+            rect,
+            start,
+            end,
+            stroke,
+            fill,
+            width,
+        } => {
             let mut annot = match kind {
                 ShapeKind::Rect => page.add_square_annotation(to_rect(*rect)).map_err(show)?,
                 ShapeKind::Ellipse => page.add_circle_annotation(to_rect(*rect)).map_err(show)?,
@@ -872,10 +988,17 @@ fn create_annot(
             if let Some(fill) = fill {
                 annot.set_interior_color(rgb_color(*fill)).map_err(show)?;
             }
-            write_marker(doc, &annot, "Shape", source.id, None, Some(*stroke), None).map_err(show)?;
+            write_marker(doc, &annot, "Shape", source.id, None, Some(*stroke), None)
+                .map_err(show)?;
             annot
         }
-        AnnotKind::Math { rect, source: latex, size, color, .. } => {
+        AnnotKind::Math {
+            rect,
+            source: latex,
+            size,
+            color,
+            ..
+        } => {
             let mut annot = page
                 .create_annotation(PdfAnnotationType::Stamp)
                 .map_err(show)?;
@@ -1101,11 +1224,7 @@ mod tests {
             ["ellipse", "highlight", "line", "note", "rect", "text"]
         );
 
-        let after = loaded
-            .engine
-            .render_tile(0, 1.5, 0, 0)
-            .unwrap()
-            .unwrap();
+        let after = loaded.engine.render_tile(0, 1.5, 0, 0).unwrap().unwrap();
         let yellow_after = count_yellow(&after.pixels);
         assert!(
             yellow_after < yellow_before + 40,

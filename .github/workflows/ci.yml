@@ -61,9 +61,10 @@ jobs:
 
   release-build:
     name: Release build
+    # Full --release link is expensive. On master, the Release workflow
+    # builds and publishes; keep this job as a PR packaging signal only.
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Full --release link is expensive; keep it on master and as a PR signal
-    # that packaging still works without waiting for a tag.
     steps:
       - uses: actions/checkout@v4
 
@@ -78,12 +79,3 @@ jobs:
 
       - name: cargo build --release
         run: cargo build --release
-
-      - name: Upload Linux binary artifact
-        if: github.event_name == 'push' && github.ref == 'refs/heads/master'
-        uses: actions/upload-artifact@v4
-        with:
-          name: marker-linux-x86_64
-          path: target/release/marker
-          if-no-files-found: error
-          retention-days: 14

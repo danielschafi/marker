@@ -14,8 +14,15 @@ pub struct Settings {
     pub highlight_color: Rgb,
     pub shape_color: Rgb,
     pub shape_width: f32,
+    /// Annotation tool strip under the tab bar. Tools stay reachable via shortcuts when hidden.
+    #[serde(default = "default_true")]
+    pub toolbar_visible: bool,
     #[serde(default)]
     pub recent: Vec<PathBuf>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for Settings {
@@ -26,6 +33,7 @@ impl Default for Settings {
             highlight_color: Rgb::new(255, 214, 0),
             shape_color: Rgb::new(28, 78, 186),
             shape_width: 1.5,
+            toolbar_visible: true,
             recent: Vec::new(),
         }
     }

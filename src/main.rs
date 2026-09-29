@@ -4,6 +4,7 @@ mod geom;
 mod math;
 mod pdf;
 mod settings;
+mod theme;
 mod ui;
 mod view;
 

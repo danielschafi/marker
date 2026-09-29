@@ -1,0 +1,54 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Build & publish Linux binary
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux dependencies
+        uses: ./.github/actions/install-linux-deps
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: cargo build --release
+        run: cargo build --release
+
+      - name: Package binary
+        run: |
+          set -euo pipefail
+          strip -s target/release/marker
+          install -D target/release/marker "dist/marker-${{ github.ref_name }}-x86_64-unknown-linux-gnu"
+          (cd dist && sha256sum "marker-${{ github.ref_name }}-x86_64-unknown-linux-gnu" > SHA256SUMS)
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: false
+          generate_release_notes: true
+          files: |
+            dist/marker-${{ github.ref_name }}-x86_64-unknown-linux-gnu
+            dist/SHA256SUMS
+          body: |
+            Linux x86_64 release of Marker (egui + MuPDF).
+
+            Runtime shared libraries typically needed on the host:
+            `fontconfig`, `freetype`, `brotli`, `jbig2dec`, `lcms2`, `libjpeg`, `openjpeg2`, `zlib`.
+
+            License: AGPL-3.0-or-later.

@@ -1,0 +1,38 @@
+name: Install Linux build dependencies
+description: >
+  Install apt packages required to build Marker on Ubuntu runners
+  (MuPDF sys-lib features, fontconfig, libclang for bindgen, and
+  common egui/winit headers).
+
+runs:
+  using: composite
+  steps:
+    - name: Install apt packages
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo apt-get update
+        # MuPDF (mupdf-sys) system libraries — matches Cargo.toml sys-lib-* features.
+        # Also fontconfig (mupdf system-fonts / font-kit) and libclang (bindgen).
+        sudo apt-get install -y --no-install-recommends \
+          build-essential \
+          pkg-config \
+          clang \
+          libclang-dev \
+          libfontconfig1-dev \
+          libbrotli-dev \
+          libfreetype6-dev \
+          libharfbuzz-dev \
+          libjbig2dec0-dev \
+          liblcms2-dev \
+          libjpeg-dev \
+          libopenjp2-7-dev \
+          zlib1g-dev \
+          libxkbcommon-dev \
+          libwayland-dev \
+          libx11-dev \
+          libxcursor-dev \
+          libxi-dev \
+          libxrandr-dev \
+          libgl1-mesa-dev \
+          libegl1-mesa-dev

@@ -9,7 +9,7 @@ use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, Sha
 use crate::app::{CreateKind, DocState, Drag, MarkerApp, Tab, Tool};
 use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
-use crate::ui::BACKDROP;
+use crate::theme;
 
 const GAP: f32 = 16.0;
 const PAD: f32 = 24.0;
@@ -172,11 +172,29 @@ impl DocState {
     }
 }
 
-pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui) {
+pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui, focused: bool) {
+    viewport_tab(app, ui, app.active, focused);
+}
+
+pub(crate) fn viewport_tab(
+    app: &mut MarkerApp,
+    ui: &mut egui::Ui,
+    tab_index: usize,
+    focused: bool,
+) {
     let available = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(available, Sense::click_and_drag());
-    app.view_rect = response.rect;
+    if focused {
+        app.view_rect = response.rect;
+    } else {
+        app.split_view_rect = response.rect;
+    }
+
+    let prev = app.active;
+    app.active = tab_index;
+
     let Some(tab) = app.tab_mut() else {
+        app.active = prev;
         return;
     };
     if !tab.doc.fitted && response.rect.width() > 64.0 {
@@ -189,15 +207,31 @@ pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui) {
     tab.doc.clamp_scroll(response.rect);
 
     handle_scroll(app, &response);
-    handle_pointer(app, &response);
+    if focused {
+        handle_pointer(app, &response);
+    }
 
     let painter = ui.painter_at(response.rect);
-    painter.rect_filled(response.rect, 0.0, BACKDROP);
+    painter.rect_filled(response.rect, 0.0, theme::palette(ui.ctx()).backdrop);
     ensure_image_textures(app, ui.ctx());
     paint_document(app, &painter, response.rect);
     paint_scrollbar(app, ui, response.rect);
-    inline_editors(app, ui.ctx(), response.rect);
-    paint_menu(app, ui.ctx());
+    if focused {
+        inline_editors(app, ui.ctx(), response.rect);
+        paint_menu(app, ui.ctx());
+        paint_style_bar(app, ui.ctx(), response.rect);
+    }
+
+    let steal_focus = !focused && (response.clicked() || response.drag_started());
+    app.active = prev;
+    if steal_focus {
+        if let Some(split) = app.split.as_mut() {
+            split.other = prev;
+            split.ratio = 1.0 - split.ratio;
+        }
+        app.active = tab_index;
+        app.view_rect = response.rect;
+    }
 }
 
 fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
@@ -900,6 +934,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 };
             }
             app.seal_undo();
+            app.open_style_bar(id, true);
         }
         Drag::Shape {
             page,
@@ -940,6 +975,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 };
             }
             app.seal_undo();
+            app.open_style_bar(id, true);
         }
         Drag::Create {
             page,
@@ -1013,6 +1049,7 @@ fn place_box(
         if kind == CreateKind::Math {
             app.queue_math(id);
         }
+        app.open_style_bar(id, true);
     }
 }
 
@@ -1808,11 +1845,92 @@ fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         let (page, point) = tab.doc.screen_to_page(pos, view)?;
         tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale)
     });
+    if let Some(id) = hit {
+        app.open_style_bar(id, false);
+        return;
+    }
     if let Some(tab) = app.tab_mut() {
-        if let Some(id) = hit {
-            tab.selected = Some(id);
+        tab.style_bar = None;
+        tab.menu = Some((pos, None));
+    }
+}
+
+fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
+    let Some(bar) = app.tab().and_then(|tab| tab.style_bar) else {
+        return;
+    };
+    if app
+        .tab()
+        .is_none_or(|tab| tab.doc.session.get(bar.id).is_none())
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.style_bar = None;
         }
-        tab.menu = Some((pos, hit));
+        return;
+    }
+
+    let anchor = app.tab().and_then(|tab| {
+        let annot = tab.doc.session.get(bar.id)?;
+        let bounds = annot.bounds()?;
+        let screen = pdf_rect_screen(&tab.doc, annot.page, bounds, view);
+        Some(screen)
+    });
+    let Some(mark) = anchor else {
+        if let Some(tab) = app.tab_mut() {
+            tab.style_bar = None;
+        }
+        return;
+    };
+
+    // Prefer just below the mark; flip above if that would leave the view.
+    let mut pos = Pos2::new(mark.center().x, mark.bottom() + 6.0);
+    let estimated = Vec2::new(168.0, 28.0);
+    if pos.y + estimated.y > view.bottom() - 4.0 {
+        pos.y = mark.top() - estimated.y - 6.0;
+    }
+    pos.x = (pos.x - estimated.x * 0.5)
+        .clamp(view.left() + 4.0, (view.right() - estimated.x - 4.0).max(view.left() + 4.0));
+
+    let mut delete = false;
+    let area = egui::Area::new(Id::new("marker-style-bar"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(pos)
+        .interactable(true)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        delete = app.style_bar_contents(ui);
+                    });
+                });
+        });
+
+    let over_bar = area.response.hovered() || area.response.contains_pointer();
+    if let Some(until) = bar.until {
+        if Instant::now() >= until && !over_bar {
+            if let Some(tab) = app.tab_mut() {
+                tab.style_bar = None;
+            }
+            return;
+        }
+    }
+
+    let right_click = ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
+    let outside = ctx.input(|input| input.pointer.any_click())
+        && !over_bar
+        && !area.response.clicked()
+        && !right_click;
+    if delete {
+        if let Some(tab) = app.tab_mut() {
+            tab.selected = Some(bar.id);
+            tab.style_bar = None;
+        }
+        app.delete_selected();
+    } else if outside {
+        if let Some(tab) = app.tab_mut() {
+            tab.style_bar = None;
+        }
     }
 }
 

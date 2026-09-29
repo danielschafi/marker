@@ -20,9 +20,19 @@ pub(crate) struct MarkerApp {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) active: usize,
     pub(crate) view_rect: egui::Rect,
+    /// Second pane rect when a split is open.
+    pub(crate) split_view_rect: egui::Rect,
+    /// Side-by-side or stacked second document pane.
+    pub(crate) split: Option<SplitState>,
+    /// Right-click menu on a tab pill: (tab index, screen pos).
+    pub(crate) tab_menu: Option<(usize, egui::Pos2)>,
     pub(crate) opening: HashSet<u64>,
     pub(crate) error: Option<String>,
     pub(crate) page_focus: bool,
+    /// Fullscreen reading; chrome auto-hides until the pointer reaches the top edge.
+    pub(crate) zen: bool,
+    /// Keep chrome visible briefly after the pointer leaves the top reveal strip.
+    zen_chrome_until: Option<Instant>,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
@@ -33,6 +43,14 @@ pub(crate) struct MarkerApp {
     dialog_tx: Sender<Option<PathBuf>>,
     dialog_rx: Receiver<Option<PathBuf>>,
     dialog_busy: bool,
+}
+
+/// Two-pane document layout. `active` is the focused tab; `other` is the second pane.
+#[derive(Clone, Copy)]
+pub(crate) struct SplitState {
+    pub other: usize,
+    pub stacked: bool,
+    pub ratio: f32,
 }
 
 pub(crate) struct Tab {
@@ -56,12 +74,22 @@ pub(crate) struct Tab {
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
     pub(crate) menu: Option<(egui::Pos2, Option<u64>)>,
+    /// Compact color/size strip next to an annotation (right-click or just after create).
+    pub(crate) style_bar: Option<StyleBar>,
     pending_undo: Option<Session>,
     undo_edit: Option<u64>,
     undo: Vec<UndoEntry>,
     redo: Vec<UndoEntry>,
     /// In-flight page insert/delete that participates in undo/redo.
     page_op: Option<PendingPageOp>,
+}
+
+/// Floating style controls for one annotation.
+#[derive(Clone, Copy)]
+pub(crate) struct StyleBar {
+    pub(crate) id: u64,
+    /// Auto-hide deadline after create; `None` means stay until dismissed.
+    pub(crate) until: Option<Instant>,
 }
 
 pub(crate) struct DocState {
@@ -260,9 +288,14 @@ impl MarkerApp {
             tabs: Vec::new(),
             active: 0,
             view_rect: egui::Rect::NOTHING,
+            split_view_rect: egui::Rect::NOTHING,
+            split: None,
+            tab_menu: None,
             opening: HashSet::new(),
             error: None,
             page_focus: false,
+            zen: false,
+            zen_chrome_until: None,
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(),
@@ -360,11 +393,56 @@ impl MarkerApp {
         self.worker.close(tab.doc.gen);
         if self.tabs.is_empty() {
             self.active = 0;
-        } else if self.active >= self.tabs.len() {
+            self.split = None;
+            return;
+        }
+        if self.active >= self.tabs.len() {
             self.active = self.tabs.len() - 1;
         } else if self.active > index {
             self.active -= 1;
         }
+        if let Some(mut split) = self.split {
+            if split.other == index {
+                self.split = None;
+            } else {
+                if split.other > index {
+                    split.other -= 1;
+                }
+                if split.other == self.active || split.other >= self.tabs.len() {
+                    self.split = None;
+                } else {
+                    self.split = Some(split);
+                }
+            }
+        }
+    }
+
+    pub(crate) fn split_with(&mut self, other: usize, stacked: bool) {
+        if other >= self.tabs.len() || other == self.active || self.tabs.len() < 2 {
+            return;
+        }
+        self.split = Some(SplitState {
+            other,
+            stacked,
+            ratio: 0.5,
+        });
+    }
+
+    pub(crate) fn unsplit(&mut self) {
+        self.split = None;
+    }
+
+    pub(crate) fn focus_split_other(&mut self) {
+        let Some(split) = self.split else {
+            return;
+        };
+        let other = split.other;
+        self.split = Some(SplitState {
+            other: self.active,
+            stacked: split.stacked,
+            ratio: 1.0 - split.ratio,
+        });
+        self.active = other;
     }
 
     pub(crate) fn fit_width(&mut self) {
@@ -534,6 +612,7 @@ impl MarkerApp {
                 tab.editing = None;
                 tab.undo_edit = None;
                 tab.menu = None;
+                tab.style_bar = None;
                 if tab
                     .selected
                     .is_some_and(|id| tab.doc.session.get(id).is_none())
@@ -582,6 +661,7 @@ impl MarkerApp {
                 tab.editing = None;
                 tab.undo_edit = None;
                 tab.menu = None;
+                tab.style_bar = None;
                 if tab
                     .selected
                     .is_some_and(|id| tab.doc.session.get(id).is_none())
@@ -624,6 +704,7 @@ impl MarkerApp {
             tab.doc.session.remove(id);
             tab.selected = None;
             tab.menu = None;
+            tab.style_bar = None;
             tab.previews.remove(&id);
             tab.image_textures.remove(&id);
             tab.editing = None;
@@ -691,6 +772,7 @@ impl MarkerApp {
         tab.selected = Some(id);
         tab.editing = None;
         tab.menu = None;
+        tab.style_bar = None;
         self.seal_undo();
         true
     }
@@ -789,28 +871,46 @@ impl MarkerApp {
     }
 
     fn leave_typing(&mut self) {
-        let seal = {
-            let Some(tab) = self.tab_mut() else {
-                return;
-            };
+        let mut exit_zen = false;
+        let mut seal = false;
+        if self.tab_menu.take().is_some() {
+            return;
+        }
+        if let Some(tab) = self.tab_mut() {
             if tab.menu.take().is_some() {
+                return;
+            }
+            if tab.style_bar.take().is_some() {
                 return;
             }
             if tab.editing.take().is_some() {
                 tab.focus_edit = false;
-                true
+                seal = true;
             } else if tab.search.open {
                 tab.search.open = false;
                 tab.search.hits.clear();
                 tab.search.query.clear();
                 tab.search.last_sent.clear();
-                false
             } else {
-                false
+                exit_zen = self.zen;
             }
-        };
+        } else {
+            exit_zen = self.zen;
+        }
         if seal {
             self.end_edit_undo();
+        }
+        if exit_zen {
+            self.zen = false;
+            self.zen_chrome_until = None;
+        }
+    }
+
+    /// Apply pending fullscreen exit from Escape (needs a ctx for the viewport command).
+    fn sync_zen_viewport(&mut self, ctx: &egui::Context) {
+        let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
+        if self.zen != fullscreen {
+            ctx.send_viewport_cmd(ViewportCommand::Fullscreen(self.zen));
         }
     }
 
@@ -848,15 +948,20 @@ impl eframe::App for MarkerApp {
         self.dispatch_search();
         self.handle_keys(ctx);
         self.autosave(ctx);
+        crate::theme::sync_os_theme(ctx);
         ui::chrome(self, ctx);
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE.fill(ui::BACKDROP))
+            .frame(egui::Frame::NONE.fill(crate::theme::palette(ctx).backdrop))
             .show(ctx, |ui| {
-                if self.tab().is_some() {
-                    viewport(self, ui);
-                    self.dispatch_tiles();
-                } else {
+                if self.tabs.is_empty() {
                     ui::empty_state(self, ui);
+                    return;
+                }
+                if let Some(split) = self.split {
+                    ui::split_viewports(self, ui, split);
+                } else {
+                    viewport(self, ui, true);
+                    self.dispatch_tiles();
                 }
             });
         self.set_title(ctx);
@@ -952,6 +1057,7 @@ impl MarkerApp {
                         last_hl: None,
                         focus_edit: false,
                         menu: None,
+                        style_bar: None,
                         pending_undo: None,
                         undo_edit: None,
                         undo: Vec::new(),
@@ -1426,23 +1532,30 @@ impl MarkerApp {
         self.math.request(gen, id, req, source, size, color);
     }
 
-    fn dispatch_tiles(&mut self) {
-        let Some(tab) = self.tab() else {
+    pub(crate) fn dispatch_tiles(&mut self) {
+        self.dispatch_tiles_at(self.active, self.view_rect);
+        if let Some(split) = self.split {
+            self.dispatch_tiles_at(split.other, self.split_view_rect);
+        }
+    }
+
+    fn dispatch_tiles_at(&mut self, index: usize, view: egui::Rect) {
+        let Some(tab) = self.tabs.get(index) else {
             return;
         };
-        let wanted = view::wanted_tiles(&tab.doc, &tab.inflight, self.tool, self.view_rect);
+        let wanted = view::wanted_tiles(&tab.doc, &tab.inflight, self.tool, view);
         let gen = tab.doc.gen;
         let mut glyph_pages = Vec::new();
         let mut tiles = Vec::new();
         for page in wanted.words {
-            if let Some(tab) = self.tab_mut() {
+            if let Some(tab) = self.tabs.get_mut(index) {
                 if tab.glyphs_waiting.insert(page) {
                     glyph_pages.push(page);
                 }
             }
         }
         for (key, scale) in wanted.tiles {
-            if let Some(tab) = self.tab_mut() {
+            if let Some(tab) = self.tabs.get_mut(index) {
                 tab.inflight.insert(key);
             }
             tiles.push((key, scale));
@@ -1508,6 +1621,14 @@ impl MarkerApp {
             let active = self.active;
             self.close_tab(active);
         }
+        if ctx.input(|input| {
+            input.key_pressed(Key::B) && input.modifiers.command && input.modifiers.shift
+        }) {
+            self.toggle_toolbar();
+        }
+        if ctx.input(|input| input.key_pressed(Key::F11)) {
+            self.toggle_zen(ctx);
+        }
         if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command) {
             if !self.tabs.is_empty() {
                 if input_shift(ctx) {
@@ -1531,6 +1652,7 @@ impl MarkerApp {
         if ctx.wants_keyboard_input() {
             if ctx.input(|input| input.key_pressed(Key::Escape)) {
                 self.leave_typing();
+                self.sync_zen_viewport(ctx);
             }
             return;
         }
@@ -1549,9 +1671,10 @@ impl MarkerApp {
         let mut search_delta = None;
         let mut delete_selected = false;
         let vim = ctx.input(|input| self.handle_vim(input));
+        let mut escaped = false;
         ctx.input(|input| {
             if input.key_pressed(Key::Escape) {
-                self.leave_typing();
+                escaped = true;
             }
             if !vim {
                 if input.modifiers.command && input.key_pressed(Key::Z) && !input.modifiers.shift {
@@ -1620,6 +1743,10 @@ impl MarkerApp {
                 }
             }
         });
+        if escaped {
+            self.leave_typing();
+            self.sync_zen_viewport(ctx);
+        }
         if delete_selected {
             self.delete_selected();
         }
@@ -1761,6 +1888,60 @@ impl MarkerApp {
         }
     }
 
+    pub(crate) fn toggle_toolbar(&mut self) {
+        self.settings.toolbar_visible = !self.settings.toolbar_visible;
+        self.settings.save();
+    }
+
+    pub(crate) fn toggle_zen(&mut self, ctx: &egui::Context) {
+        self.zen = !self.zen;
+        self.zen_chrome_until = None;
+        ctx.send_viewport_cmd(ViewportCommand::Fullscreen(self.zen));
+        if self.zen {
+            // Peek chrome briefly so the user sees how to get it back.
+            self.zen_chrome_until = Some(Instant::now() + Duration::from_secs(2));
+        }
+    }
+
+    /// Whether tab/tool chrome should draw this frame (zen auto-hides until top-edge hover).
+    pub(crate) fn chrome_visible(&mut self, ctx: &egui::Context) -> bool {
+        if !self.zen {
+            return true;
+        }
+        let top_hover = ctx.input(|input| {
+            input.pointer.hover_pos().is_some_and(|pos| pos.y <= 10.0)
+        });
+        if top_hover {
+            self.zen_chrome_until = Some(Instant::now() + Duration::from_millis(900));
+            ctx.request_repaint_after(Duration::from_millis(950));
+            return true;
+        }
+        if let Some(until) = self.zen_chrome_until {
+            if Instant::now() < until {
+                ctx.request_repaint_after(until.saturating_duration_since(Instant::now()));
+                return true;
+            }
+            self.zen_chrome_until = None;
+        }
+        false
+    }
+
+    /// Show the floating style strip for `id`. Brief = auto-hide a few seconds after create.
+    pub(crate) fn open_style_bar(&mut self, id: u64, brief: bool) {
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        if tab.doc.session.get(id).is_none() {
+            return;
+        }
+        tab.selected = Some(id);
+        tab.menu = None;
+        tab.style_bar = Some(StyleBar {
+            id,
+            until: brief.then(|| Instant::now() + Duration::from_secs(4)),
+        });
+    }
+
     pub(crate) fn metric_controls(&mut self, ui: &mut egui::Ui) {
         let show_size = matches!(self.tool, Tool::Text | Tool::Math | Tool::Select)
             || self.selected_is_text_like();
@@ -1792,6 +1973,84 @@ impl MarkerApp {
                 self.apply_stroke(width);
             }
         }
+    }
+
+    /// Compact icon row for the floating annotation style strip. Returns true if Delete was chosen.
+    pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui) -> bool {
+        let flags = match self.selected_kind() {
+            Some(AnnotKind::Highlight { .. }) => (true, true, false, false),
+            Some(AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Note { .. }) => {
+                (false, true, true, false)
+            }
+            Some(AnnotKind::Shape { .. }) => (false, true, false, true),
+            Some(AnnotKind::Image { .. } | AnnotKind::Future(_)) | None => {
+                (false, false, false, false)
+            }
+        };
+        let (highlight_palette, show_color, show_size, show_stroke) = flags;
+        let colors: &[Rgb] = if highlight_palette {
+            &crate::geom::HIGHLIGHT_COLORS
+        } else {
+            &crate::geom::INK_COLORS
+        };
+        let current = self.active_color();
+
+        ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
+        if show_color {
+            let mut picked = None;
+            for color in colors {
+                if color_dot(ui, *color, *color == current) {
+                    picked = Some(*color);
+                }
+            }
+            if let Some(color) = picked {
+                self.seal_then_arm();
+                self.apply_color(color);
+                self.seal_undo();
+            }
+        }
+        if show_size {
+            let mut size = self.active_text_size();
+            if style_step(ui, "A−", "Smaller text").clicked() {
+                size = (size - 1.0).max(6.0);
+                self.seal_then_arm();
+                self.apply_text_size(size);
+                self.seal_undo();
+            }
+            ui.label(
+                egui::RichText::new(format!("{size:.0}"))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(232, 232, 236)),
+            );
+            if style_step(ui, "A+", "Larger text").clicked() {
+                size = (size + 1.0).min(96.0);
+                self.seal_then_arm();
+                self.apply_text_size(size);
+                self.seal_undo();
+            }
+        }
+        if show_stroke {
+            let mut width = self.active_stroke();
+            if style_step(ui, "−", "Thinner stroke").clicked() {
+                width = (width - 0.25).max(0.5);
+                self.seal_then_arm();
+                self.apply_stroke(width);
+                self.seal_undo();
+            }
+            ui.label(
+                egui::RichText::new(format!("{width:.1}"))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(232, 232, 236)),
+            );
+            if style_step(ui, "+", "Thicker stroke").clicked() {
+                width = (width + 0.25).min(12.0);
+                self.seal_then_arm();
+                self.apply_stroke(width);
+                self.seal_undo();
+            }
+        }
+        ui.add_space(4.0);
+        style_step(ui, "×", "Delete annotation").clicked()
     }
 
     fn active_color(&self) -> Rgb {
@@ -2080,4 +2339,27 @@ fn upload_preview(
 
 fn input_shift(ctx: &egui::Context) -> bool {
     ctx.input(|input| input.modifiers.shift)
+}
+
+fn style_step(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(20.0, 18.0), egui::Sense::click());
+    let fill = if response.is_pointer_button_down_on() {
+        egui::Color32::from_white_alpha(28)
+    } else if response.hovered() {
+        egui::Color32::from_white_alpha(16)
+    } else {
+        egui::Color32::TRANSPARENT
+    };
+    if fill != egui::Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(rect, egui::CornerRadius::same(4), fill);
+    }
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        label,
+        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+        egui::Color32::from_rgb(232, 232, 236),
+    );
+    response.on_hover_text(tip)
 }

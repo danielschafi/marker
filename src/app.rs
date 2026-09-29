@@ -44,6 +44,7 @@ pub(crate) struct Tab {
     pub(crate) inflight: HashSet<TileKey>,
     pub(crate) glyphs_waiting: HashSet<usize>,
     pub(crate) previews: HashMap<u64, MathPreview>,
+    pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
     pub(crate) save: SaveState,
     pub(crate) save_epoch: u64,
     pub(crate) save_deletes: Vec<(usize, i32)>,
@@ -54,7 +55,7 @@ pub(crate) struct Tab {
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
-    pub(crate) menu: Option<(egui::Pos2, u64)>,
+    pub(crate) menu: Option<(egui::Pos2, Option<u64>)>,
     pending_undo: Option<Session>,
     undo_edit: Option<u64>,
     undo: Vec<UndoEntry>,
@@ -589,9 +590,74 @@ impl MarkerApp {
             tab.selected = None;
             tab.menu = None;
             tab.previews.remove(&id);
+            tab.image_textures.remove(&id);
             tab.editing = None;
         }
         self.seal_undo();
+    }
+
+    /// Paste an image from the system clipboard onto the current page.
+    pub(crate) fn paste_clipboard_image(&mut self) -> bool {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return false;
+        };
+        let Ok(image) = clipboard.get_image() else {
+            return false;
+        };
+        let width = image.width as u32;
+        let height = image.height as u32;
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let expected = width as usize * height as usize * 4;
+        if image.bytes.len() < expected {
+            return false;
+        }
+        let rgba: std::sync::Arc<[u8]> = std::sync::Arc::from(image.bytes[..expected].to_vec());
+
+        let view_h = self.view_rect.height().max(1.0);
+        let Some(tab) = self.tab() else {
+            return false;
+        };
+        if tab.doc.pages.is_empty() {
+            return false;
+        }
+        let page = tab.doc.current_page(view_h);
+        let info = tab.doc.pages[page];
+        let aspect = height as f32 / width as f32;
+        let mut disp_w = info.width() * 0.5;
+        let mut disp_h = disp_w * aspect;
+        if disp_h > info.height() * 0.9 {
+            disp_h = info.height() * 0.9;
+            disp_w = disp_h / aspect;
+        }
+        let cx = (info.x0 + info.x1) * 0.5;
+        let cy = (info.y0 + info.y1) * 0.5;
+        let rect = crate::geom::PdfRect::new(
+            cx - disp_w * 0.5,
+            cy - disp_h * 0.5,
+            cx + disp_w * 0.5,
+            cy + disp_h * 0.5,
+        );
+
+        self.seal_then_arm();
+        let Some(tab) = self.tab_mut() else {
+            return false;
+        };
+        let id = tab.doc.session.insert(
+            page,
+            AnnotKind::Image {
+                rect,
+                rgba,
+                width,
+                height,
+            },
+        );
+        tab.selected = Some(id);
+        tab.editing = None;
+        tab.menu = None;
+        self.seal_undo();
+        true
     }
 
     fn nudge(&mut self, dx: f32, dy: f32) {
@@ -838,6 +904,7 @@ impl MarkerApp {
                         inflight: HashSet::new(),
                         glyphs_waiting: HashSet::new(),
                         previews: HashMap::new(),
+                        image_textures: HashMap::new(),
                         save: SaveState::Clean,
                         save_epoch: 0,
                         save_deletes: Vec::new(),
@@ -1431,6 +1498,16 @@ impl MarkerApp {
             }
             return;
         }
+        let editing = self.tab().is_some_and(|tab| tab.editing.is_some());
+        let paste_image = ctx.input(|input| {
+            input.events.iter().any(|event| matches!(event, egui::Event::Paste(_)))
+                || (input.modifiers.command
+                    && input.modifiers.shift
+                    && input.key_pressed(Key::V))
+        });
+        if paste_image && !editing {
+            let _ = self.paste_clipboard_image();
+        }
         let mut fit = false;
         let mut zoom = None;
         let mut search_delta = None;
@@ -1455,7 +1532,7 @@ impl MarkerApp {
             if input.key_pressed(Key::Slash) {
                 self.open_search();
             }
-            if !vim {
+            if !vim && !input.modifiers.command {
                 for tool in Tool::ALL {
                     if input.key_pressed(tool.shortcut()) {
                         self.tool = tool;
@@ -1701,7 +1778,7 @@ impl MarkerApp {
             | AnnotKind::Note { color, .. }
             | AnnotKind::Math { color, .. } => *color,
             AnnotKind::Shape { stroke, .. } => *stroke,
-            AnnotKind::Future(_) => return None,
+            AnnotKind::Image { .. } | AnnotKind::Future(_) => return None,
         })
     }
 
@@ -1771,7 +1848,7 @@ impl MarkerApp {
                             *stroke = color;
                             kind_bucket = Some(2);
                         }
-                        AnnotKind::Future(_) => {}
+                        AnnotKind::Image { .. } | AnnotKind::Future(_) => {}
                     }
                 }
                 if kind_bucket.is_some() {

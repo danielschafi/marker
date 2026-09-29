@@ -27,9 +27,6 @@ pub enum ShapeKind {
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
 pub enum FutureKind {
-    Image {
-        rect: PdfRect,
-    },
     Ink {
         color: Rgb,
         width: f32,
@@ -71,7 +68,14 @@ pub enum AnnotKind {
         /// When set, a finished render replaces the box with the equation's natural size.
         auto_size: bool,
     },
-    /// Images and ink land here later without a session rewrite.
+    Image {
+        rect: PdfRect,
+        /// RGBA8 pixels (`width * height * 4`).
+        rgba: std::sync::Arc<[u8]>,
+        width: u32,
+        height: u32,
+    },
+    /// Ink lands here later without a session rewrite.
     #[allow(dead_code)]
     Future(FutureKind),
 }
@@ -107,9 +111,10 @@ impl AnnotKind {
                     )
                 }))
             }
-            Self::Text { rect, .. } | Self::Note { rect, .. } | Self::Math { rect, .. } => {
-                Some(*rect)
-            }
+            Self::Text { rect, .. }
+            | Self::Note { rect, .. }
+            | Self::Math { rect, .. }
+            | Self::Image { rect, .. } => Some(*rect),
             Self::Shape {
                 kind: ShapeKind::Line,
                 start,
@@ -117,7 +122,6 @@ impl AnnotKind {
                 ..
             } => Some(PdfRect::from_points(*start, *end).inflate(2.0)),
             Self::Shape { rect, .. } => Some(*rect),
-            Self::Future(FutureKind::Image { rect }) => Some(*rect),
             Self::Future(FutureKind::Ink { strokes, .. }) => {
                 let mut pts = strokes.iter().flatten();
                 let first = *pts.next()?;
@@ -140,7 +144,10 @@ impl AnnotKind {
                     *q = q.translate(dx, dy);
                 }
             }
-            Self::Text { rect, .. } | Self::Note { rect, .. } | Self::Math { rect, .. } => {
+            Self::Text { rect, .. }
+            | Self::Note { rect, .. }
+            | Self::Math { rect, .. }
+            | Self::Image { rect, .. } => {
                 *rect = rect.translate(dx, dy);
             }
             Self::Shape {
@@ -161,7 +168,6 @@ impl AnnotKind {
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
             }
-            Self::Future(FutureKind::Image { rect }) => *rect = rect.translate(dx, dy),
             Self::Future(FutureKind::Ink { strokes, .. }) => {
                 for stroke in strokes {
                     for p in stroke {
@@ -417,7 +423,10 @@ impl AnnotKind {
                 end,
                 ..
             } => vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)],
-            Self::Text { rect, .. } | Self::Math { rect, .. } | Self::Shape { rect, .. } => {
+            Self::Text { rect, .. }
+            | Self::Math { rect, .. }
+            | Self::Image { rect, .. }
+            | Self::Shape { rect, .. } => {
                 vec![
                     (Handle::Nw, PdfPoint::new(rect.x0, rect.y0)),
                     (Handle::Ne, PdfPoint::new(rect.x1, rect.y0)),
@@ -446,7 +455,10 @@ impl AnnotKind {
                 }
                 *rect = PdfRect::from_points(*start, *end);
             }
-            Self::Text { rect, .. } | Self::Math { rect, .. } | Self::Shape { rect, .. } => {
+            Self::Text { rect, .. }
+            | Self::Math { rect, .. }
+            | Self::Image { rect, .. }
+            | Self::Shape { rect, .. } => {
                 let mut x0 = rect.x0;
                 let mut y0 = rect.y0;
                 let mut x1 = rect.x1;

@@ -636,7 +636,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(
-                            "Ctrl+O  ·  Ctrl+F search  ·  / vim search  ·  pinch or Ctrl+scroll zoom",
+                            "Ctrl+O  ·  Ctrl+F search  ·  Ctrl+Shift+V paste image  ·  pinch zoom",
                         )
                         .weak()
                         .size(12.0),

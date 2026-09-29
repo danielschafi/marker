@@ -175,6 +175,7 @@ pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui) {
 
     let painter = ui.painter_at(response.rect);
     painter.rect_filled(response.rect, 0.0, BACKDROP);
+    ensure_image_textures(app, ui.ctx());
     paint_document(app, &painter, response.rect);
     paint_scrollbar(app, ui, response.rect);
     inline_editors(app, ui.ctx(), response.rect);
@@ -1073,7 +1074,10 @@ fn resize_target(
         Tool::Math => matches!(kind, AnnotKind::Math { .. }),
         Tool::Select => matches!(
             kind,
-            AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Shape { .. }
+            AnnotKind::Text { .. }
+                | AnnotKind::Math { .. }
+                | AnnotKind::Image { .. }
+                | AnnotKind::Shape { .. }
         ),
         _ => false,
     };
@@ -1316,6 +1320,17 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                         source,
                         13.0,
                         Color32::from_rgb(40, 40, 40),
+                    );
+                }
+            }
+            AnnotKind::Image { rect, .. } => {
+                let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
+                if let Some((_, texture)) = tab.image_textures.get(&annot.id) {
+                    painter.image(
+                        texture.id(),
+                        screen,
+                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                        Color32::WHITE,
                     );
                 }
             }
@@ -1715,6 +1730,61 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     }
 }
 
+fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
+    let Some(tab) = app.tab_mut() else {
+        return;
+    };
+    let live: Vec<(u64, usize, std::sync::Arc<[u8]>, u32, u32)> = tab
+        .doc
+        .session
+        .annotations
+        .iter()
+        .filter_map(|annot| match &annot.kind {
+            AnnotKind::Image {
+                rgba,
+                width,
+                height,
+                ..
+            } => Some((
+                annot.id,
+                std::sync::Arc::as_ptr(rgba) as *const u8 as usize,
+                rgba.clone(),
+                *width,
+                *height,
+            )),
+            _ => None,
+        })
+        .collect();
+    let live_ids: std::collections::HashSet<u64> = live.iter().map(|(id, ..)| *id).collect();
+    tab.image_textures.retain(|id, _| live_ids.contains(id));
+    for (id, ptr, rgba, width, height) in live {
+        let stale = tab
+            .image_textures
+            .get(&id)
+            .is_none_or(|(cached, _)| *cached != ptr);
+        if !stale {
+            continue;
+        }
+        if width == 0 || height == 0 {
+            continue;
+        }
+        let expected = width as usize * height as usize * 4;
+        if rgba.len() < expected {
+            continue;
+        }
+        let image = egui::ColorImage::from_rgba_unmultiplied(
+            [width as usize, height as usize],
+            &rgba[..expected],
+        );
+        let texture = ctx.load_texture(
+            format!("annot-image-{id}"),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        tab.image_textures.insert(id, (ptr, texture));
+    }
+}
+
 fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
     let hit = app.tab().and_then(|tab| {
         let (page, point) = tab.doc.screen_to_page(pos, view)?;
@@ -1723,10 +1793,8 @@ fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
     if let Some(tab) = app.tab_mut() {
         if let Some(id) = hit {
             tab.selected = Some(id);
-            tab.menu = Some((pos, id));
-        } else {
-            tab.menu = None;
         }
+        tab.menu = Some((pos, hit));
     }
 }
 
@@ -1735,6 +1803,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         return;
     };
     let mut delete = false;
+    let mut paste = false;
     let area = egui::Area::new(Id::new("marker-context"))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos)
@@ -1742,7 +1811,10 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(120.0);
-                if ui.button("Delete").clicked() {
+                if ui.button("Paste image").clicked() {
+                    paste = true;
+                }
+                if id.is_some() && ui.button("Delete").clicked() {
                     delete = true;
                 }
             });
@@ -1752,9 +1824,16 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         && !area.response.hovered()
         && !area.response.clicked()
         && !right_click;
-    if delete {
+    if paste {
         if let Some(tab) = app.tab_mut() {
-            tab.selected = Some(id);
+            tab.menu = None;
+        }
+        let _ = app.paste_clipboard_image();
+    } else if delete {
+        if let Some(tab) = app.tab_mut() {
+            if let Some(id) = id {
+                tab.selected = Some(id);
+            }
             tab.menu = None;
         }
         app.delete_selected();

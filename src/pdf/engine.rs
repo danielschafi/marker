@@ -2,14 +2,15 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 
+use image::ImageEncoder;
 use mupdf::color::AnnotationColor;
 use mupdf::pdf::{
     AnnotationDefaultAppearance, AnnotationFlags, AnnotationTextAlign, PdfAnnotation,
     PdfAnnotationType, PdfDocument, PdfObject, PdfPage, PdfWriteOptions,
 };
 use mupdf::{
-    Colorspace, DestinationKind, Device, DisplayList, IRect, Matrix, Outline, Pixmap, Point, Quad,
-    Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
+    Buffer, Colorspace, DestinationKind, Device, DisplayList, IRect, Image, Matrix, Outline,
+    Pixmap, Point, Quad, Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
 };
 
 use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind, Word};
@@ -511,6 +512,7 @@ struct MarkerMeta {
     text_size: Option<f32>,
     text_color: Option<Rgb>,
     source: Option<String>,
+    png: Option<Vec<u8>>,
 }
 
 fn read_marker(object: &PdfObject) -> MarkerMeta {
@@ -521,6 +523,7 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
             text_size: None,
             text_color: None,
             source: None,
+            png: None,
         };
     };
     let kind = marker
@@ -556,12 +559,17 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         .ok()
         .flatten()
         .and_then(|value| value.as_string().ok());
+    let png = marker.get_dict("Png").ok().flatten().and_then(|obj| {
+        let resolved = obj.resolve().ok().flatten().unwrap_or(obj);
+        resolved.read_stream().ok()
+    });
     MarkerMeta {
         kind,
         id,
         text_size,
         text_color,
         source,
+        png,
     }
 }
 
@@ -623,7 +631,9 @@ fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error
                 continue;
             }
             let marker = read_marker(&annot.object());
-            if kind_name == PdfAnnotationType::Stamp && marker.kind.as_deref() != Some("Math") {
+            if kind_name == PdfAnnotationType::Stamp
+                && !matches!(marker.kind.as_deref(), Some("Math" | "Image"))
+            {
                 continue;
             }
             let Some(kind) = import_kind(kind_name, &annot, &marker)? else {
@@ -741,17 +751,39 @@ fn import_kind(
                 width: annot.border_width().unwrap_or(1.0).max(0.25),
             }))
         }
-        PdfAnnotationType::Stamp => Ok(Some(AnnotKind::Math {
-            rect: from_rect(annot.rect()?),
-            source: marker
-                .source
-                .clone()
-                .or_else(|| annot.contents().ok().flatten().map(str::to_string))
-                .unwrap_or_default(),
-            size: marker.text_size.unwrap_or(14.0),
-            color: marker.text_color.unwrap_or(Rgb::new(24, 24, 24)),
-            auto_size: false,
-        })),
+        PdfAnnotationType::Stamp => {
+            if marker.kind.as_deref() == Some("Image") {
+                let Some(png) = marker.png.as_ref() else {
+                    return Ok(None);
+                };
+                let Ok(decoded) = image::load_from_memory(png) else {
+                    return Ok(None);
+                };
+                let rgba = decoded.to_rgba8();
+                let width = rgba.width();
+                let height = rgba.height();
+                if width == 0 || height == 0 {
+                    return Ok(None);
+                }
+                return Ok(Some(AnnotKind::Image {
+                    rect: from_rect(annot.rect()?),
+                    rgba: std::sync::Arc::from(rgba.into_raw()),
+                    width,
+                    height,
+                }));
+            }
+            Ok(Some(AnnotKind::Math {
+                rect: from_rect(annot.rect()?),
+                source: marker
+                    .source
+                    .clone()
+                    .or_else(|| annot.contents().ok().flatten().map(str::to_string))
+                    .unwrap_or_default(),
+                size: marker.text_size.unwrap_or(14.0),
+                color: marker.text_color.unwrap_or(Rgb::new(24, 24, 24)),
+                auto_size: false,
+            }))
+        }
         _ => Ok(None),
     }
 }
@@ -885,6 +917,19 @@ fn apply_existing(
             if let Some(bytes) = math_pdf {
                 install_math_appearance(doc, annot, bytes)?;
             }
+        }
+        AnnotKind::Image {
+            rect,
+            rgba,
+            width,
+            height,
+        } => {
+            if annot.r#type()? != PdfAnnotationType::Stamp {
+                return Err(mupdf::Error::InvalidArgument("type changed".into()));
+            }
+            annot.set_rect(to_rect(*rect))?;
+            write_image_marker(doc, annot, source.id, rgba, *width, *height)?;
+            install_image_appearance(doc, annot, rgba, *width, *height)?;
         }
         AnnotKind::Future(_) => {
             return Err(mupdf::Error::NotYetImplemented("future annotation".into()));
@@ -1043,6 +1088,21 @@ fn create_annot(
             annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
             return annot.xref().map_err(show);
         }
+        AnnotKind::Image {
+            rect,
+            rgba,
+            width,
+            height,
+        } => {
+            let mut annot = page
+                .create_annotation(PdfAnnotationType::Stamp)
+                .map_err(show)?;
+            annot.set_rect(to_rect(*rect)).map_err(show)?;
+            write_image_marker(doc, &annot, source.id, rgba, *width, *height).map_err(show)?;
+            install_image_appearance(doc, &mut annot, rgba, *width, *height).map_err(show)?;
+            annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
+            return annot.xref().map_err(show);
+        }
         AnnotKind::Future(_) => return Err("That annotation type is not available yet.".into()),
     };
     annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
@@ -1065,6 +1125,110 @@ fn install_math_appearance(
     };
     let resources = dest.graft_object(&src_page.resources()?)?;
     let form = form_xobject(dest, &contents, resources, media)?;
+    let mut appearance = dest.new_dict()?;
+    appearance.dict_put("N", form)?;
+    annot.object().dict_put("AP", appearance)?;
+    Ok(())
+}
+
+fn write_image_marker(
+    doc: &mut PdfDocument,
+    annot: &PdfAnnotation,
+    id: u64,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), mupdf::Error> {
+    let png = encode_png(rgba, width, height).map_err(|message| {
+        mupdf::Error::InvalidArgument(format!("png encode failed: {message}"))
+    })?;
+    let mut marker = doc.new_dict()?;
+    marker.dict_put("Kind", doc.new_name("Image")?)?;
+    marker.dict_put("Id", doc.new_int(id as i32)?)?;
+    let buffer = Buffer::from_bytes(&png)?;
+    let stream = doc.add_stream(&buffer, None, true)?;
+    marker.dict_put("Png", stream)?;
+    let mut object = annot.object();
+    object.dict_put("Marker", marker)?;
+    object.dict_put("NM", doc.new_string(&format!("marker-{id}"))?)?;
+    Ok(())
+}
+
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+    let expected = width as usize * height as usize * 4;
+    if rgba.len() != expected {
+        return Err(format!(
+            "rgba length {} != {}x{}x4",
+            rgba.len(),
+            width,
+            height
+        ));
+    }
+    let mut out = Vec::new();
+    let encoder = image::codecs::png::PngEncoder::new(&mut out);
+    encoder
+        .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
+        .map_err(|err| err.to_string())?;
+    Ok(out)
+}
+
+fn install_image_appearance(
+    dest: &mut PdfDocument,
+    annot: &mut PdfAnnotation,
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+) -> Result<(), mupdf::Error> {
+    if width == 0 || height == 0 {
+        return Err(mupdf::Error::InvalidArgument("empty image".into()));
+    }
+    let cs = Colorspace::device_rgb();
+    let mut pixmap = Pixmap::new_with_w_h(&cs, width as i32, height as i32, true)?;
+    let n = pixmap.n() as usize;
+    let stride = pixmap.stride() as usize;
+    let row_bytes = width as usize * 4;
+    let samples = pixmap.samples_mut();
+    for y in 0..height as usize {
+        let src = &rgba[y * row_bytes..(y + 1) * row_bytes];
+        let dst = &mut samples[y * stride..y * stride + width as usize * n];
+        if n == 4 {
+            dst.copy_from_slice(src);
+        } else if n == 3 {
+            for x in 0..width as usize {
+                dst[x * 3] = src[x * 4];
+                dst[x * 3 + 1] = src[x * 4 + 1];
+                dst[x * 3 + 2] = src[x * 4 + 2];
+            }
+        } else {
+            return Err(mupdf::Error::InvalidArgument(format!(
+                "unexpected pixmap components {n}"
+            )));
+        }
+    }
+    let image = Image::from_pixmap(&pixmap)?;
+    let image_obj = dest.add_image(&image)?;
+    let w = width as f32;
+    let h = height as f32;
+    let content = format!("q\n{w} 0 0 {h} 0 0 cm\n/Im0 Do\nQ\n");
+    let buffer = Buffer::from_bytes(content.as_bytes())?;
+    let mut xobjects = dest.new_dict()?;
+    xobjects.dict_put("Im0", image_obj)?;
+    let mut resources = dest.new_dict()?;
+    resources.dict_put("XObject", xobjects)?;
+    let dict = dest.new_dict()?;
+    let mut form = dest.add_stream(&buffer, Some(&dict), true)?;
+    let mut bbox = dest.new_array()?;
+    Rect {
+        x0: 0.0,
+        y0: 0.0,
+        x1: w,
+        y1: h,
+    }
+    .encode_into(&mut bbox)?;
+    form.dict_put("Type", dest.new_name("XObject")?)?;
+    form.dict_put("Subtype", dest.new_name("Form")?)?;
+    form.dict_put("BBox", bbox)?;
+    form.dict_put("Resources", resources)?;
     let mut appearance = dest.new_dict()?;
     appearance.dict_put("N", form)?;
     annot.object().dict_put("AP", appearance)?;
@@ -1238,6 +1402,7 @@ mod tests {
                     ShapeKind::Line => "line",
                 },
                 AnnotKind::Math { .. } => "math",
+                AnnotKind::Image { .. } => "image",
                 AnnotKind::Future(_) => "future",
             })
             .collect::<Vec<_>>();

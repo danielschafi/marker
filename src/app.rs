@@ -10,8 +10,8 @@ use egui::{DragValue, Key, ViewportCommand};
 use crate::annot::{AnnotKind, Annotation, Glyph, Handle, Session, ShapeKind};
 use crate::assistant::{
     AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole, AssistantTurn,
-    AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
-    LearningSelection, PendingCrop, TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
+    AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode, PendingCrop,
+    TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::math::{MathRender, MathWorker, RgbaImage};

@@ -6,7 +6,9 @@ description = "A fast, minimal PDF annotator"
 license = "MIT"
 
 [dependencies]
-arboard = "3.6.1"
+# wayland-data-control is required on pure Wayland (Hyprland/Omarchy); the
+# default X11 backend cannot see wl-clipboard image/png offers.
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 directories = "6"
 eframe = "0.33"
 egui = "0.33"

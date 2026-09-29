@@ -13,7 +13,7 @@ use mupdf::{
     Pixmap, Point, Quad, Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
 };
 
-use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind, Word};
+use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind};
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 
 pub const TILE_PX: i32 = 1024;
@@ -131,16 +131,6 @@ impl DocumentEngine {
 
     pub fn outline(&self) -> &[OutlineNode] {
         &self.outline
-    }
-
-    pub fn words(&self, page: usize) -> Result<Vec<Word>, String> {
-        Ok(self
-            .glyphs(page)?
-            .into_iter()
-            .map(|glyph| Word {
-                bounds: glyph.bounds,
-            })
-            .collect())
     }
 
     pub fn glyphs(&self, page: usize) -> Result<Vec<Glyph>, String> {
@@ -1365,14 +1355,14 @@ mod tests {
         let loaded = DocumentEngine::open(&path).unwrap();
         let mut engine = loaded.engine;
         assert_eq!(engine.pages().len(), 1);
-        let words = engine.words(0).unwrap();
-        assert!(!words.is_empty(), "expected words on the sample page");
+        let glyphs = engine.glyphs(0).unwrap();
+        assert!(!glyphs.is_empty(), "expected glyphs on the sample page");
 
         let before = engine.render_tile(0, 1.5, 0, 0).unwrap().unwrap();
         let yellow_before = count_yellow(&before.pixels);
 
         let mut session = crate::annot::Session::from_imported(loaded.annotations);
-        let quads: Vec<PdfRect> = words.iter().map(|word| word.bounds).collect();
+        let quads: Vec<PdfRect> = glyphs.iter().map(|glyph| glyph.bounds).collect();
         session.insert(
             0,
             AnnotKind::Highlight {

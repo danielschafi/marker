@@ -5,6 +5,8 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct AgentCapability {
     pub path: PathBuf,
+    /// Populated by `probe_agent`; kept for diagnostics / tests.
+    #[allow(dead_code)]
     pub version: String,
     pub logged_in: bool,
     #[allow(dead_code)]

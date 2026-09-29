@@ -2281,30 +2281,108 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     if height <= view.height() + 1.0 {
         return;
     }
+
+    // Match egui's floating ScrollArea look (same as the empty homepage).
+    let scroll_style = ui.spacing().scroll.clone();
+    let hovering_view = ui.rect_contains_pointer(view);
+    let outer_margin = 4.0;
+    let max_w = scroll_style.bar_width.max(scroll_style.floating_width).max(6.0);
     let track = Rect::from_min_max(
-        Pos2::new(view.right() - 10.0, view.top() + 4.0),
-        Pos2::new(view.right() - 4.0, view.bottom() - 4.0),
+        Pos2::new(view.right() - max_w - outer_margin, view.top() + outer_margin),
+        Pos2::new(view.right() - outer_margin, view.bottom() - outer_margin),
     );
-    let thumb_h = (track.height() * (view.height() / height)).max(28.0);
-    let travel = (track.height() - thumb_h).max(1.0);
-    let t = tab.doc.scroll_y / (height - view.height());
-    let thumb = Rect::from_min_size(
-        Pos2::new(track.left(), track.top() + travel * t),
-        Vec2::new(track.width(), thumb_h),
-    );
-    ui.painter()
-        .rect_filled(thumb, 3.0, Color32::from_white_alpha(80));
+
     let response = ui.interact(
         track,
         Id::new(("marker-scroll", scroll_id)),
         Sense::click_and_drag(),
     );
+    let hovering_bar = response.hovered() || response.dragged();
+
+    let bar_t = ui.ctx().animate_bool_responsive(
+        Id::new(("marker-scroll-bar", scroll_id)),
+        hovering_bar,
+    );
+    let show_t = ui.ctx().animate_bool_responsive(
+        Id::new(("marker-scroll-show", scroll_id)),
+        hovering_view || hovering_bar,
+    );
+    if show_t <= 0.001 && !hovering_bar {
+        return;
+    }
+
+    let width = egui::lerp(
+        scroll_style.floating_width.max(2.0)..=scroll_style.bar_width.max(6.0),
+        bar_t,
+    );
+    let inset = ((max_w - width) * 0.5).max(0.0);
+    let bar_rect = Rect::from_min_max(
+        Pos2::new(track.left() + inset, track.top()),
+        Pos2::new(track.right() - inset, track.bottom()),
+    );
+
+    let thumb_h = (bar_rect.height() * (view.height() / height))
+        .max(scroll_style.handle_min_length.max(28.0));
+    let travel = (bar_rect.height() - thumb_h).max(1.0);
+    let t = (tab.doc.scroll_y / (height - view.height())).clamp(0.0, 1.0);
+    let thumb = Rect::from_min_size(
+        Pos2::new(bar_rect.left(), bar_rect.top() + travel * t),
+        Vec2::new(bar_rect.width(), thumb_h),
+    );
+
+    let visuals = ui.visuals();
+    let widget = if response.dragged() {
+        &visuals.widgets.active
+    } else if response.hovered()
+        && ui.input(|input| {
+            input
+                .pointer
+                .latest_pos()
+                .is_some_and(|p| thumb.contains(p))
+        })
+    {
+        &visuals.widgets.hovered
+    } else {
+        &visuals.widgets.inactive
+    };
+    let handle_opacity = if hovering_bar {
+        scroll_style.interact_handle_opacity
+    } else {
+        egui::lerp(
+            scroll_style.dormant_handle_opacity..=scroll_style.active_handle_opacity,
+            show_t,
+        )
+    };
+    let background_opacity = if hovering_bar {
+        scroll_style.interact_background_opacity
+    } else if hovering_view {
+        scroll_style.active_background_opacity
+    } else {
+        scroll_style.dormant_background_opacity
+    };
+    let handle_color = if scroll_style.foreground_color {
+        widget.fg_stroke.color
+    } else {
+        widget.bg_fill
+    };
+
+    ui.painter().rect_filled(
+        bar_rect,
+        widget.corner_radius,
+        visuals.extreme_bg_color.gamma_multiply(background_opacity * show_t),
+    );
+    ui.painter().rect_filled(
+        thumb,
+        widget.corner_radius,
+        handle_color.gamma_multiply(handle_opacity * show_t),
+    );
+
     if response.dragged() {
         tab.doc.scroll_y += response.drag_delta().y / travel * (height - view.height());
         tab.doc.clamp_scroll(view);
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            let t = ((pos.y - track.top() - thumb_h * 0.5) / travel).clamp(0.0, 1.0);
+            let t = ((pos.y - bar_rect.top() - thumb_h * 0.5) / travel).clamp(0.0, 1.0);
             tab.doc.scroll_y = t * (height - view.height());
             tab.doc.clamp_scroll(view);
         }

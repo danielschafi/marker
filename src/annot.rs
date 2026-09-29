@@ -1,11 +1,5 @@
 use crate::geom::{dist_to_segment, PdfPoint, PdfRect, Rgb};
 
-/// A word rectangle in reading order. Used to build highlight quads.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Word {
-    pub bounds: PdfRect,
-}
-
 /// One selectable glyph. Highlights snap to these instead of whole words.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
@@ -337,14 +331,6 @@ pub fn restore_session(current: &Session, mut snap: Session) -> Session {
     snap
 }
 
-pub fn rects_between(words: &[Word], a: usize, b: usize) -> Vec<PdfRect> {
-    if words.is_empty() || a >= words.len() || b >= words.len() {
-        return Vec::new();
-    }
-    let (lo, hi) = (a.min(b), a.max(b));
-    words[lo..=hi].iter().map(|w| w.bounds).collect()
-}
-
 pub fn glyph_at(glyphs: &[Glyph], point: PdfPoint) -> Option<usize> {
     glyphs
         .iter()
@@ -495,19 +481,6 @@ impl AnnotKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn word_range_follows_reading_order() {
-        let words: Vec<Word> = (0..4)
-            .map(|i| Word {
-                bounds: PdfRect::new(i as f32 * 10.0, 0.0, i as f32 * 10.0 + 8.0, 10.0),
-            })
-            .collect();
-        let rects = rects_between(&words, 2, 0);
-        assert_eq!(rects.len(), 3);
-        assert_eq!(rects[0].x0, 0.0);
-        assert_eq!(rects[2].x0, 20.0);
-    }
 
     fn glyph(ch: char, x: f32, line: u32, word: u32) -> Glyph {
         Glyph {

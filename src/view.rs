@@ -196,22 +196,30 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
     let Some(tab) = app.tab_mut() else {
         return;
     };
-    let Some(hover) = hover else {
-        return;
-    };
-    // Wheel notches arrive as small pixel deltas and egui then smears them
-    // across frames. Apply the raw delta immediately, scaled up so a notch
-    // moves a readable chunk of the page.
-    let gain = if raw.length() < 24.0 { 6.0 } else { 2.4 };
-    let scroll = raw * gain;
-    if command && (zoom - 1.0).abs() > f32::EPSILON {
+    // Pinch keeps a cursor position on most platforms; fall back to the view
+    // center if the pointer briefly drops out mid-gesture.
+    let hover = hover.unwrap_or_else(|| response.rect.center());
+    let pinching = (zoom - 1.0).abs() > f32::EPSILON;
+
+    // Prefer zoom whenever egui reports a zoom delta. Trackpad pinch often
+    // arrives together with a pan/scroll delta on Wayland; treating scroll
+    // first made pinch feel broken.
+    if pinching {
         tab.doc.zoom_at(zoom, hover, response.rect);
-    } else if command && scroll.y.abs() > 0.0 {
+        return;
+    }
+    if command && raw.y.abs() > 0.0 {
+        // Ctrl+wheel / Ctrl+two-finger scroll without a synthesized Zoom event.
         let factor = (1.0 + raw.y * 0.003).clamp(0.75, 1.35);
         tab.doc.zoom_at(factor, hover, response.rect);
-    } else if (zoom - 1.0).abs() > 0.02 && raw.y.abs() < 0.5 {
-        tab.doc.zoom_at(zoom, hover, response.rect);
-    } else if scroll != egui::Vec2::ZERO {
+        return;
+    }
+    if raw != egui::Vec2::ZERO {
+        // Wheel notches arrive as small pixel deltas and egui then smears them
+        // across frames. Apply the raw delta immediately, scaled up so a notch
+        // moves a readable chunk of the page.
+        let gain = if raw.length() < 24.0 { 6.0 } else { 2.4 };
+        let scroll = raw * gain;
         tab.doc.scroll_y -= scroll.y;
         tab.doc.scroll_x -= scroll.x;
         tab.doc.clamp_scroll(response.rect);

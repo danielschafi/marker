@@ -294,7 +294,7 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
             if zoom.changed() {
                 app.set_zoom_percent(percent);
             }
-            zoom.on_hover_text("Drag or type a zoom level. Ctrl+scroll also zooms.");
+            zoom.on_hover_text("Drag or type a zoom level. Pinch or Ctrl+scroll also zooms.");
             if ui
                 .add(Button::new("−").small().corner_radius(6.0))
                 .on_hover_text("Zoom out (Ctrl+-)")
@@ -576,7 +576,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(
-                            "Ctrl+O  ·  Ctrl+F search  ·  / vim search  ·  Ctrl+scroll zoom",
+                            "Ctrl+O  ·  Ctrl+F search  ·  / vim search  ·  pinch or Ctrl+scroll zoom",
                         )
                         .weak()
                         .size(12.0),

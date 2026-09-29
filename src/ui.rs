@@ -263,50 +263,49 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let error = app.error.clone();
     let mut jump = None;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing = vec2(4.0, 0.0);
-        ui.spacing_mut().button_padding = vec2(6.0, 2.0);
+        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
         if app.doc().is_some() {
-            if ui
-                .add(Button::new("Fit").small().corner_radius(6.0))
-                .on_hover_text("Fit page width (Ctrl+0)")
-                .clicked()
-            {
-                app.fit_width();
-            }
-            if ui
-                .add(Button::new("+").small().corner_radius(6.0))
-                .on_hover_text("Zoom in (Ctrl+=)")
-                .clicked()
-            {
-                app.zoom_by(1.1);
-            }
-            let mut percent = app
-                .doc()
-                .map(|doc| zoom_percent(doc.scale) as f32)
-                .unwrap_or(100.0);
-            let zoom = ui.add(
-                DragValue::new(&mut percent)
-                    .range(20.0..=800.0)
-                    .suffix("%")
-                    .speed(1.0)
-                    .max_decimals(0),
-            );
-            if zoom.changed() {
-                app.set_zoom_percent(percent);
-            }
-            zoom.on_hover_text("Drag or type a zoom level. Pinch or Ctrl+scroll also zooms.");
-            if ui
-                .add(Button::new("−").small().corner_radius(6.0))
-                .on_hover_text("Zoom out (Ctrl+-)")
-                .clicked()
-            {
-                app.zoom_by(1.0 / 1.1);
-            }
-            ui.add_space(8.0);
+            control_cluster(ui, |ui| {
+                if cluster_button(ui, "Fit", Vec2::new(36.0, CONTROL_H))
+                    .on_hover_text("Fit page width (Ctrl+0)")
+                    .clicked()
+                {
+                    app.fit_width();
+                }
+                cluster_sep(ui);
+                if cluster_button(ui, "+", Vec2::splat(CONTROL_H))
+                    .on_hover_text("Zoom in (Ctrl+=)")
+                    .clicked()
+                {
+                    app.zoom_by(1.1);
+                }
+                let mut percent = app
+                    .doc()
+                    .map(|doc| zoom_percent(doc.scale) as f32)
+                    .unwrap_or(100.0);
+                let zoom = cluster_drag(
+                    ui,
+                    DragValue::new(&mut percent)
+                        .range(20.0..=800.0)
+                        .suffix("%")
+                        .speed(1.0)
+                        .max_decimals(0),
+                    56.0,
+                );
+                if zoom.changed() {
+                    app.set_zoom_percent(percent);
+                }
+                zoom.on_hover_text("Drag or type a zoom level. Pinch or Ctrl+scroll also zooms.");
+                if cluster_button(ui, "−", Vec2::splat(CONTROL_H))
+                    .on_hover_text("Zoom out (Ctrl+-)")
+                    .clicked()
+                {
+                    app.zoom_by(1.0 / 1.1);
+                }
+            });
         }
         if let Some((label, color)) = notice {
             ui.label(RichText::new(label).color(color).size(12.0));
-            ui.add_space(6.0);
         }
         if let Some(error) = error {
             ui.label(
@@ -314,31 +313,33 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
                     .color(Color32::from_rgb(230, 120, 110))
                     .size(12.0),
             );
-            ui.add_space(6.0);
         }
         if let Some((page, count)) = page_info {
-            if ui
-                .add(Button::new("+Page").small().corner_radius(6.0))
-                .on_hover_text("Insert blank page after current (Ctrl+Shift+Enter)")
-                .clicked()
-            {
-                app.insert_page_after_current();
-            }
-            let mut page_1 = page as u32;
-            let response = ui
-                .add(
+            control_cluster(ui, |ui| {
+                if cluster_button(ui, "+Page", Vec2::new(52.0, CONTROL_H))
+                    .on_hover_text("Insert blank page after current (Ctrl+Shift+Enter)")
+                    .clicked()
+                {
+                    app.insert_page_after_current();
+                }
+                cluster_sep(ui);
+                let mut page_1 = page as u32;
+                let response = cluster_drag(
+                    ui,
                     DragValue::new(&mut page_1)
                         .range(1..=count as u32)
                         .suffix(format!(" / {count}"))
                         .speed(0.2),
+                    88.0,
                 )
                 .on_hover_text("Page. Ctrl+G jumps here.");
-            if want_page_focus {
-                response.request_focus();
-            }
-            if response.changed() {
-                jump = Some(page_1 as usize - 1);
-            }
+                if want_page_focus {
+                    response.request_focus();
+                }
+                if response.changed() {
+                    jump = Some(page_1 as usize - 1);
+                }
+            });
         }
     });
     if app.page_focus {
@@ -347,6 +348,80 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
     if let Some(page) = jump {
         app.queue_jump(page, None);
     }
+}
+
+const CONTROL_H: f32 = 24.0;
+
+fn control_cluster(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
+    let mut prepared = egui::Frame::new()
+        .fill(CHROME_RAISED)
+        .corner_radius(CornerRadius::same(7))
+        .inner_margin(egui::Margin::symmetric(2, 2))
+        .begin(ui);
+    prepared.content_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+    prepared.content_ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+    prepared
+        .content_ui
+        .horizontal(|ui| {
+            ui.set_height(CONTROL_H);
+            add_contents(ui);
+        });
+    prepared.end(ui);
+}
+
+fn cluster_sep(ui: &mut egui::Ui) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, CONTROL_H - 6.0), Sense::hover());
+    ui.painter().vline(
+        rect.center().x,
+        (rect.top() - 1.0)..=(rect.bottom() + 1.0),
+        Stroke::new(1.0, HAIRLINE),
+    );
+}
+
+fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(size, Sense::click());
+    let fill = if response.is_pointer_button_down_on() {
+        Color32::from_white_alpha(28)
+    } else if response.hovered() {
+        Color32::from_white_alpha(16)
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(5), fill);
+    }
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(12.5, FontFamily::Proportional),
+        TEXT,
+    );
+    response
+}
+
+fn cluster_drag(ui: &mut egui::Ui, drag: DragValue<'_>, width: f32) -> egui::Response {
+    ui.scope(|ui| {
+        {
+            let visuals = ui.visuals_mut();
+            visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
+            visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
+            visuals.widgets.inactive.bg_stroke = Stroke::NONE;
+            visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(16);
+            visuals.widgets.hovered.weak_bg_fill = Color32::from_white_alpha(16);
+            visuals.widgets.hovered.bg_stroke = Stroke::NONE;
+            visuals.widgets.active.bg_fill = Color32::from_white_alpha(28);
+            visuals.widgets.active.weak_bg_fill = Color32::from_white_alpha(28);
+            visuals.widgets.active.bg_stroke = Stroke::NONE;
+            visuals.widgets.inactive.corner_radius = CornerRadius::same(5);
+            visuals.widgets.hovered.corner_radius = CornerRadius::same(5);
+            visuals.widgets.active.corner_radius = CornerRadius::same(5);
+        }
+        ui.spacing_mut().interact_size.y = CONTROL_H;
+        ui.add_sized(Vec2::new(width, CONTROL_H), drag)
+    })
+    .inner
 }
 
 fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {

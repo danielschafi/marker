@@ -1111,13 +1111,6 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
         paint_tiles(&tab.doc, painter, page, view, render_scale);
         paint_search_hits(tab, painter, page, view);
         paint_annotations(app, painter, page, view);
-        painter.text(
-            Pos2::new(rect.center().x, rect.bottom() + 12.0),
-            egui::Align2::CENTER_TOP,
-            format!("{}", page + 1),
-            FontId::new(11.0, FontFamily::Proportional),
-            Color32::from_white_alpha(120),
-        );
     }
     paint_drag_preview(app, painter, view);
 }

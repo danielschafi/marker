@@ -41,6 +41,14 @@ pub enum PdfJob {
         gen: u64,
         after: usize,
     },
+    InsertPageAt {
+        gen: u64,
+        at: usize,
+    },
+    DeletePage {
+        gen: u64,
+        index: usize,
+    },
     Shutdown,
 }
 
@@ -73,6 +81,11 @@ pub enum PdfReply {
         result: Result<Vec<SavedXref>, String>,
     },
     PageInserted {
+        gen: u64,
+        index: usize,
+        pages: Vec<PageInfo>,
+    },
+    PageDeleted {
         gen: u64,
         index: usize,
         pages: Vec<PageInfo>,
@@ -150,6 +163,14 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::InsertPage { gen, after });
     }
 
+    pub fn insert_page_at(&self, gen: u64, at: usize) {
+        let _ = self.jobs.send(PdfJob::InsertPageAt { gen, at });
+    }
+
+    pub fn delete_page(&self, gen: u64, index: usize) {
+        let _ = self.jobs.send(PdfJob::DeletePage { gen, index });
+    }
+
     pub fn poll(&self) -> Vec<PdfReply> {
         let mut replies = Vec::new();
         while let Ok(reply) = self.replies.try_recv() {
@@ -171,7 +192,9 @@ fn job_rank(job: &PdfJob) -> u8 {
         | PdfJob::Open { .. }
         | PdfJob::Close { .. }
         | PdfJob::Save { .. }
-        | PdfJob::InsertPage { .. } => 0,
+        | PdfJob::InsertPage { .. }
+        | PdfJob::InsertPageAt { .. }
+        | PdfJob::DeletePage { .. } => 0,
         PdfJob::Tile { .. } => 1,
         PdfJob::Search { .. } => 2,
         PdfJob::Glyphs { .. } => 3,
@@ -346,6 +369,46 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                 match engine.insert_blank_page(after) {
                     Ok((index, pages)) => {
                         let _ = replies.send(PdfReply::PageInserted { gen, index, pages });
+                    }
+                    Err(message) => {
+                        let _ = replies.send(PdfReply::Failed {
+                            gen: Some(gen),
+                            message,
+                        });
+                    }
+                }
+            }
+            PdfJob::InsertPageAt { gen, at } => {
+                let Some(engine) = engines.get_mut(&gen) else {
+                    let _ = replies.send(PdfReply::Failed {
+                        gen: Some(gen),
+                        message: "No document is open.".into(),
+                    });
+                    continue;
+                };
+                match engine.insert_blank_page_at(at) {
+                    Ok((index, pages)) => {
+                        let _ = replies.send(PdfReply::PageInserted { gen, index, pages });
+                    }
+                    Err(message) => {
+                        let _ = replies.send(PdfReply::Failed {
+                            gen: Some(gen),
+                            message,
+                        });
+                    }
+                }
+            }
+            PdfJob::DeletePage { gen, index } => {
+                let Some(engine) = engines.get_mut(&gen) else {
+                    let _ = replies.send(PdfReply::Failed {
+                        gen: Some(gen),
+                        message: "No document is open.".into(),
+                    });
+                    continue;
+                };
+                match engine.delete_page_at(index) {
+                    Ok(pages) => {
+                        let _ = replies.send(PdfReply::PageDeleted { gen, index, pages });
                     }
                     Err(message) => {
                         let _ = replies.send(PdfReply::Failed {

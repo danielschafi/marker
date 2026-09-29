@@ -219,9 +219,20 @@ impl DocumentEngine {
     /// Insert a blank page after `after` (0-based). Returns the new page index.
     /// Size matches `after` when present, otherwise the first page / A4.
     pub fn insert_blank_page(&mut self, after: usize) -> Result<(usize, Vec<PageInfo>), String> {
+        let at = if self.pages.is_empty() {
+            0
+        } else {
+            (after + 1).min(self.pages.len())
+        };
+        self.insert_blank_page_at(at)
+    }
+
+    /// Insert a blank page at `at` (0-based). Returns the new page index.
+    pub fn insert_blank_page_at(&mut self, at: usize) -> Result<(usize, Vec<PageInfo>), String> {
         let template = self
             .pages
-            .get(after.min(self.pages.len().saturating_sub(1)))
+            .get(at.saturating_sub(1).min(self.pages.len().saturating_sub(1)))
+            .or_else(|| self.pages.first())
             .copied()
             .unwrap_or(PageInfo {
                 x0: 0.0,
@@ -229,20 +240,32 @@ impl DocumentEngine {
                 x1: Size::A4.width,
                 y1: Size::A4.height,
             });
-        let insert_at = if self.pages.is_empty() {
-            0
-        } else {
-            (after + 1).min(self.pages.len())
-        };
+        let at = at.min(self.pages.len());
         let size = Size::new(template.width().max(1.0), template.height().max(1.0));
         self.doc
-            .new_page_at(insert_at as i32, size)
+            .new_page_at(at as i32, size)
             .map_err(show)?;
         self.lists.clear();
         self.list_order.clear();
         self.refresh_pages()?;
         self.persist()?;
-        Ok((insert_at, self.pages.clone()))
+        Ok((at, self.pages.clone()))
+    }
+
+    /// Delete the page at `index` (0-based).
+    pub fn delete_page_at(&mut self, index: usize) -> Result<Vec<PageInfo>, String> {
+        if index >= self.pages.len() {
+            return Err("Page index out of range.".into());
+        }
+        if self.pages.len() <= 1 {
+            return Err("Cannot delete the only page.".into());
+        }
+        self.doc.delete_page(index as i32).map_err(show)?;
+        self.lists.clear();
+        self.list_order.clear();
+        self.refresh_pages()?;
+        self.persist()?;
+        Ok(self.pages.clone())
     }
 
     fn refresh_pages(&mut self) -> Result<(), String> {

@@ -287,6 +287,23 @@ impl Session {
             }
         }
     }
+
+    /// Inverse of [`Self::shift_pages_from`] after deleting the page at `at`.
+    /// Annotations that lived on the removed page are dropped (the page is gone).
+    pub fn unshift_pages_from(&mut self, at: usize) {
+        self.annotations.retain(|annot| annot.page != at);
+        for annot in &mut self.annotations {
+            if annot.page > at {
+                annot.page -= 1;
+            }
+        }
+        self.pending_deletes.retain(|(page, _)| *page != at);
+        for (page, _) in &mut self.pending_deletes {
+            if *page > at {
+                *page -= 1;
+            }
+        }
+    }
 }
 
 /// Put `snap` back in place of `current`, keeping xrefs learned since the snapshot
@@ -524,5 +541,48 @@ mod tests {
         let restored = restore_session(&session, before);
         assert!(restored.annotations.is_empty());
         assert_eq!(restored.pending_deletes, vec![(0, 9)]);
+    }
+
+    #[test]
+    fn page_shift_and_unshift_roundtrip() {
+        let mut session = Session::new();
+        session.insert(
+            0,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
+                content: "a".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        session.insert(
+            1,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
+                content: "b".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        session.shift_pages_from(1);
+        assert_eq!(session.annotations[0].page, 0);
+        assert_eq!(session.annotations[1].page, 2);
+        session.insert(
+            1,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
+                content: "new".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        session.unshift_pages_from(1);
+        assert_eq!(session.annotations.len(), 2);
+        assert_eq!(session.annotations[0].page, 0);
+        assert_eq!(session.annotations[1].page, 1);
+        match &session.annotations[1].kind {
+            AnnotKind::Text { content, .. } => assert_eq!(content, "b"),
+            other => panic!("expected text annot, got {other:?}"),
+        }
     }
 }

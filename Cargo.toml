@@ -28,6 +28,7 @@ mupdf = { version = "0.8.0", default-features = false, features = [
 resvg = "0.45"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1.0.151"
 toml = "0.9"
 typst = "0.15"
 typst-as-lib = { version = "0.16", default-features = false, features = [
@@ -37,6 +38,11 @@ typst-as-lib = { version = "0.16", default-features = false, features = [
 typst-layout = "0.15"
 typst-pdf = "0.15"
 typst-svg = "0.15"
+
+# winit 0.30 has no Wayland trackpad pinch; vendor a backport of PR #4338 so
+# zwp_pointer_gestures_v1 reaches egui as Event::Zoom / PanGesture.
+[patch.crates-io]
+winit = { path = "vendor/winit" }
 
 [profile.dev.package."*"]
 opt-level = 2

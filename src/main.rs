@@ -1,5 +1,6 @@
 mod annot;
 mod app;
+mod assistant;
 mod geom;
 mod math;
 mod pdf;

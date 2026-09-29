@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -7,7 +8,12 @@ use std::time::{Duration, Instant};
 use egui::{DragValue, Key, ViewportCommand};
 
 use crate::annot::{AnnotKind, Annotation, Glyph, Handle, Session, ShapeKind};
-use crate::geom::{PdfPoint, Rgb};
+use crate::assistant::{
+    AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole, AssistantTurn,
+    AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
+    LearningSelection, PendingCrop, TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
+};
+use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::math::{MathRender, MathWorker, RgbaImage};
 use crate::pdf::{OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
@@ -26,6 +32,8 @@ pub(crate) struct MarkerApp {
     pub(crate) split: Option<SplitState>,
     /// Right-click menu on a tab pill: (tab index, screen pos).
     pub(crate) tab_menu: Option<(usize, egui::Pos2)>,
+    /// Tab being dragged for split / pane assignment.
+    pub(crate) tab_drag: Option<usize>,
     pub(crate) opening: HashSet<u64>,
     pub(crate) error: Option<String>,
     pub(crate) page_focus: bool,
@@ -33,10 +41,15 @@ pub(crate) struct MarkerApp {
     pub(crate) zen: bool,
     /// Keep chrome visible briefly after the pointer leaves the top reveal strip.
     zen_chrome_until: Option<Instant>,
+    /// Learning assistant panel (closed on launch).
+    pub(crate) assistant_open: bool,
+    /// Temporary capture mode for assistant attachments.
+    pub(crate) capture: CaptureMode,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
     math: MathWorker,
+    assistant: AssistantWorker,
     math_seq: u64,
     math_deadline: Option<(u64, u64, Instant)>,
     next_gen: u64,
@@ -45,12 +58,41 @@ pub(crate) struct MarkerApp {
     dialog_busy: bool,
 }
 
-/// Two-pane document layout. `active` is the focused tab; `other` is the second pane.
+/// Two-pane document layout. `first` is left/top; `second` is right/bottom.
+/// Focus is `MarkerApp::active`, which must be one of the two pane tabs.
 #[derive(Clone, Copy)]
 pub(crate) struct SplitState {
-    pub other: usize,
+    pub first: usize,
+    pub second: usize,
     pub stacked: bool,
     pub ratio: f32,
+}
+
+impl SplitState {
+    pub(crate) fn contains(self, index: usize) -> bool {
+        self.first == index || self.second == index
+    }
+
+    pub(crate) fn other(self, active: usize) -> usize {
+        if active == self.first {
+            self.second
+        } else {
+            self.first
+        }
+    }
+}
+
+/// Where a dragged tab would land relative to the viewport.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SplitDropZone {
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Replace the document in the unfocused pane.
+    OtherPane,
+    /// Focus / place the dragged tab in the focused pane.
+    ActivePane,
 }
 
 pub(crate) struct Tab {
@@ -70,6 +112,7 @@ pub(crate) struct Tab {
     pub(crate) save_when_math_ready: bool,
     pub(crate) close_after_save: bool,
     pub(crate) outline_open: bool,
+    pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
@@ -180,11 +223,11 @@ impl Tool {
         Tool::Math,
     ];
 
-    /// Bare letter that selects this tool. `H` and `L` stay as vim panning.
+    /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
     pub(crate) fn shortcut(self) -> Key {
         match self {
-            Tool::Select => Key::V,
-            Tool::Highlight => Key::A,
+            Tool::Select => Key::S,
+            Tool::Highlight => Key::H,
             Tool::Text => Key::T,
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
@@ -229,6 +272,18 @@ enum PendingPageOp {
 
 #[derive(Clone)]
 pub(crate) enum Drag {
+    Region {
+        page: usize,
+        origin: PdfPoint,
+        current: PdfPoint,
+    },
+    LearningSelect {
+        page: usize,
+        anchor: Option<usize>,
+        current: Option<usize>,
+        origin: PdfPoint,
+        current_pt: PdfPoint,
+    },
     Highlight {
         page: usize,
         anchor: Option<usize>,
@@ -291,15 +346,19 @@ impl MarkerApp {
             split_view_rect: egui::Rect::NOTHING,
             split: None,
             tab_menu: None,
+            tab_drag: None,
             opening: HashSet::new(),
             error: None,
             page_focus: false,
             zen: false,
             zen_chrome_until: None,
+            assistant_open: false,
+            capture: CaptureMode::None,
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(),
             math: MathWorker::spawn(),
+            assistant: AssistantWorker::spawn(),
             math_seq: 1,
             math_deadline: None,
             next_gen: 1,
@@ -390,10 +449,30 @@ impl MarkerApp {
             return;
         }
         let tab = self.tabs.remove(index);
+        if tab.assistant.streaming {
+            self.assistant
+                .cancel(tab.doc.gen, tab.assistant.request_seq);
+        }
         self.worker.close(tab.doc.gen);
+        if let Some(drag) = self.tab_drag {
+            if drag == index {
+                self.tab_drag = None;
+            } else if drag > index {
+                self.tab_drag = Some(drag - 1);
+            }
+        }
+        if let Some((menu_index, pos)) = self.tab_menu {
+            if menu_index == index {
+                self.tab_menu = None;
+            } else if menu_index > index {
+                self.tab_menu = Some((menu_index - 1, pos));
+            }
+        }
         if self.tabs.is_empty() {
             self.active = 0;
             self.split = None;
+            self.tab_drag = None;
+            self.tab_menu = None;
             return;
         }
         if self.active >= self.tabs.len() {
@@ -401,18 +480,31 @@ impl MarkerApp {
         } else if self.active > index {
             self.active -= 1;
         }
-        if let Some(mut split) = self.split {
-            if split.other == index {
-                self.split = None;
-            } else {
-                if split.other > index {
-                    split.other -= 1;
-                }
-                if split.other == self.active || split.other >= self.tabs.len() {
-                    self.split = None;
+        if let Some(split) = self.split {
+            if split.first == index || split.second == index {
+                let survivor = if split.first == index {
+                    split.second
                 } else {
-                    self.split = Some(split);
+                    split.first
+                };
+                let survivor = if survivor > index {
+                    survivor - 1
+                } else {
+                    survivor
+                };
+                self.split = None;
+                if survivor < self.tabs.len() {
+                    self.active = survivor;
                 }
+            } else {
+                let mut split = split;
+                if split.first > index {
+                    split.first -= 1;
+                }
+                if split.second > index {
+                    split.second -= 1;
+                }
+                self.split = Some(split);
             }
         }
     }
@@ -421,11 +513,130 @@ impl MarkerApp {
         if other >= self.tabs.len() || other == self.active || self.tabs.len() < 2 {
             return;
         }
+        let ratio = self.split.map(|s| s.ratio).unwrap_or(0.5);
         self.split = Some(SplitState {
-            other,
+            first: self.active,
+            second: other,
             stacked,
-            ratio: 0.5,
+            ratio,
         });
+    }
+
+    /// Split using `index` as the other pane, or the next tab when `index` is active.
+    pub(crate) fn split_from_tab(&mut self, index: usize, stacked: bool) {
+        if self.tabs.len() < 2 || index >= self.tabs.len() {
+            return;
+        }
+        let other = if index == self.active {
+            (self.active + 1) % self.tabs.len()
+        } else {
+            index
+        };
+        self.split_with(other, stacked);
+    }
+
+    /// Toggle side-by-side / stacked split with the next tab; same layout again unsplits.
+    pub(crate) fn toggle_split(&mut self, stacked: bool) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        if let Some(split) = self.split {
+            if split.stacked == stacked {
+                self.unsplit();
+            } else if let Some(s) = self.split.as_mut() {
+                s.stacked = stacked;
+            }
+        } else {
+            let other = (self.active + 1) % self.tabs.len();
+            self.split_with(other, stacked);
+        }
+    }
+
+    fn set_split_panes(&mut self, first: usize, second: usize, stacked: bool) {
+        if first == second || first >= self.tabs.len() || second >= self.tabs.len() {
+            return;
+        }
+        let ratio = self.split.map(|s| s.ratio).unwrap_or(0.5);
+        self.split = Some(SplitState {
+            first,
+            second,
+            stacked,
+            ratio,
+        });
+        if self.active != first && self.active != second {
+            self.active = first;
+        }
+    }
+
+    /// Place `dragged` into a new or existing split according to an edge / pane drop.
+    pub(crate) fn apply_tab_drop(&mut self, dragged: usize, zone: SplitDropZone) {
+        if self.tabs.len() < 2 || dragged >= self.tabs.len() {
+            return;
+        }
+        match zone {
+            SplitDropZone::Left | SplitDropZone::Top => {
+                let stacked = matches!(zone, SplitDropZone::Top);
+                if dragged == self.active {
+                    let other = (self.active + 1) % self.tabs.len();
+                    self.set_split_panes(dragged, other, stacked);
+                } else {
+                    let prev = self.active;
+                    self.active = dragged;
+                    self.set_split_panes(dragged, prev, stacked);
+                }
+            }
+            SplitDropZone::Right | SplitDropZone::Bottom => {
+                let stacked = matches!(zone, SplitDropZone::Bottom);
+                if dragged == self.active {
+                    let next = (self.active + 1) % self.tabs.len();
+                    self.set_split_panes(next, dragged, stacked);
+                    self.active = next;
+                } else {
+                    self.set_split_panes(self.active, dragged, stacked);
+                }
+            }
+            SplitDropZone::OtherPane => {
+                let Some(split) = self.split else {
+                    return;
+                };
+                let unfocused = split.other(self.active);
+                if dragged == self.active {
+                    // Swap pane contents so the focused doc moves to the other side.
+                    self.split = Some(SplitState {
+                        first: split.second,
+                        second: split.first,
+                        stacked: split.stacked,
+                        ratio: 1.0 - split.ratio,
+                    });
+                } else if dragged != unfocused {
+                    if let Some(s) = self.split.as_mut() {
+                        if s.first == unfocused {
+                            s.first = dragged;
+                        } else {
+                            s.second = dragged;
+                        }
+                    }
+                }
+            }
+            SplitDropZone::ActivePane => {
+                let Some(split) = self.split else {
+                    return;
+                };
+                if dragged == self.active {
+                    return;
+                }
+                if dragged == split.other(self.active) {
+                    self.active = dragged;
+                } else if let Some(s) = self.split.as_mut() {
+                    if s.first == self.active {
+                        s.first = dragged;
+                    } else {
+                        s.second = dragged;
+                    }
+                    self.active = dragged;
+                }
+            }
+        }
     }
 
     pub(crate) fn unsplit(&mut self) {
@@ -436,13 +647,7 @@ impl MarkerApp {
         let Some(split) = self.split else {
             return;
         };
-        let other = split.other;
-        self.split = Some(SplitState {
-            other: self.active,
-            stacked: split.stacked,
-            ratio: 1.0 - split.ratio,
-        });
-        self.active = other;
+        self.active = split.other(self.active);
     }
 
     pub(crate) fn fit_width(&mut self) {
@@ -457,7 +662,7 @@ impl MarkerApp {
     pub(crate) fn fit_height(&mut self) {
         let view = self.view_rect;
         if let Some(doc) = self.doc_mut() {
-            doc.fit_height(view.height());
+            doc.fit_height(view.width(), view.height());
             doc.last_fit = Some(FitKind::Height);
             doc.clamp_scroll(view);
         }
@@ -847,16 +1052,15 @@ impl MarkerApp {
             self.nudge(0.0, -step * n);
             return true;
         }
-        if input.key_pressed(Key::H) && !input.modifiers.command {
-            let n = self.take_count();
-            self.vim_g = false;
-            self.nudge(-step * n, 0.0);
-            return true;
-        }
+        // `H` is Highlight; vim horizontal pan uses `L` for right only (left: Shift+L via count).
         if input.key_pressed(Key::L) && !input.modifiers.command {
             let n = self.take_count();
             self.vim_g = false;
-            self.nudge(step * n, 0.0);
+            if input.modifiers.shift {
+                self.nudge(-step * n, 0.0);
+            } else {
+                self.nudge(step * n, 0.0);
+            }
             return true;
         }
         if input
@@ -873,7 +1077,14 @@ impl MarkerApp {
     fn leave_typing(&mut self) {
         let mut exit_zen = false;
         let mut seal = false;
+        if self.capture != CaptureMode::None {
+            self.cancel_capture();
+            return;
+        }
         if self.tab_menu.take().is_some() {
+            return;
+        }
+        if self.tab_drag.take().is_some() {
             return;
         }
         if let Some(tab) = self.tab_mut() {
@@ -881,11 +1092,17 @@ impl MarkerApp {
                 return;
             }
             if tab.style_bar.take().is_some() {
+                // Dismiss the style strip first; a second Escape clears selection.
                 return;
             }
             if tab.editing.take().is_some() {
                 tab.focus_edit = false;
                 seal = true;
+            } else if tab.assistant.learning.take().is_some()
+                || tab.selected.take().is_some()
+            {
+                tab.editing = None;
+                // Cleared learning selection and/or annotation selection.
             } else if tab.search.open {
                 tab.search.open = false;
                 tab.search.hits.clear();
@@ -903,6 +1120,19 @@ impl MarkerApp {
         if exit_zen {
             self.zen = false;
             self.zen_chrome_until = None;
+        }
+    }
+
+    /// Clear annotation selection, style bar, and assistant learning selection.
+    pub(crate) fn clear_page_selection(&mut self) {
+        if let Some(tab) = self.tab_mut() {
+            tab.selected = None;
+            tab.editing = None;
+            tab.style_bar = None;
+            tab.assistant.learning = None;
+        }
+        if self.capture == CaptureMode::LearningText {
+            // Keep capture mode so the user can re-drag; only clear the committed selection.
         }
     }
 
@@ -964,6 +1194,7 @@ impl eframe::App for MarkerApp {
                     self.dispatch_tiles();
                 }
             });
+        ui::tab_drag_overlay(self, ctx);
         self.set_title(ctx);
         let busy = !self.opening.is_empty()
             || self.dialog_busy
@@ -971,12 +1202,16 @@ impl eframe::App for MarkerApp {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
                     || tab.search.pending
+                    || tab.assistant.streaming
+                    || tab.assistant.pending_crop.is_some()
                     || tab.doc.last_zoom.elapsed().as_millis() < 200
             });
         if busy {
             let focused = ctx.input(|input| input.focused);
             let wait = if focused { 8 } else { 200 };
             ctx.request_repaint_after(Duration::from_millis(wait));
+        } else if self.tabs.iter().any(|tab| tab.assistant.streaming) {
+            ctx.request_repaint_after(Duration::from_millis(50));
         }
     }
 }
@@ -1000,6 +1235,9 @@ impl MarkerApp {
         }
         for reply in self.math.poll() {
             self.on_math(ctx, reply);
+        }
+        for event in self.assistant.poll() {
+            self.on_assistant(ctx, event);
         }
     }
 
@@ -1053,6 +1291,7 @@ impl MarkerApp {
                         save_when_math_ready: false,
                         close_after_save: false,
                         outline_open: has_outline,
+                        assistant: TabAssistant::default(),
                         search: SearchState::default(),
                         last_hl: None,
                         focus_edit: false,
@@ -1145,6 +1384,7 @@ impl MarkerApp {
                 }
             }
             PdfReply::Saved { gen, result } => self.on_saved(gen, result),
+            PdfReply::Crop { gen, seq, result } => self.on_crop(ctx, gen, seq, result),
             PdfReply::PageInserted { gen, index, pages } => {
                 self.on_page_inserted(gen, index, pages);
             }
@@ -1535,7 +1775,7 @@ impl MarkerApp {
     pub(crate) fn dispatch_tiles(&mut self) {
         self.dispatch_tiles_at(self.active, self.view_rect);
         if let Some(split) = self.split {
-            self.dispatch_tiles_at(split.other, self.split_view_rect);
+            self.dispatch_tiles_at(split.other(self.active), self.split_view_rect);
         }
     }
 
@@ -1629,6 +1869,36 @@ impl MarkerApp {
         if ctx.input(|input| input.key_pressed(Key::F11)) {
             self.toggle_zen(ctx);
         }
+        // Assistant: Ctrl/Cmd+Alt+I toggle, Shift+A attach text, Alt+S region, Alt+E explain, . stop
+        if ctx.input(|input| {
+            input.key_pressed(Key::I) && input.modifiers.command && input.modifiers.alt
+        }) {
+            self.toggle_assistant();
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::A) && input.modifiers.command && input.modifiers.shift
+        }) {
+            if self.tab().is_some_and(|t| t.assistant.learning.is_some()) {
+                self.attach_learning_text();
+            } else {
+                self.begin_learning_select();
+            }
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::S) && input.modifiers.command && input.modifiers.alt
+        }) {
+            self.begin_region_capture();
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::E) && input.modifiers.command && input.modifiers.alt
+        }) {
+            self.explain_selection();
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::Period) && input.modifiers.command
+        }) {
+            self.assistant_stop();
+        }
         if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command) {
             if !self.tabs.is_empty() {
                 if input_shift(ctx) {
@@ -1637,6 +1907,18 @@ impl MarkerApp {
                     self.active = (self.active + 1) % self.tabs.len();
                 }
             }
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::Backslash) && input.modifiers.command && !input.modifiers.alt
+        }) {
+            self.toggle_split(input_shift(ctx));
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::Backslash)
+                && input.modifiers.command
+                && input.modifiers.alt
+        }) {
+            self.focus_split_other();
         }
         for file in ctx.input(|input| input.raw.dropped_files.clone()) {
             if let Some(path) = file.path {
@@ -1651,8 +1933,12 @@ impl MarkerApp {
         }
         if ctx.wants_keyboard_input() {
             if ctx.input(|input| input.key_pressed(Key::Escape)) {
-                self.leave_typing();
-                self.sync_zen_viewport(ctx);
+                if self.capture != CaptureMode::None {
+                    self.cancel_capture();
+                } else {
+                    self.leave_typing();
+                    self.sync_zen_viewport(ctx);
+                }
             }
             return;
         }
@@ -1744,8 +2030,12 @@ impl MarkerApp {
             }
         });
         if escaped {
-            self.leave_typing();
-            self.sync_zen_viewport(ctx);
+            if self.capture != CaptureMode::None {
+                self.cancel_capture();
+            } else {
+                self.leave_typing();
+                self.sync_zen_viewport(ctx);
+            }
         }
         if delete_selected {
             self.delete_selected();
@@ -1903,6 +2193,404 @@ impl MarkerApp {
         }
     }
 
+    pub(crate) fn toggle_assistant(&mut self) {
+        self.assistant_open = !self.assistant_open;
+        if !self.assistant_open {
+            self.capture = CaptureMode::None;
+        }
+    }
+
+    pub(crate) fn assistant_new_chat(&mut self) {
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        if tab.assistant.streaming {
+            let gen = tab.doc.gen;
+            let seq = tab.assistant.request_seq;
+            self.assistant.cancel(gen, seq);
+        }
+        if let Some(tab) = self.tab_mut() {
+            tab.assistant.new_chat();
+        }
+    }
+
+    pub(crate) fn assistant_stop(&mut self) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        if !tab.assistant.streaming {
+            return;
+        }
+        let gen = tab.doc.gen;
+        let seq = tab.assistant.request_seq;
+        self.assistant.cancel(gen, seq);
+    }
+
+    pub(crate) fn begin_learning_select(&mut self) {
+        self.assistant_open = true;
+        self.capture = CaptureMode::LearningText;
+        if let Some(tab) = self.tab_mut() {
+            tab.drag = None;
+        }
+    }
+
+    pub(crate) fn begin_region_capture(&mut self) {
+        self.assistant_open = true;
+        self.capture = CaptureMode::Region;
+        if let Some(tab) = self.tab_mut() {
+            tab.drag = None;
+        }
+    }
+
+    pub(crate) fn cancel_capture(&mut self) {
+        self.capture = CaptureMode::None;
+        if let Some(tab) = self.tab_mut() {
+            if matches!(
+                tab.drag,
+                Some(Drag::Region { .. } | Drag::LearningSelect { .. })
+            ) {
+                tab.drag = None;
+            }
+        }
+    }
+
+    pub(crate) fn attach_learning_text(&mut self) {
+        self.assistant_open = true;
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        let Some(sel) = tab.assistant.learning.clone() else {
+            tab.assistant.error = Some("Select text for the assistant first.".into());
+            self.capture = CaptureMode::LearningText;
+            return;
+        };
+        let Some(glyphs) = tab.doc.glyphs.get(&sel.page).cloned() else {
+            tab.assistant.error = Some("Text is still loading for that page.".into());
+            return;
+        };
+        let raw = crate::assistant::reconstruct_text(&glyphs, sel.glyph_lo, sel.glyph_hi);
+        if raw.trim().is_empty() {
+            tab.assistant.error =
+                Some("No text in that selection. Try a screenshot attachment instead.".into());
+            return;
+        }
+        let (text, truncated) = crate::assistant::truncate_text(&raw, MAX_TEXT_CHARS);
+        tab.assistant
+            .attachments
+            .retain(|a| !matches!(a, AssistantAttachment::Text { .. }));
+        tab.assistant.attachments.push(AssistantAttachment::Text {
+            page: sel.page,
+            text,
+            truncated,
+        });
+        tab.assistant.error = None;
+    }
+
+    pub(crate) fn attach_learning_screenshot(&mut self) {
+        self.assistant_open = true;
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let Some(sel) = tab.assistant.learning.clone() else {
+            if let Some(tab) = self.tab_mut() {
+                tab.assistant.error = Some("Select text for the assistant first.".into());
+            }
+            self.capture = CaptureMode::LearningText;
+            return;
+        };
+        let Some(glyphs) = tab.doc.glyphs.get(&sel.page) else {
+            if let Some(tab) = self.tab_mut() {
+                tab.assistant.error = Some("Text is still loading for that page.".into());
+            }
+            return;
+        };
+        let quads = crate::annot::highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi);
+        let Some(bounds) = union_rects(&quads) else {
+            return;
+        };
+        let rect = bounds.inflate(4.0);
+        self.request_crop(sel.page, rect);
+    }
+
+    pub(crate) fn explain_selection(&mut self) {
+        self.assistant_open = true;
+        self.attach_learning_text();
+        if let Some(tab) = self.tab_mut() {
+            if tab.assistant.draft.trim().is_empty() {
+                tab.assistant.draft = "Explain this selection clearly for a learner.".into();
+            }
+        }
+    }
+
+    pub(crate) fn request_crop(&mut self, page: usize, rect: PdfRect) {
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        let Some(info) = tab.doc.pages.get(page).copied() else {
+            return;
+        };
+        let rect = crate::assistant::clamp_crop_rect(rect, info);
+        if rect.is_empty() {
+            tab.assistant.error = Some("Crop region is empty.".into());
+            return;
+        }
+        let seq = tab.assistant.bump_crop_seq();
+        let gen = tab.doc.gen;
+        tab.assistant.pending_crop = Some(PendingCrop {
+            gen,
+            seq,
+            page,
+            rect,
+        });
+        tab.assistant.status_line = Some("Rendering screenshot…".into());
+        self.worker.crop(gen, seq, page, rect, CROP_DPI);
+    }
+
+    pub(crate) fn assistant_send(&mut self) {
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        if tab.assistant.streaming {
+            return;
+        }
+        let question = tab.assistant.draft.trim().to_string();
+        if question.is_empty() && tab.assistant.attachments.is_empty() {
+            tab.assistant.error = Some("Enter a question or attach context.".into());
+            return;
+        }
+        if !tab.assistant.disclosed {
+            tab.assistant.error =
+                Some("Confirm the Cursor disclosure below before the first send.".into());
+            return;
+        }
+        let question = if question.is_empty() {
+            "Please explain the attached material.".into()
+        } else {
+            question
+        };
+        let filename = tab
+            .doc
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string);
+        let mut text = None;
+        let mut images = Vec::new();
+        for attach in &tab.assistant.attachments {
+            match attach {
+                AssistantAttachment::Text {
+                    page,
+                    text: body,
+                    truncated,
+                } => {
+                    text = Some(BundleTextAttach {
+                        page: *page,
+                        text: body.clone(),
+                        truncated: *truncated,
+                    });
+                }
+                AssistantAttachment::Image {
+                    page,
+                    rect,
+                    png,
+                    width,
+                    height,
+                    ..
+                } => {
+                    images.push(BundleImageAttach {
+                        page: *page,
+                        rect: *rect,
+                        png: png.clone(),
+                        width: *width,
+                        height: *height,
+                        filename: format!("crop-{page}.png"),
+                    });
+                }
+            }
+        }
+        let gen = tab.doc.gen;
+        let seq = tab.assistant.bump_seq();
+        let chat_id = tab.assistant.chat_id.clone();
+        tab.assistant.streaming = true;
+        tab.assistant.error = None;
+        tab.assistant.status_line = Some("Talking to Cursor…".into());
+        tab.assistant.turns.push(AssistantTurn {
+            role: AssistantRole::User,
+            text: question.clone(),
+            incomplete: false,
+        });
+        tab.assistant.turns.push(AssistantTurn {
+            role: AssistantRole::Assistant,
+            text: String::new(),
+            incomplete: true,
+        });
+        tab.assistant.draft.clear();
+        tab.assistant.attachments.clear();
+
+        self.assistant.send(AssistantRequest {
+            gen,
+            seq,
+            chat_id,
+            bundle: BundleInput {
+                question,
+                filename,
+                text,
+                images,
+            },
+        });
+    }
+
+    pub(crate) fn lookup_selection_in_browser(&mut self) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let query = if let Some(sel) = &tab.assistant.learning {
+            tab.doc
+                .glyphs
+                .get(&sel.page)
+                .map(|glyphs| {
+                    crate::assistant::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi)
+                })
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let query = query.trim().to_string();
+        if query.is_empty() {
+            if let Some(tab) = self.tab_mut() {
+                tab.assistant.error =
+                    Some("Select text before looking it up in the browser.".into());
+            }
+            return;
+        }
+        let encoded = urlencoding_minimal(&query);
+        let url = format!("https://duckduckgo.com/?q={encoded}");
+        let _ = open_browser(&url);
+    }
+
+    fn on_crop(
+        &mut self,
+        ctx: &egui::Context,
+        gen: u64,
+        seq: u64,
+        result: Result<crate::pdf::CropImage, String>,
+    ) {
+        let Some(tab) = self.tab_by_gen_mut(gen) else {
+            return;
+        };
+        let pending = tab.assistant.pending_crop.take();
+        if pending.as_ref().is_none_or(|p| p.seq != seq) {
+            return;
+        }
+        tab.assistant.status_line = None;
+        match result {
+            Ok(crop) => {
+                let texture = upload_png_texture(ctx, gen, seq, &crop.png, crop.width, crop.height);
+                tab.assistant.attachments.push(AssistantAttachment::Image {
+                    page: crop.page,
+                    rect: crop.rect,
+                    png: crop.png,
+                    width: crop.width,
+                    height: crop.height,
+                    texture,
+                });
+                tab.assistant.error = None;
+            }
+            Err(message) => {
+                tab.assistant.error = Some(message);
+            }
+        }
+    }
+
+    fn on_assistant(&mut self, ctx: &egui::Context, event: AssistantEvent) {
+        let (gen, seq) = match &event {
+            AssistantEvent::Started { gen, seq, .. }
+            | AssistantEvent::Delta { gen, seq, .. }
+            | AssistantEvent::Completed { gen, seq, .. }
+            | AssistantEvent::Cancelled { gen, seq }
+            | AssistantEvent::Failed { gen, seq, .. }
+            | AssistantEvent::AuthRequired { gen, seq, .. } => (*gen, *seq),
+        };
+        let Some(tab) = self.tab_by_gen_mut(gen) else {
+            return;
+        };
+        if tab.assistant.request_seq != seq {
+            return;
+        }
+        match event {
+            AssistantEvent::Started { chat_id, .. } => {
+                tab.assistant.chat_id = Some(chat_id);
+                tab.assistant.status_line = Some("Streaming…".into());
+            }
+            AssistantEvent::Delta { text, .. } => {
+                if let Some(turn) = tab
+                    .assistant
+                    .turns
+                    .iter_mut()
+                    .rev()
+                    .find(|t| t.role == AssistantRole::Assistant)
+                {
+                    turn.text.push_str(&text);
+                    turn.incomplete = true;
+                }
+                ctx.request_repaint();
+            }
+            AssistantEvent::Completed { text, .. } => {
+                if let Some(turn) = tab
+                    .assistant
+                    .turns
+                    .iter_mut()
+                    .rev()
+                    .find(|t| t.role == AssistantRole::Assistant)
+                {
+                    if turn.text.is_empty() {
+                        turn.text = text;
+                    } else if !text.is_empty() && text.len() >= turn.text.len() {
+                        turn.text = text;
+                    }
+                    turn.incomplete = false;
+                }
+                tab.assistant.streaming = false;
+                tab.assistant.status_line = None;
+            }
+            AssistantEvent::Cancelled { .. } => {
+                if let Some(turn) = tab
+                    .assistant
+                    .turns
+                    .iter_mut()
+                    .rev()
+                    .find(|t| t.role == AssistantRole::Assistant)
+                {
+                    turn.incomplete = true;
+                    if turn.text.is_empty() {
+                        turn.text = "(stopped)".into();
+                    }
+                }
+                tab.assistant.streaming = false;
+                tab.assistant.status_line = Some("Stopped.".into());
+            }
+            AssistantEvent::Failed { message, .. }
+            | AssistantEvent::AuthRequired { message, .. } => {
+                tab.assistant.streaming = false;
+                tab.assistant.status_line = None;
+                tab.assistant.error = Some(message);
+                if let Some(turn) = tab
+                    .assistant
+                    .turns
+                    .iter_mut()
+                    .rev()
+                    .find(|t| t.role == AssistantRole::Assistant)
+                {
+                    if turn.text.is_empty() {
+                        tab.assistant.turns.pop();
+                    } else {
+                        turn.incomplete = true;
+                    }
+                }
+            }
+        }
+    }
+
     /// Whether tab/tool chrome should draw this frame (zen auto-hides until top-edge hover).
     pub(crate) fn chrome_visible(&mut self, ctx: &egui::Context) -> bool {
         if !self.zen {
@@ -1997,6 +2685,31 @@ impl MarkerApp {
 
         ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
         if show_color {
+            // Left / Right cycles the palette while the style strip is open.
+            let cycle = ui.ctx().input(|input| {
+                if input.key_pressed(Key::ArrowRight) {
+                    Some(1isize)
+                } else if input.key_pressed(Key::ArrowLeft) {
+                    Some(-1isize)
+                } else {
+                    None
+                }
+            });
+            if let Some(delta) = cycle {
+                if let Some(idx) = colors.iter().position(|c| *c == current) {
+                    let next =
+                        (idx as isize + delta).rem_euclid(colors.len() as isize) as usize;
+                    let color = colors[next];
+                    self.seal_then_arm();
+                    self.apply_color(color);
+                    self.seal_undo();
+                } else if let Some(color) = colors.first() {
+                    self.seal_then_arm();
+                    self.apply_color(*color);
+                    self.seal_undo();
+                }
+            }
+            let current = self.active_color();
             let mut picked = None;
             for color in colors {
                 if color_dot(ui, *color, *color == current) {
@@ -2335,6 +3048,85 @@ fn upload_preview(
         pixels,
         egui::TextureOptions::LINEAR,
     )
+}
+
+fn upload_png_texture(
+    ctx: &egui::Context,
+    gen: u64,
+    seq: u64,
+    png: &[u8],
+    width: u32,
+    height: u32,
+) -> Option<egui::TextureHandle> {
+    let decoded = image::load_from_memory(png).ok()?.to_rgba8();
+    let pixels = egui::ColorImage::from_rgba_unmultiplied(
+        [width as usize, height as usize],
+        decoded.as_raw(),
+    );
+    Some(ctx.load_texture(
+        format!("assistant-crop-{gen}-{seq}"),
+        pixels,
+        egui::TextureOptions::LINEAR,
+    ))
+}
+
+fn union_rects(rects: &[PdfRect]) -> Option<PdfRect> {
+    let first = *rects.first()?;
+    Some(rects.iter().skip(1).fold(first, |acc, r| {
+        PdfRect::new(
+            acc.x0.min(r.x0),
+            acc.y0.min(r.y0),
+            acc.x1.max(r.x1),
+            acc.y1.max(r.y1),
+        )
+    }))
+}
+
+fn urlencoding_minimal(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() * 2);
+    for b in text.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char);
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+fn open_browser(url: &str) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        Command::new("xdg-open")
+            .arg(url)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 fn input_shift(ctx: &egui::Context) -> bool {

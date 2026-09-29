@@ -6,7 +6,9 @@ use std::thread;
 use crate::annot::{Annotation, Glyph};
 use crate::geom::PdfRect;
 
-use super::engine::{DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage};
+use super::engine::{
+    CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage,
+};
 
 pub enum PdfJob {
     Open {
@@ -26,6 +28,13 @@ pub enum PdfJob {
     Glyphs {
         gen: u64,
         page: usize,
+    },
+    Crop {
+        gen: u64,
+        seq: u64,
+        page: usize,
+        rect: PdfRect,
+        dpi: f32,
     },
     Search {
         gen: u64,
@@ -69,6 +78,11 @@ pub enum PdfReply {
         gen: u64,
         page: usize,
         glyphs: Vec<Glyph>,
+    },
+    Crop {
+        gen: u64,
+        seq: u64,
+        result: Result<CropImage, String>,
     },
     Search {
         gen: u64,
@@ -146,6 +160,16 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::Glyphs { gen, page });
     }
 
+    pub fn crop(&self, gen: u64, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
+        let _ = self.jobs.send(PdfJob::Crop {
+            gen,
+            seq,
+            page,
+            rect,
+            dpi,
+        });
+    }
+
     pub fn search(&self, gen: u64, seq: u64, needle: String) {
         let _ = self.jobs.send(PdfJob::Search {
             gen,
@@ -196,7 +220,7 @@ fn job_rank(job: &PdfJob) -> u8 {
         | PdfJob::InsertPageAt { .. }
         | PdfJob::DeletePage { .. } => 0,
         PdfJob::Tile { .. } => 1,
-        PdfJob::Search { .. } => 2,
+        PdfJob::Crop { .. } | PdfJob::Search { .. } => 2,
         PdfJob::Glyphs { .. } => 3,
     }
 }
@@ -294,6 +318,24 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                         });
                     }
                 }
+            }
+            PdfJob::Crop {
+                gen,
+                seq,
+                page,
+                rect,
+                dpi,
+            } => {
+                let Some(engine) = engines.get_mut(&gen) else {
+                    let _ = replies.send(PdfReply::Crop {
+                        gen,
+                        seq,
+                        result: Err("No document is open.".into()),
+                    });
+                    continue;
+                };
+                let result = engine.render_crop_png(page, rect, dpi);
+                let _ = replies.send(PdfReply::Crop { gen, seq, result });
             }
             PdfJob::Search {
                 gen,

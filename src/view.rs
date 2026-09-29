@@ -7,6 +7,7 @@ use egui::{
 
 use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind};
 use crate::app::{CreateKind, DocState, Drag, MarkerApp, Tab, Tool};
+use crate::assistant::{CaptureMode, LearningSelection};
 use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
 use crate::theme;
@@ -40,18 +41,29 @@ impl DocState {
         let max_y = (self.doc_height_px() - view.height()).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         let max_page = self.pages.iter().map(PageInfo::width).fold(0.0, f32::max);
-        let max_x = (max_page * self.scale + PAD * 2.0 - view.width()).max(0.0);
-        self.scroll_x = self.scroll_x.clamp(0.0, max_x);
+        let content_w = max_page * self.scale + PAD * 2.0;
+        // Narrow pages: allow scroll_x in [content_w - view_w, 0] so the page
+        // stays on-screen while still letting zoom_at pin a point under the cursor.
+        // Wide pages: classic [0, content_w - view_w].
+        let min_x = (content_w - view.width()).min(0.0);
+        let max_x = (content_w - view.width()).max(0.0);
+        self.scroll_x = self.scroll_x.clamp(min_x, max_x);
+    }
+
+    fn center_scroll_x(&mut self, view_w: f32) {
+        let max_page = self.pages.iter().map(PageInfo::width).fold(0.0, f32::max);
+        let content_w = max_page * self.scale + PAD * 2.0;
+        self.scroll_x = (content_w - view_w) * 0.5;
     }
 
     pub(crate) fn fit_width(&mut self, view_w: f32) {
         let max_page = self.pages.iter().map(PageInfo::width).fold(1.0, f32::max);
         self.scale = ((view_w - PAD * 2.0) / max_page).clamp(MIN_SCALE, MAX_SCALE);
-        self.scroll_x = 0.0;
+        self.center_scroll_x(view_w);
         self.last_zoom = Instant::now();
     }
 
-    pub(crate) fn fit_height(&mut self, view_h: f32) {
+    pub(crate) fn fit_height(&mut self, view_w: f32, view_h: f32) {
         let page = self.current_page(view_h.max(1.0));
         let height = self
             .pages
@@ -60,7 +72,7 @@ impl DocState {
             .unwrap_or(1.0)
             .max(1.0);
         self.scale = ((view_h - PAD * 2.0) / height).clamp(MIN_SCALE, MAX_SCALE);
-        self.scroll_x = 0.0;
+        self.center_scroll_x(view_w);
         // Keep the current page near the top of the viewport.
         if let Some(top) = self.tops.get(page) {
             self.scroll_y = top * self.scale;
@@ -77,12 +89,9 @@ impl DocState {
     }
 
     fn page_origin(&self, page: usize, view: Rect) -> Pos2 {
-        let width = self.pages[page].width() * self.scale;
-        let x = if width + PAD * 2.0 <= view.width() {
-            view.left() + (view.width() - width) * 0.5
-        } else {
-            view.left() + PAD - self.scroll_x
-        };
+        // Always scroll-based; when the page is narrower than the view, scroll_x
+        // sits in a negative..0 range so zoom can still pin to the cursor.
+        let x = view.left() + PAD - self.scroll_x;
         let y = view.top() + self.tops[page] * self.scale - self.scroll_y;
         Pos2::new(x, y)
     }
@@ -131,17 +140,15 @@ impl DocState {
             self.scale = new_scale;
             self.scroll_y =
                 view.top() + top * new_scale + (point.y - info.y0) * new_scale - cursor.y;
-            let page_w = info.width() * new_scale;
-            if page_w + PAD * 2.0 > view.width() {
-                self.scroll_x = view.left() + PAD + (point.x - info.x0) * new_scale - cursor.x;
-            } else {
-                self.scroll_x = 0.0;
-            }
+            // Always pin horizontally too — clamp_scroll keeps a narrow page on-screen.
+            self.scroll_x = view.left() + PAD + (point.x - info.x0) * new_scale - cursor.x;
         } else {
-            let offset = cursor.y - view.top();
+            let offset_y = cursor.y - view.top();
+            let offset_x = cursor.x - view.left();
             let old = self.scale;
             self.scale = new_scale;
-            self.scroll_y = crate::geom::zoom_scroll(old, new_scale, self.scroll_y, offset);
+            self.scroll_y = crate::geom::zoom_scroll(old, new_scale, self.scroll_y, offset_y);
+            self.scroll_x = crate::geom::zoom_scroll(old, new_scale, self.scroll_x, offset_x);
         }
         self.last_zoom = Instant::now();
         self.last_fit = None;
@@ -225,17 +232,15 @@ pub(crate) fn viewport_tab(
     let steal_focus = !focused && (response.clicked() || response.drag_started());
     app.active = prev;
     if steal_focus {
-        if let Some(split) = app.split.as_mut() {
-            split.other = prev;
-            split.ratio = 1.0 - split.ratio;
-        }
         app.active = tab_index;
         app.view_rect = response.rect;
     }
 }
 
 fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
-    if !response.hovered() {
+    // Match egui::Scene: drive gestures from pointer-in-rect, not hovered(),
+    // so a sibling (scrollbar) doesn't swallow pinch mid-gesture.
+    if !response.contains_pointer() {
         return;
     }
     let (raw, zoom, command, hover) = response.ctx.input(|input| {
@@ -243,7 +248,7 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
             input.raw_scroll_delta,
             input.zoom_delta(),
             input.modifiers.command,
-            input.pointer.hover_pos(),
+            input.pointer.hover_pos().or(input.pointer.latest_pos()),
         )
     });
     let Some(tab) = app.tab_mut() else {
@@ -251,27 +256,35 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
     };
     // Pinch keeps a cursor position on most platforms; fall back to the view
     // center if the pointer briefly drops out mid-gesture.
-    let hover = hover.unwrap_or_else(|| response.rect.center());
+    let hover = hover
+        .filter(|pos| response.rect.contains(*pos))
+        .unwrap_or_else(|| response.rect.center());
     let pinching = (zoom - 1.0).abs() > f32::EPSILON;
 
-    // Prefer zoom whenever egui reports a zoom delta. Trackpad pinch often
-    // arrives together with a pan/scroll delta on Wayland; treating scroll
-    // first made pinch feel broken.
+    // Trackpad pinch (and ctrl+scroll) zoom about the pointer. Wayland also
+    // emits a PanGesture alongside PinchGesture; applying both is what makes
+    // pinch feel like a tablet instead of a stuck scale-only zoom.
     if pinching {
         tab.doc.zoom_at(zoom, hover, response.rect);
-        return;
-    }
-    if command && raw.y.abs() > 0.0 {
+    } else if command && raw.y.abs() > 0.0 {
         // Ctrl+wheel / Ctrl+two-finger scroll without a synthesized Zoom event.
         let factor = (1.0 + raw.y * 0.003).clamp(0.75, 1.35);
         tab.doc.zoom_at(factor, hover, response.rect);
         return;
     }
-    if raw != egui::Vec2::ZERO {
-        // Wheel notches arrive as small pixel deltas and egui then smears them
-        // across frames. Apply the raw delta immediately, scaled up so a notch
-        // moves a readable chunk of the page.
-        let gain = if raw.length() < 24.0 { 6.0 } else { 2.4 };
+
+    // Two-finger pan, including the translation half of a pinch. Skip while
+    // Ctrl is held so ctrl+scroll stays zoom-only (egui still fills raw_scroll
+    // even when it converts the same event into zoom_delta).
+    if !command && raw != egui::Vec2::ZERO {
+        // Pinch pan is already in points; discrete wheel notches need a boost.
+        let gain = if pinching {
+            1.0
+        } else if raw.length() < 24.0 {
+            6.0
+        } else {
+            2.4
+        };
         let scroll = raw * gain;
         tab.doc.scroll_y -= scroll.y;
         tab.doc.scroll_x -= scroll.x;
@@ -368,12 +381,51 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         Some(Drag::Pan { .. })
     ) {
         response.ctx.set_cursor_icon(CursorIcon::Grabbing);
-    } else if matches!(app.tool, Tool::Highlight | Tool::Text | Tool::Math) {
+    } else if matches!(app.capture, CaptureMode::Region) {
+        response.clone().on_hover_cursor(CursorIcon::Crosshair);
+    } else if matches!(app.capture, CaptureMode::LearningText)
+        || matches!(app.tool, Tool::Highlight | Tool::Text | Tool::Math)
+    {
         response.clone().on_hover_cursor(CursorIcon::Text);
     }
 }
 
 fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
+    if app.capture != CaptureMode::None && !space {
+        let capture = app.capture;
+        let Some(tab) = app.tab_mut() else {
+            return;
+        };
+        let Some((page, point)) = tab.doc.screen_to_page(pos, view) else {
+            return;
+        };
+        match capture {
+            CaptureMode::LearningText => {
+                let index = tab
+                    .doc
+                    .glyphs
+                    .get(&page)
+                    .and_then(|glyphs| glyph_at(glyphs, point));
+                tab.drag = Some(Drag::LearningSelect {
+                    page,
+                    anchor: index,
+                    current: index,
+                    origin: point,
+                    current_pt: point,
+                });
+            }
+            CaptureMode::Region => {
+                tab.drag = Some(Drag::Region {
+                    page,
+                    origin: point,
+                    current: point,
+                });
+            }
+            CaptureMode::None => {}
+        }
+        return;
+    }
+
     let tool = app.tool;
     let Some(tab) = app.tab_mut() else {
         return;
@@ -416,6 +468,8 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
         if space || tool == Tool::Select {
             tab.selected = None;
             tab.editing = None;
+            tab.style_bar = None;
+            tab.assistant.learning = None;
             tab.drag = Some(Drag::Pan {
                 scroll_x: tab.doc.scroll_x,
                 scroll_y: tab.doc.scroll_y,
@@ -496,6 +550,9 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
 }
 
 fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint) {
+    tab.selected = None;
+    tab.style_bar = None;
+    tab.assistant.learning = None;
     let glyphs = tab.doc.glyphs.get(&page);
     let index = glyphs.and_then(|glyphs| glyph_at(glyphs, point));
     let word = index.and_then(|i| glyphs.and_then(|g| g.get(i)).map(|g| g.word));
@@ -599,6 +656,54 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 word_lo,
                 word_hi,
                 replace,
+            });
+        }
+        Drag::LearningSelect {
+            page,
+            anchor,
+            origin,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            let point = tab
+                .doc
+                .screen_to_page(pos, view)
+                .filter(|(hit, _)| *hit == page)
+                .map(|(_, point)| point)
+                .unwrap_or(origin);
+            let current = tab
+                .doc
+                .glyphs
+                .get(&page)
+                .and_then(|glyphs| glyph_at(glyphs, point));
+            tab.drag = Some(Drag::LearningSelect {
+                page,
+                anchor,
+                current,
+                origin,
+                current_pt: point,
+            });
+        }
+        Drag::Region {
+            page,
+            origin,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            let point = tab
+                .doc
+                .screen_to_page(pos, view)
+                .filter(|(hit, _)| *hit == page)
+                .map(|(_, point)| point)
+                .unwrap_or(origin);
+            tab.drag = Some(Drag::Region {
+                page,
+                origin,
+                current: point,
             });
         }
         Drag::Shape {
@@ -711,7 +816,13 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool)
         match &drag {
             Drag::Highlight {
                 anchor: Some(_), ..
+            }
+            | Drag::LearningSelect {
+                anchor: Some(_), ..
             } => commit_drag(app, drag, view),
+            Drag::Region { .. } => {
+                // Tiny click — ignore empty crop.
+            }
             Drag::Create {
                 page, origin, kind, ..
             } => {
@@ -764,6 +875,25 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
         }
         Drag::Move { moved, .. } => *moved,
         Drag::Resize { .. } => true,
+        Drag::Region {
+            page,
+            origin,
+            current,
+        } => {
+            let a = tab.doc.page_to_screen(*page, *origin, view);
+            let b = tab.doc.page_to_screen(*page, *current, view);
+            a.distance(b) > 3.0
+        }
+        Drag::LearningSelect {
+            page,
+            origin,
+            current_pt,
+            ..
+        } => {
+            let a = tab.doc.page_to_screen(*page, *origin, view);
+            let b = tab.doc.page_to_screen(*page, *current_pt, view);
+            a.distance(b) > 3.0
+        }
     }
 }
 
@@ -771,14 +901,8 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
     let tool = app.tool;
     let located = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view));
     let Some((page, point)) = located else {
-        if let Some(tab) = app.tab_mut() {
-            if tab.editing.take().is_some() {
-                tab.selected = None;
-            } else {
-                tab.selected = None;
-            }
-        }
         app.end_edit_undo();
+        app.clear_page_selection();
         return;
     };
     let slop = app.tab().map(|tab| 4.0 / tab.doc.scale).unwrap_or(4.0);
@@ -803,6 +927,8 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 }
                 if let Some(tab) = app.tab_mut() {
                     tab.selected = Some(id);
+                    tab.assistant.learning = None;
+                    tab.style_bar = None;
                     if open && editable {
                         tab.editing = Some(id);
                         tab.focus_edit = true;
@@ -812,13 +938,14 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 }
             } else {
                 app.end_edit_undo();
-                if let Some(tab) = app.tab_mut() {
-                    tab.selected = None;
-                    tab.editing = None;
-                }
+                app.clear_page_selection();
             }
         }
-        Tool::Highlight => {}
+        Tool::Highlight => {
+            if hit.is_none() {
+                app.clear_page_selection();
+            }
+        }
         Tool::Text => {
             let text = hit.filter(|id| {
                 app.tab().is_some_and(|tab| {
@@ -832,10 +959,14 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_mut() {
                     tab.selected = Some(id);
+                    tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
                 }
             } else {
+                if hit.is_none() {
+                    app.clear_page_selection();
+                }
                 place_box(app, page, point, None, CreateKind::Text);
             }
         }
@@ -852,14 +983,22 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_mut() {
                     tab.selected = Some(id);
+                    tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
                 }
             } else {
+                if hit.is_none() {
+                    app.clear_page_selection();
+                }
                 place_box(app, page, point, None, CreateKind::Math);
             }
         }
-        Tool::Rect | Tool::Ellipse | Tool::Line => {}
+        Tool::Rect | Tool::Ellipse | Tool::Line => {
+            if hit.is_none() {
+                app.clear_page_selection();
+            }
+        }
     }
 }
 
@@ -872,6 +1011,39 @@ fn is_editable(tab: &Tab, id: u64) -> bool {
 
 fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
     match drag {
+        Drag::LearningSelect {
+            page,
+            anchor,
+            current,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            if let (Some(a), Some(c)) = (anchor, current) {
+                tab.assistant.learning = Some(LearningSelection {
+                    page,
+                    glyph_lo: a.min(c),
+                    glyph_hi: a.max(c),
+                });
+                app.capture = CaptureMode::None;
+                app.assistant_open = true;
+                app.attach_learning_text();
+            }
+        }
+        Drag::Region {
+            page,
+            origin,
+            current,
+        } => {
+            let rect = PdfRect::from_points(origin, current);
+            if rect.is_empty() {
+                return;
+            }
+            app.capture = CaptureMode::None;
+            app.assistant_open = true;
+            app.request_crop(page, rect);
+        }
         Drag::Highlight {
             page,
             anchor,
@@ -1172,6 +1344,7 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
         paint_annotations(app, painter, page, view);
     }
     paint_drag_preview(app, painter, view);
+    paint_learning_selection(app, painter, view);
 }
 
 fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
@@ -1426,11 +1599,68 @@ fn fit_math(box_rect: Rect, nat_w: f32, nat_h: f32, scale: f32) -> Rect {
     Rect::from_min_size(box_rect.min, size)
 }
 
+fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
+    let Some(tab) = app.tab() else {
+        return;
+    };
+    // Skip while actively dragging a new learning select.
+    if matches!(tab.drag, Some(Drag::LearningSelect { .. })) {
+        return;
+    }
+    let Some(sel) = &tab.assistant.learning else {
+        return;
+    };
+    let Some(glyphs) = tab.doc.glyphs.get(&sel.page) else {
+        return;
+    };
+    let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 56);
+    for rect in highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi) {
+        painter.rect_filled(pdf_rect_screen(&tab.doc, sel.page, rect, view), 1.0, fill);
+    }
+}
+
 fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
     let Some(tab) = app.tab() else {
         return;
     };
     match &tab.drag {
+        Some(Drag::LearningSelect {
+            page,
+            anchor,
+            current,
+            origin,
+            current_pt,
+        }) => {
+            let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 72);
+            if let (Some(a), Some(c), Some(glyphs)) = (*anchor, *current, tab.doc.glyphs.get(page))
+            {
+                for rect in highlight_quads(glyphs, a.min(c), a.max(c)) {
+                    painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
+                }
+            } else {
+                let rect = PdfRect::from_points(*origin, *current_pt);
+                painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
+            }
+        }
+        Some(Drag::Region {
+            page,
+            origin,
+            current,
+        }) => {
+            let stroke = Stroke::new(1.5, Color32::from_rgb(80, 160, 255));
+            let rect = pdf_rect_screen(
+                &tab.doc,
+                *page,
+                PdfRect::from_points(*origin, *current),
+                view,
+            );
+            painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
+            painter.rect_filled(
+                rect,
+                0.0,
+                Color32::from_rgba_unmultiplied(80, 160, 255, 40),
+            );
+        }
         Some(Drag::Highlight {
             page,
             anchor,
@@ -1846,6 +2076,7 @@ fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale)
     });
     if let Some(id) = hit {
+        // Always reopen the style strip on right-click, even if it just auto-hid.
         app.open_style_bar(id, false);
         return;
     }
@@ -1909,6 +2140,7 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     let over_bar = area.response.hovered() || area.response.contains_pointer();
     if let Some(until) = bar.until {
         if Instant::now() >= until && !over_bar {
+            // Auto-hide the strip but keep selection until Escape / click-away.
             if let Some(tab) = app.tab_mut() {
                 tab.style_bar = None;
             }
@@ -1917,19 +2149,31 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     }
 
     let right_click = ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
-    let outside = ctx.input(|input| input.pointer.any_click())
-        && !over_bar
-        && !area.response.clicked()
-        && !right_click;
+    // Use press (not release) so dismissing isn't triggered by the mouse-up that finished drawing.
+    let left_press = ctx.input(|input| input.pointer.button_pressed(PointerButton::Primary));
+    let left_outside = left_press && !over_bar && !area.response.clicked() && !right_click;
     if delete {
         if let Some(tab) = app.tab_mut() {
             tab.selected = Some(bar.id);
             tab.style_bar = None;
         }
         app.delete_selected();
-    } else if outside {
-        if let Some(tab) = app.tab_mut() {
-            tab.style_bar = None;
+    } else if left_outside {
+        let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+        let hit_self = pointer.and_then(|pos| {
+            let tab = app.tab()?;
+            let (page, point) = tab.doc.screen_to_page(pos, view)?;
+            tab.doc
+                .session
+                .hit_test(page, point, 6.0 / tab.doc.scale)
+        }) == Some(bar.id);
+        if hit_self {
+            // Clicked the annotation under the strip — keep selection, dismiss strip.
+            if let Some(tab) = app.tab_mut() {
+                tab.style_bar = None;
+            }
+        } else {
+            app.clear_page_selection();
         }
     }
 }
@@ -1938,17 +2182,41 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let Some((pos, id)) = app.tab().and_then(|tab| tab.menu) else {
         return;
     };
+    let has_learning = app
+        .tab()
+        .is_some_and(|tab| tab.assistant.learning.is_some());
     let mut delete = false;
     let mut paste = false;
+    let mut attach_text = false;
+    let mut attach_shot = false;
+    let mut explain = false;
+    let mut lookup = false;
     let area = egui::Area::new(Id::new("marker-context"))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos)
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(120.0);
+                ui.set_min_width(160.0);
                 if ui.button("Paste image").clicked() {
                     paste = true;
+                }
+                if ui.button("Select text for Assistant").clicked() {
+                    attach_text = true;
+                }
+                if has_learning {
+                    if ui.button("Attach selected text").clicked() {
+                        attach_text = true;
+                    }
+                    if ui.button("Attach screenshot of selection").clicked() {
+                        attach_shot = true;
+                    }
+                    if ui.button("Explain with Cursor").clicked() {
+                        explain = true;
+                    }
+                    if ui.button("Look up in browser").clicked() {
+                        lookup = true;
+                    }
                 }
                 if id.is_some() && ui.button("Delete").clicked() {
                     delete = true;
@@ -1965,6 +2233,30 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             tab.menu = None;
         }
         let _ = app.paste_clipboard_image();
+    } else if attach_text {
+        if let Some(tab) = app.tab_mut() {
+            tab.menu = None;
+        }
+        if has_learning {
+            app.attach_learning_text();
+        } else {
+            app.begin_learning_select();
+        }
+    } else if attach_shot {
+        if let Some(tab) = app.tab_mut() {
+            tab.menu = None;
+        }
+        app.attach_learning_screenshot();
+    } else if explain {
+        if let Some(tab) = app.tab_mut() {
+            tab.menu = None;
+        }
+        app.explain_selection();
+    } else if lookup {
+        if let Some(tab) = app.tab_mut() {
+            tab.menu = None;
+        }
+        app.lookup_selection_in_browser();
     } else if delete {
         if let Some(tab) = app.tab_mut() {
             if let Some(id) = id {
@@ -1981,6 +2273,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
+    let scroll_id = app.active;
     let Some(tab) = app.tab_mut() else {
         return;
     };
@@ -2001,7 +2294,11 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     );
     ui.painter()
         .rect_filled(thumb, 3.0, Color32::from_white_alpha(80));
-    let response = ui.interact(track, Id::new("marker-scroll"), Sense::click_and_drag());
+    let response = ui.interact(
+        track,
+        Id::new(("marker-scroll", scroll_id)),
+        Sense::click_and_drag(),
+    );
     if response.dragged() {
         tab.doc.scroll_y += response.drag_delta().y / travel * (height - view.height());
         tab.doc.clamp_scroll(view);

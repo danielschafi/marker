@@ -45,6 +45,14 @@ pub struct OutlineNode {
     pub children: Vec<OutlineNode>,
 }
 
+pub struct CropImage {
+    pub page: usize,
+    pub width: u32,
+    pub height: u32,
+    pub png: Vec<u8>,
+    pub rect: PdfRect,
+}
+
 pub struct TileImage {
     pub page: usize,
     pub scale: f32,
@@ -200,6 +208,58 @@ impl DocumentEngine {
             height,
             pixels,
         }))
+    }
+
+    /// Rasterize a PDF-space rectangle to PNG (contents only, no annotation overlay).
+    pub fn render_crop_png(
+        &mut self,
+        page: usize,
+        rect: PdfRect,
+        dpi: f32,
+    ) -> Result<CropImage, String> {
+        let info = *self.pages.get(page).ok_or("Page is out of range.")?;
+        let rect = crate::assistant::clamp_crop_rect(rect, info);
+        if rect.is_empty() {
+            return Err("Crop region is empty.".into());
+        }
+        let scale = crate::assistant::crop_scale(rect, dpi);
+        let tx0 = (rect.x0 * scale).floor() as i32;
+        let ty0 = (rect.y0 * scale).floor() as i32;
+        let tx1 = (rect.x1 * scale).ceil() as i32;
+        let ty1 = (rect.y1 * scale).ceil() as i32;
+        if tx1 <= tx0 || ty1 <= ty0 {
+            return Err("Crop region is empty.".into());
+        }
+
+        let ctm = Matrix::new_scale(scale, scale);
+        let irect = IRect::new(tx0, ty0, tx1, ty1);
+        let mut pixmap =
+            Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false).map_err(show)?;
+        pixmap.clear_with(255).map_err(show)?;
+        let device = Device::from_pixmap(&pixmap).map_err(show)?;
+        let scissor = Rect::new(tx0 as f32, ty0 as f32, tx1 as f32, ty1 as f32);
+        self.display_list(page)?
+            .run(&device, &ctm, scissor)
+            .map_err(show)?;
+        drop(device);
+
+        let width = pixmap.width();
+        let height = pixmap.height();
+        let pixels = rgba_from_pixmap(&pixmap);
+        let png = encode_png(&pixels, width, height)?;
+        if png.len() > crate::assistant::CROP_MAX_PNG_BYTES {
+            return Err(format!(
+                "Crop PNG is too large ({} bytes).",
+                png.len()
+            ));
+        }
+        Ok(CropImage {
+            page,
+            width,
+            height,
+            png,
+            rect,
+        })
     }
 
     pub fn save(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, String> {

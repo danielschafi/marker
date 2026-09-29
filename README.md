@@ -65,8 +65,8 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 
 | Key | Tool |
 | --- | --- |
-| `V` | Select, move, and resize |
-| `A` | Highlight |
+| `S` | Select, move, and resize |
+| `H` | Highlight |
 | `T` | Text |
 | `R` | Rectangle |
 | `E` | Ellipse |
@@ -95,9 +95,10 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `Ctrl+Shift+Enter` | Insert a blank page after the current page |
 | `Delete` or `Backspace` | Delete the selected annotation |
 
-Vim-style navigation uses `H`, `J`, `K`, and `L` to pan, `Ctrl+U` and
-`Ctrl+D` for half-page movement, `gg` for the first page, and `G` for the last.
-Numeric counts work with these motions.
+Vim-style navigation uses `J`/`K` to pan vertically and `L`/`Shift+L` to pan
+horizontally (`H` is Highlight), plus `Ctrl+U`/`Ctrl+D` for half-page movement,
+`gg` for the first page, and `G` for the last. Numeric counts work with these
+motions.
 
 ## Configuration
 

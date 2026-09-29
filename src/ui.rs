@@ -6,11 +6,12 @@ use egui::{
     StrokeKind, TextEdit, TopBottomPanel, Vec2,
 };
 
-use crate::app::{MarkerApp, SaveState, SplitState, Tool};
+use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, Tool};
+use crate::assistant::{AssistantAttachment, AssistantRole, CaptureMode};
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 use crate::pdf::OutlineNode;
 use crate::theme::{self, ThemeColors};
-use crate::view::{viewport, viewport_tab};
+use crate::view::viewport_tab;
 
 const BRAND_FAMILY: &str = "Brand";
 
@@ -27,6 +28,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     search_bar(app, ctx);
     if show_chrome {
         outline_panel(app, ctx);
+        assistant_panel(app, ctx);
     }
 }
 
@@ -81,13 +83,20 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                     {
                         app.toggle_zen(ui.ctx());
                     }
+                    if chrome_button(ui, "Assistant", app.assistant_open)
+                        .on_hover_text("Cursor learning assistant (Ctrl+Alt+I)")
+                        .clicked()
+                    {
+                        app.toggle_assistant();
+                    }
                 }
                 ui.add_space(4.0);
 
                 let mut close = None;
                 let mut select = None;
                 let mut tab_menu = None;
-                let split_other = app.split.map(|s| s.other);
+                let mut drag_tab = None;
+                let split = app.split;
                 for (index, tab) in app.tabs.iter().enumerate() {
                     let name = tab
                         .doc
@@ -95,7 +104,7 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                         .file_name()
                         .and_then(|name| name.to_str())
                         .unwrap_or("document.pdf");
-                    let in_split = Some(index) == split_other;
+                    let in_split = split.is_some_and(|s| s.contains(index));
                     let action = tab_pill(
                         ui,
                         name,
@@ -109,6 +118,9 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                     if action.close {
                         close = Some(index);
                     }
+                    if action.drag {
+                        drag_tab = Some(index);
+                    }
                     if action.menu {
                         tab_menu = action
                             .pointer
@@ -121,14 +133,33 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                 }
                 document_controls(app, ui);
                 if let Some(index) = select {
-                    if app.split.is_some_and(|s| s.other == index) {
-                        app.focus_split_other();
+                    if let Some(split) = app.split {
+                        if split.contains(index) {
+                            app.active = index;
+                        } else {
+                            // Replace the focused pane's document.
+                            let focus_first = app.active == split.first;
+                            if let Some(s) = app.split.as_mut() {
+                                if focus_first {
+                                    s.first = index;
+                                } else {
+                                    s.second = index;
+                                }
+                            }
+                            app.active = index;
+                        }
                     } else {
                         app.active = index;
                     }
                 }
                 if let Some(index) = close {
                     app.close_tab(index);
+                }
+                if let Some(index) = drag_tab {
+                    if app.tabs.len() >= 2 {
+                        app.tab_drag = Some(index);
+                        app.tab_menu = None;
+                    }
                 }
                 if let Some(menu) = tab_menu {
                     app.tab_menu = Some(menu);
@@ -142,6 +173,7 @@ struct TabAction {
     select: bool,
     close: bool,
     menu: bool,
+    drag: bool,
     pointer: Option<Pos2>,
 }
 
@@ -160,10 +192,10 @@ fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: u
     if selected {
         width += 16.0;
     }
-    let (rect, response) = ui.allocate_exact_size(vec2(width, TAB_PILL_H), Sense::click());
+    let (rect, response) = ui.allocate_exact_size(vec2(width, TAB_PILL_H), Sense::click_and_drag());
     let fill = if selected {
         colors.chrome_raised
-    } else if response.hovered() {
+    } else if response.hovered() || response.dragged() {
         Color32::from_white_alpha(14)
     } else {
         Color32::TRANSPARENT
@@ -205,10 +237,16 @@ fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: u
         close_clicked = close.clicked() || close.middle_clicked();
     }
 
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
+    let response = response.on_hover_text("Drag to split · right-click for layout");
+
     TabAction {
         select: response.clicked() && !close_clicked,
         close: close_clicked || response.middle_clicked(),
         menu: response.secondary_clicked(),
+        drag: response.drag_started() && !close_clicked,
         pointer: response.interact_pointer_pos(),
     }
 }
@@ -521,6 +559,212 @@ fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     }
 }
 
+fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
+    if !app.assistant_open || app.tab().is_none() {
+        return;
+    }
+    let colors = p(ctx);
+    let max_w = (ctx.content_rect().width() * 0.45).min(640.0).max(300.0);
+    let mut send = false;
+    let mut stop = false;
+    let mut new_chat = false;
+    let mut close = false;
+    let mut remove_attach = None;
+    let mut begin_text = false;
+    let mut begin_region = false;
+
+    egui::SidePanel::right("assistant")
+        .resizable(true)
+        .default_width(360.0)
+        .width_range(300.0..=max_w)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome)
+                .stroke(Stroke::new(1.0, colors.hairline))
+                .inner_margin(10.0),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Cursor").strong().size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.small_button("×").on_hover_text("Close panel").clicked() {
+                        close = true;
+                    }
+                    if ui.small_button("New").on_hover_text("New chat").clicked() {
+                        new_chat = true;
+                    }
+                });
+            });
+            let capture = app.capture;
+            let status = app
+                .tab()
+                .and_then(|t| t.assistant.status_line.clone())
+                .unwrap_or_else(|| match capture {
+                    CaptureMode::LearningText => "Drag to select text for the assistant.".into(),
+                    CaptureMode::Region => "Drag a rectangle to capture a screenshot.".into(),
+                    CaptureMode::None => "Ask about the open PDF.".into(),
+                });
+            ui.label(RichText::new(status).weak().size(12.0));
+            ui.add_space(4.0);
+
+            let streaming = app.tab().is_some_and(|t| t.assistant.streaming);
+            let error = app.tab().and_then(|t| t.assistant.error.clone());
+            let turns = app
+                .tab()
+                .map(|t| t.assistant.turns.clone())
+                .unwrap_or_default();
+
+            ScrollArea::vertical()
+                .id_salt("assistant-transcript")
+                .auto_shrink([false, false])
+                .max_height(ui.available_height() - 180.0)
+                .show(ui, |ui| {
+                    ui.set_min_width(ui.available_width());
+                    if turns.is_empty() {
+                        ui.label(
+                            RichText::new(
+                                "Attach selected text or a page region, then ask Cursor a question.",
+                            )
+                            .weak(),
+                        );
+                    }
+                    for turn in &turns {
+                        let who = match turn.role {
+                            AssistantRole::User => "You",
+                            AssistantRole::Assistant => "Cursor",
+                        };
+                        ui.label(RichText::new(who).strong().size(12.0));
+                        ui.label(&turn.text);
+                        if turn.incomplete {
+                            ui.label(RichText::new("…").weak());
+                        }
+                        ui.add_space(8.0);
+                    }
+                });
+
+            if let Some(err) = error {
+                ui.colored_label(Color32::from_rgb(200, 80, 80), err);
+            }
+
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .small_button("Select text")
+                    .on_hover_text("Drag to select text and attach it (Ctrl+Shift+A)")
+                    .clicked()
+                {
+                    begin_text = true;
+                }
+                if ui
+                    .small_button("Screenshot")
+                    .on_hover_text("Capture a page region (Ctrl+Alt+S)")
+                    .clicked()
+                {
+                    begin_region = true;
+                }
+                if streaming {
+                    if ui.small_button("Stop").on_hover_text("Ctrl+.").clicked() {
+                        stop = true;
+                    }
+                }
+            });
+
+            let attachments: Vec<(String, Option<egui::TextureHandle>)> = app
+                .tab()
+                .map(|t| {
+                    t.assistant
+                        .attachments
+                        .iter()
+                        .map(|a| {
+                            let tex = match a {
+                                AssistantAttachment::Image { texture, .. } => texture.clone(),
+                                _ => None,
+                            };
+                            (a.label(), tex)
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            if !attachments.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    for (i, (label, tex)) in attachments.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            if let Some(tex) = tex {
+                                ui.image((tex.id(), Vec2::new(28.0, 28.0)));
+                            }
+                            let chip = ui.button(format!("{label} ×"));
+                            if chip.clicked() {
+                                remove_attach = Some(i);
+                            }
+                        });
+                    }
+                });
+            }
+
+            if let Some(tab) = app.tab_mut() {
+                if !tab.assistant.disclosed {
+                    ui.checkbox(
+                        &mut tab.assistant.disclosed,
+                        "I understand prompts and attachments go through my Cursor account",
+                    );
+                }
+                let response = ui.add(
+                    TextEdit::multiline(&mut tab.assistant.draft)
+                        .id_salt("assistant-draft")
+                        .desired_width(ui.available_width())
+                        .desired_rows(3)
+                        .hint_text("Ask Cursor…"),
+                );
+                let enter = response.has_focus()
+                    && ui.input(|input| {
+                        input.key_pressed(Key::Enter) && !input.modifiers.shift
+                    });
+                if enter {
+                    // Consume the newline Enter would insert by trimming trailing newline.
+                    if tab.assistant.draft.ends_with('\n') {
+                        tab.assistant.draft.pop();
+                    }
+                    send = true;
+                }
+            }
+
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(!streaming, Button::new("Send"))
+                    .clicked()
+                {
+                    send = true;
+                }
+            });
+        });
+
+    if close {
+        app.assistant_open = false;
+        app.capture = CaptureMode::None;
+    }
+    if new_chat {
+        app.assistant_new_chat();
+    }
+    if stop {
+        app.assistant_stop();
+    }
+    if begin_text {
+        app.begin_learning_select();
+    }
+    if begin_region {
+        app.begin_region_capture();
+    }
+    if let Some(i) = remove_attach {
+        if let Some(tab) = app.tab_mut() {
+            if i < tab.assistant.attachments.len() {
+                tab.assistant.attachments.remove(i);
+            }
+        }
+    }
+    if send {
+        app.assistant_send();
+    }
+}
+
 fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
     let colors = p(ctx);
     if app.tab().is_none() || !app.settings.toolbar_visible {
@@ -667,12 +911,24 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         app.tab_menu = None;
         return;
     }
-    let can_split = app.tabs.len() >= 2 && index != app.active;
+    let can_split = app.tabs.len() >= 2;
     let split_open = app.split.is_some();
     let mut split_side = false;
     let mut split_stack = false;
     let mut unsplit = false;
     let mut close_menu = false;
+    let with_label = if index == app.active {
+        let other = (app.active + 1) % app.tabs.len();
+        app.tabs.get(other).and_then(|tab| {
+            tab.doc
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| format!(" with {name}"))
+        })
+    } else {
+        None
+    };
 
     let area = egui::Area::new(Id::new("marker-tab-menu"))
         .order(egui::Order::Foreground)
@@ -680,12 +936,18 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(150.0);
+                ui.set_min_width(168.0);
                 if can_split {
-                    if ui.button("Split side-by-side").clicked() {
+                    let side = format!(
+                        "Split side-by-side{}",
+                        with_label.as_deref().unwrap_or("")
+                    );
+                    let stack =
+                        format!("Split stacked{}", with_label.as_deref().unwrap_or(""));
+                    if ui.button(side).clicked() {
                         split_side = true;
                     }
-                    if ui.button("Split stacked").clicked() {
+                    if ui.button(stack).clicked() {
                         split_stack = true;
                     }
                 }
@@ -704,10 +966,10 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         && !area.response.clicked()
         && !right_click;
     if split_side {
-        app.split_with(index, false);
+        app.split_from_tab(index, false);
         close_menu = true;
     } else if split_stack {
-        app.split_with(index, true);
+        app.split_from_tab(index, true);
         close_menu = true;
     } else if unsplit {
         app.unsplit();
@@ -720,6 +982,206 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     }
 }
 
+/// Edge / pane drop targets while a tab is being dragged to create or adjust a split.
+pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
+    let Some(dragged) = app.tab_drag else {
+        return;
+    };
+    if dragged >= app.tabs.len() || app.tabs.len() < 2 {
+        app.tab_drag = None;
+        return;
+    }
+
+    let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+    let primary_down = ctx.input(|input| input.pointer.primary_down());
+    let released = ctx.input(|input| input.pointer.primary_released());
+
+    if !primary_down && !released {
+        app.tab_drag = None;
+        return;
+    }
+
+    let zone = pointer.and_then(|pos| hit_split_drop_zone(app, pos));
+    if let Some(pos) = pointer {
+        paint_tab_drag_feedback(app, ctx, dragged, pos, zone);
+    }
+
+    if released {
+        if let Some(zone) = zone {
+            app.apply_tab_drop(dragged, zone);
+        }
+        app.tab_drag = None;
+    } else {
+        ctx.request_repaint();
+    }
+}
+
+fn hit_split_drop_zone(app: &MarkerApp, pos: Pos2) -> Option<SplitDropZone> {
+    if let Some(split) = app.split {
+        let other = app.split_view_rect;
+        let active = app.view_rect;
+        let full = if active.is_positive() && other.is_positive() {
+            active.union(other)
+        } else if active.is_positive() {
+            active
+        } else if other.is_positive() {
+            other
+        } else {
+            return None;
+        };
+        if full.contains(pos) {
+            // Prefer outer edges so drag can still flip side-by-side ↔ stacked.
+            if let Some(edge) = edge_drop_zone(full, pos) {
+                let flips = match edge {
+                    SplitDropZone::Left | SplitDropZone::Right => split.stacked,
+                    SplitDropZone::Top | SplitDropZone::Bottom => !split.stacked,
+                    SplitDropZone::OtherPane | SplitDropZone::ActivePane => false,
+                };
+                if flips {
+                    return Some(edge);
+                }
+            }
+            if other.is_positive() && other.contains(pos) {
+                return Some(SplitDropZone::OtherPane);
+            }
+            if active.is_positive() && active.contains(pos) {
+                return Some(SplitDropZone::ActivePane);
+            }
+        }
+        return None;
+    }
+
+    let view = app.view_rect;
+    if !view.is_positive() || !view.contains(pos) {
+        return None;
+    }
+    edge_drop_zone(view, pos)
+}
+
+fn edge_drop_zone(full: Rect, pos: Pos2) -> Option<SplitDropZone> {
+    let w = full.width().max(1.0);
+    let h = full.height().max(1.0);
+    let rel_x = ((pos.x - full.left()) / w).clamp(0.0, 1.0);
+    let rel_y = ((pos.y - full.top()) / h).clamp(0.0, 1.0);
+    let band_x = 0.28;
+    let band_y = 0.28;
+    let candidates = [
+        (rel_x, band_x, SplitDropZone::Left),
+        (1.0 - rel_x, band_x, SplitDropZone::Right),
+        (rel_y, band_y, SplitDropZone::Top),
+        (1.0 - rel_y, band_y, SplitDropZone::Bottom),
+    ];
+    candidates
+        .into_iter()
+        .filter(|(dist, band, _)| *dist <= *band)
+        .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(_, _, zone)| zone)
+}
+
+fn paint_tab_drag_feedback(
+    app: &MarkerApp,
+    ctx: &egui::Context,
+    dragged: usize,
+    pos: Pos2,
+    zone: Option<SplitDropZone>,
+) {
+    let colors = p(ctx);
+    let painter = ctx.layer_painter(egui::LayerId::new(
+        egui::Order::Foreground,
+        Id::new("marker-tab-drag"),
+    ));
+
+    if let Some(zone) = zone {
+        let highlight = drop_zone_rect(app, zone);
+        if highlight.is_positive() {
+            painter.rect_filled(
+                highlight,
+                CornerRadius::same(4),
+                colors.accent.gamma_multiply(0.22),
+            );
+            painter.rect_stroke(
+                highlight,
+                CornerRadius::same(4),
+                Stroke::new(1.5, colors.accent.gamma_multiply(0.85)),
+                StrokeKind::Inside,
+            );
+        }
+    }
+
+    let name = app
+        .tabs
+        .get(dragged)
+        .and_then(|tab| tab.doc.path.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or("document.pdf");
+    let galley = painter.layout_no_wrap(
+        name.to_owned(),
+        FontId::new(12.5, FontFamily::Proportional),
+        colors.text,
+    );
+    let pill = Rect::from_center_size(
+        pos + vec2(12.0, 14.0),
+        Vec2::new(galley.size().x + 16.0, TAB_PILL_H),
+    );
+    painter.rect_filled(pill, CornerRadius::same(6), colors.chrome_raised);
+    painter.rect_stroke(
+        pill,
+        CornerRadius::same(6),
+        Stroke::new(1.0, colors.hairline),
+        StrokeKind::Inside,
+    );
+    painter.galley(
+        Pos2::new(pill.left() + 8.0, pill.center().y - galley.size().y * 0.5),
+        galley,
+        colors.text,
+    );
+}
+
+fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
+    match zone {
+        SplitDropZone::OtherPane => app.split_view_rect,
+        SplitDropZone::ActivePane => app.view_rect,
+        SplitDropZone::Left
+        | SplitDropZone::Right
+        | SplitDropZone::Top
+        | SplitDropZone::Bottom => {
+            let full = if app.split.is_some() {
+                let a = app.view_rect;
+                let b = app.split_view_rect;
+                if a.is_positive() && b.is_positive() {
+                    a.union(b)
+                } else if a.is_positive() {
+                    a
+                } else {
+                    b
+                }
+            } else {
+                app.view_rect
+            };
+            if !full.is_positive() {
+                return Rect::NOTHING;
+            }
+            let mid_x = full.center().x;
+            let mid_y = full.center().y;
+            match zone {
+                SplitDropZone::Left => {
+                    Rect::from_min_max(full.min, Pos2::new(mid_x, full.bottom()))
+                }
+                SplitDropZone::Right => {
+                    Rect::from_min_max(Pos2::new(mid_x, full.top()), full.max)
+                }
+                SplitDropZone::Top => {
+                    Rect::from_min_max(full.min, Pos2::new(full.right(), mid_y))
+                }
+                SplitDropZone::Bottom => {
+                    Rect::from_min_max(Pos2::new(full.left(), mid_y), full.max)
+                }
+                SplitDropZone::OtherPane | SplitDropZone::ActivePane => unreachable!(),
+            }
+        }
+    }
+}
+
 pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: SplitState) {
     let colors = p(ui.ctx());
     let full = ui.available_rect_before_wrap();
@@ -727,7 +1189,7 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
     let handle = 5.0;
     let ratio = split.ratio.clamp(0.2, 0.8);
 
-    let (first, second, handle_rect) = if split.stacked {
+    let (first_rect, second_rect, handle_rect) = if split.stacked {
         let h = full.height();
         let top_h = ((h - handle) * ratio).clamp(80.0, (h - handle - 80.0).max(80.0));
         let a = Rect::from_min_max(full.min, Pos2::new(full.right(), full.top() + top_h));
@@ -749,8 +1211,14 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
         (a, b, hr)
     };
 
-    ui.scope_builder(egui::UiBuilder::new().max_rect(first), |ui| {
-        viewport(app, ui, true);
+    let first = split.first;
+    let second = split.second;
+    if !split.contains(app.active) {
+        app.active = first;
+    }
+    let focus_first = app.active == first;
+    ui.scope_builder(egui::UiBuilder::new().max_rect(first_rect), |ui| {
+        viewport_tab(app, ui, first, focus_first);
     });
 
     let response = ui.interact(handle_rect, Id::new("marker-split-handle"), Sense::drag());
@@ -780,9 +1248,8 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
         }
     }
 
-    let other = split.other;
-    ui.scope_builder(egui::UiBuilder::new().max_rect(second), |ui| {
-        viewport_tab(app, ui, other, false);
+    ui.scope_builder(egui::UiBuilder::new().max_rect(second_rect), |ui| {
+        viewport_tab(app, ui, second, !focus_first);
     });
     app.dispatch_tiles();
 }

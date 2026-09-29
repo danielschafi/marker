@@ -6,12 +6,14 @@ on:
   pull_request:
     branches: [ "master" ]
 
+permissions:
+  contents: write
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
 
     steps:
@@ -20,3 +22,22 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    - name: Build release binary
+      run: cargo build --release --verbose
+    - name: Create GitHub release
+      uses: ncipollo/release-action@v1
+      with:
+        tag: build-${{ github.run_number }}
+        name: Build ${{ github.run_number }}
+        body: Automated release for commit ${{ github.sha }}.
+        commit: ${{ github.sha }}
+        allowUpdates: true
+        artifacts: target/release/marker

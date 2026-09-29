@@ -124,7 +124,6 @@ pub(crate) enum Tool {
     Select,
     Highlight,
     Text,
-    Note,
     Rect,
     Ellipse,
     Line,
@@ -132,11 +131,10 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 8] = [
+    pub(crate) const ALL: [Tool; 7] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Text,
-        Tool::Note,
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
@@ -149,7 +147,6 @@ impl Tool {
             Tool::Select => Key::V,
             Tool::Highlight => Key::A,
             Tool::Text => Key::T,
-            Tool::Note => Key::N,
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
             Tool::Line => Key::I,
@@ -162,7 +159,6 @@ impl Tool {
             Tool::Select => "Move and resize",
             Tool::Highlight => "Mark text",
             Tool::Text => "Write on the page",
-            Tool::Note => "Sticky note",
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
@@ -1302,26 +1298,18 @@ impl MarkerApp {
             }
             if !vim {
                 for tool in Tool::ALL {
-                    if !input.key_pressed(tool.shortcut()) {
-                        continue;
+                    if input.key_pressed(tool.shortcut()) {
+                        self.tool = tool;
                     }
-                    if tool == Tool::Note && input.modifiers.shift {
-                        continue;
-                    }
-                    if tool == Tool::Note
-                        && self
-                            .tab()
-                            .is_some_and(|tab| tab.search.open && !tab.search.hits.is_empty())
-                    {
-                        search_delta = Some(1);
-                        continue;
-                    }
-                    self.tool = tool;
                 }
             }
-            if input.key_pressed(Tool::Note.shortcut()) && input.modifiers.shift {
-                if self.tab().is_some_and(|tab| tab.search.open) {
-                    search_delta = Some(-1);
+            // N / Shift+N step search hits when find is open.
+            if input.key_pressed(Key::N) && !input.modifiers.command {
+                if self
+                    .tab()
+                    .is_some_and(|tab| tab.search.open && !tab.search.hits.is_empty())
+                {
+                    search_delta = Some(if input.modifiers.shift { -1 } else { 1 });
                 }
             }
             if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
@@ -1539,7 +1527,7 @@ impl MarkerApp {
             return color;
         }
         match self.tool {
-            Tool::Highlight | Tool::Note => self.settings.highlight_color,
+            Tool::Highlight => self.settings.highlight_color,
             Tool::Rect | Tool::Ellipse | Tool::Line => self.settings.shape_color,
             _ => self.settings.text_color,
         }
@@ -1642,7 +1630,7 @@ impl MarkerApp {
             self.queue_math(id);
         }
         match kind_bucket.unwrap_or(match self.tool {
-            Tool::Highlight | Tool::Note => 0,
+            Tool::Highlight => 0,
             Tool::Rect | Tool::Ellipse | Tool::Line => 2,
             _ => 1,
         }) {

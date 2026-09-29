@@ -438,7 +438,7 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
                 },
             });
         }
-        Tool::Select | Tool::Note => {}
+        Tool::Select => {}
     }
 }
 
@@ -786,7 +786,6 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 place_box(app, page, point, None, CreateKind::Text);
             }
         }
-        Tool::Note => place_note(app, page, point),
         Tool::Math => {
             let math = hit.filter(|id| {
                 app.tab().is_some_and(|tab| {
@@ -1047,47 +1046,6 @@ fn place_box_tab(
         tab.save = crate::app::SaveState::Dirty {
             since: Instant::now(),
         };
-    }
-}
-
-fn place_note_tab(
-    tab: &mut Tab,
-    page: usize,
-    point: PdfPoint,
-    settings: &crate::settings::Settings,
-) {
-    let color = settings.highlight_color;
-    let rect = PdfRect::new(point.x, point.y, point.x + 26.0, point.y + 26.0);
-    let id = tab.doc.session.insert(
-        page,
-        AnnotKind::Note {
-            rect,
-            content: String::new(),
-            color,
-        },
-    );
-    tab.selected = Some(id);
-    tab.editing = Some(id);
-    tab.focus_edit = true;
-    if !matches!(tab.save, crate::app::SaveState::Saving) {
-        tab.save = crate::app::SaveState::Dirty {
-            since: Instant::now(),
-        };
-    }
-}
-
-fn place_note(app: &mut MarkerApp, page: usize, point: PdfPoint) {
-    let settings = app.settings.clone();
-    app.seal_then_arm();
-    let id = {
-        let Some(tab) = app.tab_mut() else {
-            return;
-        };
-        place_note_tab(tab, page, point, &settings);
-        tab.selected
-    };
-    if let Some(id) = id {
-        app.tag_undo_edit(id);
     }
 }
 

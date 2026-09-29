@@ -567,21 +567,6 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 color,
             );
         }
-        Tool::Note => {
-            let card = rect.shrink(1.0);
-            painter.rect_stroke(card, 2.0, stroke, StrokeKind::Inside);
-            let fold = vec![
-                card.right_top() + vec2(-5.0, 0.0),
-                card.right_top() + vec2(0.0, 5.0),
-                card.right_top() + vec2(-5.0, 5.0),
-            ];
-            painter.add(egui::Shape::convex_polygon(fold, color, Stroke::NONE));
-            painter.hline(
-                card.left() + 3.0..=card.right() - 3.0,
-                card.center().y + 1.5,
-                stroke,
-            );
-        }
         Tool::Rect => {
             painter.rect_stroke(rect.shrink(1.5), 2.0, stroke, StrokeKind::Inside);
         }
@@ -798,7 +783,7 @@ pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool) -> bool {
 
 pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
     match tool {
-        Tool::Highlight | Tool::Note => &HIGHLIGHT_COLORS,
+        Tool::Highlight => &HIGHLIGHT_COLORS,
         _ => &INK_COLORS,
     }
 }

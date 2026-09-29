@@ -1644,7 +1644,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
                         ui.label(
-                            egui::RichText::new("Tab cycles templates · math mode")
+                            egui::RichText::new("Shift+Tab cycles templates · math mode")
                                 .weak()
                                 .size(10.0),
                         );
@@ -1654,16 +1654,20 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                             .font(FontId::new(13.0, FontFamily::Monospace))
                             .desired_width(screen.width().max(280.0))
                             .desired_rows(3)
-                            .hint_text(r"\frac{1}{2}  or  Tab for templates"),
+                            .hint_text(r"\frac{1}{2}  or  Shift+Tab for templates"),
                     );
                     if focus {
                         response.request_focus();
                     }
                     changed = response.changed();
                     if response.has_focus() {
+                        // Tab keeps normal focus traversal; Shift+Tab cycles presets.
                         let tabbed = ui.input_mut(|input| {
-                            if input.key_pressed(egui::Key::Tab) && !input.modifiers.command {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                            if input.key_pressed(egui::Key::Tab)
+                                && input.modifiers.shift
+                                && !input.modifiers.command
+                            {
+                                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
                                 true
                             } else {
                                 false
@@ -1698,7 +1702,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 app.queue_math(id);
             }
             if cycled {
-                // Keep focus after replacing the source via Tab.
+                // Keep focus after replacing the source via Shift+Tab.
                 if let Some(tab) = app.tab_mut() {
                     tab.focus_edit = true;
                     tab.editing = Some(id);

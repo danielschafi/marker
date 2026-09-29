@@ -15,7 +15,7 @@ const TEMPLATE: &str = r#"
 #eval(str(inputs.wrapped), mode: "markup")
 "#;
 
-/// Cycle-able LaTeX starters for the math editor (Tab).
+/// Cycle-able LaTeX starters for the math editor (Shift+Tab).
 pub const MATH_TEMPLATES: &[&str] = &[
     "",
     r"\frac{a}{b}",

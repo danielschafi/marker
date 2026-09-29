@@ -51,6 +51,23 @@ impl DocState {
         self.last_zoom = Instant::now();
     }
 
+    pub(crate) fn fit_height(&mut self, view_h: f32) {
+        let page = self.current_page(view_h.max(1.0));
+        let height = self
+            .pages
+            .get(page)
+            .map(PageInfo::height)
+            .unwrap_or(1.0)
+            .max(1.0);
+        self.scale = ((view_h - PAD * 2.0) / height).clamp(MIN_SCALE, MAX_SCALE);
+        self.scroll_x = 0.0;
+        // Keep the current page near the top of the viewport.
+        if let Some(top) = self.tops.get(page) {
+            self.scroll_y = top * self.scale;
+        }
+        self.last_zoom = Instant::now();
+    }
+
     pub(crate) fn render_scale(&self) -> f32 {
         if self.last_zoom.elapsed().as_millis() < 140 {
             zoom_bucket(self.scale)
@@ -127,6 +144,7 @@ impl DocState {
             self.scroll_y = crate::geom::zoom_scroll(old, new_scale, self.scroll_y, offset);
         }
         self.last_zoom = Instant::now();
+        self.last_fit = None;
         self.clamp_scroll(view);
     }
 

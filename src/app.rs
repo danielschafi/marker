@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use egui::{DragValue, Key, ViewportCommand};
 
 use crate::annot::{AnnotKind, Annotation, Glyph, Handle, Session, ShapeKind};
-use crate::geom::{PdfPoint, Rgb, ZOOM_100};
+use crate::geom::{PdfPoint, Rgb};
 use crate::math::{MathRender, MathWorker, RgbaImage};
 use crate::pdf::{OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
@@ -76,8 +76,16 @@ pub(crate) struct DocState {
     pub(crate) scroll_y: f32,
     pub(crate) fitted: bool,
     pub(crate) last_zoom: Instant,
+    /// Last Fit action; cleared when zoom changes by other means.
+    pub(crate) last_fit: Option<FitKind>,
     pub(crate) glyphs: HashMap<usize, Vec<Glyph>>,
     pub(crate) tiles: HashMap<TileKey, CachedTile>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FitKind {
+    Width,
+    Height,
 }
 
 pub(crate) struct CachedTile {
@@ -363,7 +371,29 @@ impl MarkerApp {
         let view = self.view_rect;
         if let Some(doc) = self.doc_mut() {
             doc.fit_width(view.width());
+            doc.last_fit = Some(FitKind::Width);
             doc.clamp_scroll(view);
+        }
+    }
+
+    pub(crate) fn fit_height(&mut self) {
+        let view = self.view_rect;
+        if let Some(doc) = self.doc_mut() {
+            doc.fit_height(view.height());
+            doc.last_fit = Some(FitKind::Height);
+            doc.clamp_scroll(view);
+        }
+    }
+
+    /// Fit width, or height if the previous Fit was width and zoom was not changed since.
+    pub(crate) fn fit_toggle(&mut self) {
+        let next_height = self
+            .doc()
+            .is_some_and(|doc| doc.last_fit == Some(FitKind::Width));
+        if next_height {
+            self.fit_height();
+        } else {
+            self.fit_width();
         }
     }
 
@@ -372,6 +402,7 @@ impl MarkerApp {
         let cursor = view.center();
         if let Some(doc) = self.doc_mut() {
             doc.zoom_at(factor, cursor, view);
+            doc.last_fit = None;
         }
     }
 
@@ -379,9 +410,13 @@ impl MarkerApp {
         let view = self.view_rect;
         let cursor = view.center();
         if let Some(doc) = self.doc_mut() {
-            let target = (percent / 100.0) * ZOOM_100;
-            if doc.scale > f32::EPSILON {
+            let target = (percent / 100.0 * crate::geom::ZOOM_100).clamp(
+                crate::geom::MIN_SCALE,
+                crate::geom::MAX_SCALE,
+            );
+            if (target - doc.scale).abs() > f32::EPSILON {
                 doc.zoom_at(target / doc.scale, cursor, view);
+                doc.last_fit = None;
             }
         }
     }
@@ -894,6 +929,7 @@ impl MarkerApp {
                             scroll_y: 0.0,
                             fitted: false,
                             last_zoom: Instant::now(),
+                            last_fit: None,
                             glyphs: HashMap::new(),
                             tiles: HashMap::new(),
                         },
@@ -1593,7 +1629,7 @@ impl MarkerApp {
             }
         }
         if fit {
-            self.fit_width();
+            self.fit_toggle();
         }
         if let Some(factor) = zoom {
             self.zoom_by(factor);

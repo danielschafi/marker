@@ -1,6 +1,9 @@
+use std::sync::Arc;
+
 use egui::{
-    Align, Align2, Button, Color32, CornerRadius, DragValue, FontFamily, FontId, Key, Layout, Pos2,
-    Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit, TopBottomPanel, Vec2,
+    Align, Align2, Button, Color32, CornerRadius, DragValue, FontData, FontDefinitions, FontFamily,
+    FontId, Key, Layout, Pos2, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind, TextEdit,
+    TopBottomPanel, Vec2,
 };
 
 use crate::app::{MarkerApp, SaveState, Tool};
@@ -15,6 +18,8 @@ const TEXT: Color32 = Color32::from_rgb(232, 232, 236);
 const TEXT_DIM: Color32 = Color32::from_rgb(154, 154, 162);
 const DIRTY: Color32 = Color32::from_rgb(230, 186, 92);
 const HAIRLINE: Color32 = Color32::from_rgba_unmultiplied_const(255, 255, 255, 26);
+const BRAND_FAMILY: &str = "Brand";
+const MARKER_HIGHLIGHT: Color32 = Color32::from_rgba_unmultiplied_const(255, 214, 0, 72);
 
 pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     tab_bar(app, ctx);
@@ -26,9 +31,11 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
 fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
     TopBottomPanel::top("tabs")
         .exact_height(40.0)
+        .show_separator_line(false)
         .frame(
             egui::Frame::new()
                 .fill(CHROME)
+                .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(10, 6)),
         )
         .show(ctx, |ui| {
@@ -174,9 +181,11 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
         let mut query_changed = false;
         TopBottomPanel::top("search")
             .exact_height(40.0)
+            .show_separator_line(false)
             .frame(
                 egui::Frame::new()
                     .fill(CHROME)
+                    .stroke(Stroke::NONE)
                     .inner_margin(egui::Margin::symmetric(12, 6)),
             )
             .show(ctx, |ui| {
@@ -267,10 +276,10 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
         if app.doc().is_some() {
             control_cluster(ui, |ui| {
                 if cluster_button(ui, "Fit", Vec2::new(36.0, CONTROL_H))
-                    .on_hover_text("Fit page width (Ctrl+0)")
+                    .on_hover_text("Fit width, then height on next click (Ctrl+0)")
                     .clicked()
                 {
-                    app.fit_width();
+                    app.fit_toggle();
                 }
                 cluster_sep(ui);
                 if cluster_button(ui, "+", Vec2::splat(CONTROL_H))
@@ -466,9 +475,11 @@ fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
     }
     TopBottomPanel::top("tools")
         .exact_height(40.0)
+        .show_separator_line(false)
         .frame(
             egui::Frame::new()
                 .fill(CHROME)
+                .stroke(Stroke::NONE)
                 .inner_margin(egui::Margin::symmetric(8, 5)),
         )
         .show(ctx, |ui| {
@@ -615,8 +626,8 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
             .show(ui, |ui| {
                 ui.vertical_centered(|ui| {
                     ui.add_space((ui.available_height() * 0.16).clamp(24.0, 120.0));
-                    ui.label(RichText::new("Marker").size(36.0).color(TEXT));
-                    ui.add_space(8.0);
+                    brand_wordmark(ui);
+                    ui.add_space(10.0);
                     ui.label(RichText::new("Drop a PDF here, or open one.").weak());
                     ui.add_space(18.0);
                     if ui
@@ -693,12 +704,41 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                     TEXT_DIM,
                                 );
                             }
+                            let mut remove_clicked = false;
+                            if response.hovered() {
+                                let close_rect = Rect::from_center_size(
+                                    Pos2::new(rect.right() - 16.0, rect.center().y),
+                                    Vec2::splat(18.0),
+                                );
+                                let close = ui.interact(
+                                    close_rect,
+                                    ui.id().with(("recent-forget", path.as_os_str())),
+                                    Sense::click(),
+                                );
+                                let close_color = if close.hovered() { TEXT } else { TEXT_DIM };
+                                ui.painter().text(
+                                    close_rect.center(),
+                                    Align2::CENTER_CENTER,
+                                    "×",
+                                    FontId::new(14.0, FontFamily::Proportional),
+                                    close_color,
+                                );
+                                if close
+                                    .on_hover_text("Remove from recent")
+                                    .clicked()
+                                {
+                                    remove_clicked = true;
+                                    forget = Some(path.clone());
+                                }
+                            }
                             let response = if parent.is_empty() {
                                 response
                             } else {
-                                response.on_hover_text(&parent)
+                                response.on_hover_text(format!(
+                                    "{parent}\nRight-click or × to remove"
+                                ))
                             };
-                            if response.clicked() {
+                            if response.clicked() && !remove_clicked {
                                 if exists {
                                     open_path = Some(path.clone());
                                 } else {
@@ -789,6 +829,7 @@ pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
 }
 
 pub(crate) fn apply_theme(ctx: &egui::Context) {
+    install_fonts(ctx);
     let mut visuals = egui::Visuals::dark();
     visuals.window_fill = CHROME_RAISED;
     visuals.panel_fill = CHROME;
@@ -815,6 +856,51 @@ pub(crate) fn apply_theme(ctx: &egui::Context) {
         FontId::new(13.5, FontFamily::Proportional),
     );
     ctx.set_style(style);
+}
+
+fn install_fonts(ctx: &egui::Context) {
+    let mut fonts = FontDefinitions::default();
+    fonts.font_data.insert(
+        "InstrumentSerif-Italic".to_owned(),
+        Arc::new(FontData::from_static(include_bytes!(
+            "../assets/fonts/InstrumentSerif-Italic.ttf"
+        ))),
+    );
+    let mut brand = vec!["InstrumentSerif-Italic".to_owned()];
+    brand.extend(fonts.families[&FontFamily::Proportional].clone());
+    fonts
+        .families
+        .insert(FontFamily::Name(BRAND_FAMILY.into()), brand);
+    ctx.set_fonts(fonts);
+}
+
+fn brand_family() -> FontFamily {
+    FontFamily::Name(BRAND_FAMILY.into())
+}
+
+fn brand_wordmark(ui: &mut egui::Ui) {
+    let font = FontId::new(54.0, brand_family());
+    let galley = ui.fonts_mut(|fonts| {
+        fonts.layout_no_wrap("Marker".to_owned(), font, TEXT)
+    });
+    let size = Vec2::new(galley.size().x, galley.size().y + 6.0);
+    let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+    let text_pos = Pos2::new(
+        rect.center().x - galley.size().x * 0.5,
+        rect.top(),
+    );
+
+    // Soft highlighter stroke through the lower third — product metaphor.
+    let mark = Rect::from_min_max(
+        Pos2::new(text_pos.x - 6.0, text_pos.y + galley.size().y * 0.58),
+        Pos2::new(
+            text_pos.x + galley.size().x + 6.0,
+            text_pos.y + galley.size().y * 0.82,
+        ),
+    );
+    ui.painter()
+        .rect_filled(mark, CornerRadius::same(3), MARKER_HIGHLIGHT);
+    ui.painter().galley(text_pos, galley, TEXT);
 }
 
 fn accent_fill(alpha: u8) -> Color32 {

@@ -3,7 +3,7 @@ name = "marker"
 version = "0.1.0"
 edition = "2021"
 description = "A fast, minimal PDF annotator"
-license = "AGPL-3.0-or-later"
+license = "MIT"
 
 [dependencies]
 arboard = "3.6.1"

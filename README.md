@@ -113,5 +113,4 @@ recent-files list.
 
 ## License
 
-Marker is free software licensed under the GNU Affero General Public License,
-version 3 or later (`AGPL-3.0-or-later`).
+Marker is released under the [MIT License](LICENSE).

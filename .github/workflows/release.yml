@@ -51,4 +51,4 @@ jobs:
             Runtime shared libraries typically needed on the host:
             `fontconfig`, `freetype`, `brotli`, `jbig2dec`, `lcms2`, `libjpeg`, `openjpeg2`, `zlib`.
 
-            License: AGPL-3.0-or-later.
+            License: MIT.

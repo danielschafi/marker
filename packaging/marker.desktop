@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Marker
+Comment=A fast, minimal PDF annotator
+Exec=marker %F
+Icon=marker
+Terminal=false
+Categories=Office;Viewer;Graphics;
+MimeType=application/pdf;
+Keywords=pdf;annotate;markup;
+StartupNotify=true

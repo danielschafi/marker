@@ -43,8 +43,12 @@ typst-svg = "0.15"
 
 # winit 0.30 has no Wayland trackpad pinch; vendor a backport of PR #4338 so
 # zwp_pointer_gestures_v1 reaches egui as Event::Zoom / PanGesture.
+#
+# egui-winit: when the clipboard has no text (image/png only), still emit Key::V
+# so Ctrl+Shift+V can paste images instead of being swallowed as a no-op Paste.
 [patch.crates-io]
 winit = { path = "vendor/winit" }
+egui-winit = { path = "vendor/egui-winit" }
 
 [profile.dev.package."*"]
 opt-level = 2

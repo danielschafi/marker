@@ -41,29 +41,20 @@ impl DocState {
         let max_y = (self.doc_height_px() - view.height()).max(0.0);
         self.scroll_y = self.scroll_y.clamp(0.0, max_y);
         let max_page = self.pages.iter().map(PageInfo::width).fold(0.0, f32::max);
-        let content_w = max_page * self.scale + PAD * 2.0;
-        // Narrow pages: allow scroll_x in [content_w - view_w, 0] so the page
-        // stays on-screen while still letting zoom_at pin a point under the cursor.
-        // Wide pages: classic [0, content_w - view_w].
-        let min_x = (content_w - view.width()).min(0.0);
-        let max_x = (content_w - view.width()).max(0.0);
-        self.scroll_x = self.scroll_x.clamp(min_x, max_x);
-    }
-
-    fn center_scroll_x(&mut self, view_w: f32) {
-        let max_page = self.pages.iter().map(PageInfo::width).fold(0.0, f32::max);
-        let content_w = max_page * self.scale + PAD * 2.0;
-        self.scroll_x = (content_w - view_w) * 0.5;
+        // Only allow horizontal scroll when the page (plus padding) is wider than
+        // the view. Narrow pages stay centered via page_origin, with scroll_x = 0.
+        let max_x = (max_page * self.scale + PAD * 2.0 - view.width()).max(0.0);
+        self.scroll_x = self.scroll_x.clamp(0.0, max_x);
     }
 
     pub(crate) fn fit_width(&mut self, view_w: f32) {
         let max_page = self.pages.iter().map(PageInfo::width).fold(1.0, f32::max);
         self.scale = ((view_w - PAD * 2.0) / max_page).clamp(MIN_SCALE, MAX_SCALE);
-        self.center_scroll_x(view_w);
+        self.scroll_x = 0.0;
         self.last_zoom = Instant::now();
     }
 
-    pub(crate) fn fit_height(&mut self, view_w: f32, view_h: f32) {
+    pub(crate) fn fit_height(&mut self, view_h: f32) {
         let page = self.current_page(view_h.max(1.0));
         let height = self
             .pages
@@ -72,7 +63,7 @@ impl DocState {
             .unwrap_or(1.0)
             .max(1.0);
         self.scale = ((view_h - PAD * 2.0) / height).clamp(MIN_SCALE, MAX_SCALE);
-        self.center_scroll_x(view_w);
+        self.scroll_x = 0.0;
         // Keep the current page near the top of the viewport.
         if let Some(top) = self.tops.get(page) {
             self.scroll_y = top * self.scale;
@@ -89,9 +80,13 @@ impl DocState {
     }
 
     fn page_origin(&self, page: usize, view: Rect) -> Pos2 {
-        // Always scroll-based; when the page is narrower than the view, scroll_x
-        // sits in a negative..0 range so zoom can still pin to the cursor.
-        let x = view.left() + PAD - self.scroll_x;
+        let width = self.pages[page].width() * self.scale;
+        let x = if width + PAD * 2.0 <= view.width() {
+            // Whole page fits: always centered, ignore scroll_x.
+            view.left() + (view.width() - width) * 0.5
+        } else {
+            view.left() + PAD - self.scroll_x
+        };
         let y = view.top() + self.tops[page] * self.scale - self.scroll_y;
         Pos2::new(x, y)
     }
@@ -140,15 +135,25 @@ impl DocState {
             self.scale = new_scale;
             self.scroll_y =
                 view.top() + top * new_scale + (point.y - info.y0) * new_scale - cursor.y;
-            // Always pin horizontally too — clamp_scroll keeps a narrow page on-screen.
-            self.scroll_x = view.left() + PAD + (point.x - info.x0) * new_scale - cursor.x;
+            let page_w = info.width() * new_scale;
+            if page_w + PAD * 2.0 > view.width() {
+                // Page overflows: pin the zoom point under the cursor horizontally.
+                self.scroll_x = view.left() + PAD + (point.x - info.x0) * new_scale - cursor.x;
+            } else {
+                // Page fits: stay centered (page_origin ignores scroll_x).
+                self.scroll_x = 0.0;
+            }
         } else {
-            let offset_y = cursor.y - view.top();
-            let offset_x = cursor.x - view.left();
+            let offset = cursor.y - view.top();
             let old = self.scale;
             self.scale = new_scale;
-            self.scroll_y = crate::geom::zoom_scroll(old, new_scale, self.scroll_y, offset_y);
-            self.scroll_x = crate::geom::zoom_scroll(old, new_scale, self.scroll_x, offset_x);
+            self.scroll_y = crate::geom::zoom_scroll(old, new_scale, self.scroll_y, offset);
+            // Horizontal: if the page now fits, recenter; otherwise keep scroll_x
+            // and let clamp_scroll bound it to the page edges.
+            let max_page = self.pages.iter().map(PageInfo::width).fold(0.0, f32::max);
+            if max_page * new_scale + PAD * 2.0 <= view.width() {
+                self.scroll_x = 0.0;
+            }
         }
         self.last_zoom = Instant::now();
         self.last_fit = None;
@@ -261,30 +266,26 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
         .unwrap_or_else(|| response.rect.center());
     let pinching = (zoom - 1.0).abs() > f32::EPSILON;
 
-    // Trackpad pinch (and ctrl+scroll) zoom about the pointer. Wayland also
-    // emits a PanGesture alongside PinchGesture; applying both is what makes
-    // pinch feel like a tablet instead of a stuck scale-only zoom.
+    // Prefer zoom whenever egui reports a zoom delta. Trackpad pinch often
+    // arrives together with a pan/scroll delta on Wayland; treating scroll
+    // first made pinch feel broken, and applying both felt worse than zoom-only.
     if pinching {
         tab.doc.zoom_at(zoom, hover, response.rect);
-    } else if command && raw.y.abs() > 0.0 {
+        return;
+    }
+    if command && raw.y.abs() > 0.0 {
         // Ctrl+wheel / Ctrl+two-finger scroll without a synthesized Zoom event.
         let factor = (1.0 + raw.y * 0.003).clamp(0.75, 1.35);
         tab.doc.zoom_at(factor, hover, response.rect);
         return;
     }
-
-    // Two-finger pan, including the translation half of a pinch. Skip while
-    // Ctrl is held so ctrl+scroll stays zoom-only (egui still fills raw_scroll
-    // even when it converts the same event into zoom_delta).
+    // Skip while Ctrl is held so ctrl+scroll stays zoom-only (egui still fills
+    // raw_scroll even when it converts the same event into zoom_delta).
     if !command && raw != egui::Vec2::ZERO {
-        // Pinch pan is already in points; discrete wheel notches need a boost.
-        let gain = if pinching {
-            1.0
-        } else if raw.length() < 24.0 {
-            6.0
-        } else {
-            2.4
-        };
+        // Wheel notches arrive as small pixel deltas and egui then smears them
+        // across frames. Apply the raw delta immediately, scaled up so a notch
+        // moves a readable chunk of the page.
+        let gain = if raw.length() < 24.0 { 6.0 } else { 2.4 };
         let scroll = raw * gain;
         tab.doc.scroll_y -= scroll.y;
         tab.doc.scroll_x -= scroll.x;
@@ -2223,11 +2224,12 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 }
             });
         });
-    let right_click = ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
-    let outside = ctx.input(|input| input.pointer.any_click())
+    // Dismiss only on primary click outside. The opening right-click is a
+    // secondary `any_click` on the same frame the Area first appears (hovered
+    // is still false), which would otherwise flash the menu for one frame.
+    let outside = ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.hovered()
-        && !area.response.clicked()
-        && !right_click;
+        && !area.response.clicked();
     if paste {
         if let Some(tab) = app.tab_mut() {
             tab.menu = None;

@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Marker">
+  <rect width="128" height="128" rx="28" fill="#1a1a1e"/>
+  <path d="M34 86 L78 28 L98 42 L54 100 Z" fill="#f5d76e"/>
+  <path d="M34 86 L42 106 L54 100 Z" fill="#e8b84a"/>
+  <rect x="72" y="24" width="28" height="12" transform="rotate(35 86 30)" fill="#f7f2d8"/>
+  <path d="M28 108 H92" stroke="#f5d76e" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+</svg>

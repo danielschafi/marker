@@ -662,7 +662,7 @@ impl MarkerApp {
     pub(crate) fn fit_height(&mut self) {
         let view = self.view_rect;
         if let Some(doc) = self.doc_mut() {
-            doc.fit_height(view.width(), view.height());
+            doc.fit_height(view.height());
             doc.last_fit = Some(FitKind::Height);
             doc.clamp_scroll(view);
         }
@@ -919,22 +919,12 @@ impl MarkerApp {
 
     /// Paste an image from the system clipboard onto the current page.
     pub(crate) fn paste_clipboard_image(&mut self) -> bool {
-        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+        let Some((width, height, rgba)) = read_clipboard_rgba() else {
             return false;
         };
-        let Ok(image) = clipboard.get_image() else {
-            return false;
-        };
-        let width = image.width as u32;
-        let height = image.height as u32;
         if width == 0 || height == 0 {
             return false;
         }
-        let expected = width as usize * height as usize * 4;
-        if image.bytes.len() < expected {
-            return false;
-        }
-        let rgba: std::sync::Arc<[u8]> = std::sync::Arc::from(image.bytes[..expected].to_vec());
 
         let view_h = self.view_rect.height().max(1.0);
         let Some(tab) = self.tab() else {
@@ -3094,6 +3084,40 @@ fn urlencoding_minimal(text: &str) -> String {
         }
     }
     out
+}
+
+/// RGBA pixels from the system clipboard (arboard, then `wl-paste` on Wayland).
+fn read_clipboard_rgba() -> Option<(u32, u32, std::sync::Arc<[u8]>)> {
+    if let Ok(mut clipboard) = arboard::Clipboard::new() {
+        if let Ok(image) = clipboard.get_image() {
+            let width = image.width as u32;
+            let height = image.height as u32;
+            let expected = width as usize * height as usize * 4;
+            if width > 0 && height > 0 && image.bytes.len() >= expected {
+                let rgba = std::sync::Arc::from(image.bytes[..expected].to_vec());
+                return Some((width, height, rgba));
+            }
+        }
+    }
+    read_clipboard_rgba_wl_paste()
+}
+
+fn read_clipboard_rgba_wl_paste() -> Option<(u32, u32, std::sync::Arc<[u8]>)> {
+    let output = Command::new("wl-paste")
+        .args(["-t", "image/png"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return None;
+    }
+    let image = image::load_from_memory(&output.stdout).ok()?.to_rgba8();
+    let (width, height) = image.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    Some((width, height, std::sync::Arc::from(image.into_raw())))
 }
 
 fn open_browser(url: &str) -> Result<(), String> {

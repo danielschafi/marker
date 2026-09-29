@@ -960,11 +960,11 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             });
         });
 
-    let right_click = ctx.input(|input| input.pointer.button_pressed(PointerButton::Secondary));
-    let outside = ctx.input(|input| input.pointer.any_click())
+    // Primary-only dismiss: the opening right-click is an `any_click` on the
+    // same frame the menu first appears, which would flash-close it otherwise.
+    let outside = ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.hovered()
-        && !area.response.clicked()
-        && !right_click;
+        && !area.response.clicked();
     if split_side {
         app.split_from_tab(index, false);
         close_menu = true;

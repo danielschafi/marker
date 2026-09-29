@@ -1,9 +1,11 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::geom::Rgb;
+
+pub const RECENT_LIMIT: usize = 15;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -12,6 +14,8 @@ pub struct Settings {
     pub highlight_color: Rgb,
     pub shape_color: Rgb,
     pub shape_width: f32,
+    #[serde(default)]
+    pub recent: Vec<PathBuf>,
 }
 
 impl Default for Settings {
@@ -22,6 +26,7 @@ impl Default for Settings {
             highlight_color: Rgb::new(255, 214, 0),
             shape_color: Rgb::new(28, 78, 186),
             shape_width: 1.5,
+            recent: Vec::new(),
         }
     }
 }
@@ -34,7 +39,9 @@ impl Settings {
         let Ok(text) = fs::read_to_string(path) else {
             return Self::default();
         };
-        toml::from_str(&text).unwrap_or_default()
+        let mut settings: Self = toml::from_str(&text).unwrap_or_default();
+        settings.recent.truncate(RECENT_LIMIT);
+        settings
     }
 
     pub fn save(&self) {
@@ -46,6 +53,28 @@ impl Settings {
         }
         if let Ok(text) = toml::to_string_pretty(self) {
             let _ = fs::write(path, text);
+        }
+    }
+
+    /// Move `path` to the front of the recent list and persist.
+    pub fn remember_open(&mut self, path: &Path) {
+        let path = path
+            .canonicalize()
+            .unwrap_or_else(|_| path.to_path_buf());
+        self.recent.retain(|entry| entry != &path);
+        self.recent.insert(0, path);
+        self.recent.truncate(RECENT_LIMIT);
+        self.save();
+    }
+
+    pub fn forget_recent(&mut self, path: &Path) {
+        let before = self.recent.len();
+        self.recent.retain(|entry| entry != path);
+        if let Ok(canonical) = path.canonicalize() {
+            self.recent.retain(|entry| entry != &canonical);
+        }
+        if self.recent.len() != before {
+            self.save();
         }
     }
 }

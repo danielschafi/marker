@@ -546,38 +546,122 @@ fn vbar(ui: &mut egui::Ui) {
 pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let rect = ui.available_rect_before_wrap();
     ui.painter().rect_filled(rect, 0.0, BACKDROP);
+    let recent: Vec<_> = app.settings.recent.clone();
+    let mut open_path = None;
+    let mut forget = None;
     ui.scope_builder(egui::UiBuilder::new().max_rect(rect), |ui| {
-        ui.centered_and_justified(|ui| {
-            ui.vertical_centered(|ui| {
-                ui.label(RichText::new("Marker").size(36.0).color(TEXT));
-                ui.add_space(8.0);
-                ui.label(RichText::new("Drop a PDF here, or open one.").weak());
-                ui.add_space(18.0);
-                if ui
-                    .add(
-                        Button::new(RichText::new("Open PDF").color(Color32::from_rgb(14, 18, 28)))
+        ScrollArea::vertical()
+            .id_salt("empty-recent")
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space((ui.available_height() * 0.16).clamp(24.0, 120.0));
+                    ui.label(RichText::new("Marker").size(36.0).color(TEXT));
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("Drop a PDF here, or open one.").weak());
+                    ui.add_space(18.0);
+                    if ui
+                        .add(
+                            Button::new(
+                                RichText::new("Open PDF").color(Color32::from_rgb(14, 18, 28)),
+                            )
                             .fill(ACCENT)
                             .stroke(Stroke::NONE)
                             .corner_radius(8.0)
                             .min_size(Vec2::new(128.0, 32.0)),
-                    )
-                    .clicked()
-                {
-                    app.open_dialog();
-                }
-                ui.add_space(12.0);
-                ui.label(
-                    RichText::new("Ctrl+O  ·  Ctrl+F search  ·  / vim search  ·  Ctrl+scroll zoom")
+                        )
+                        .clicked()
+                    {
+                        app.open_dialog();
+                    }
+                    ui.add_space(12.0);
+                    ui.label(
+                        RichText::new(
+                            "Ctrl+O  ·  Ctrl+F search  ·  / vim search  ·  Ctrl+scroll zoom",
+                        )
                         .weak()
                         .size(12.0),
-                );
-                if !app.opening.is_empty() {
-                    ui.add_space(12.0);
-                    ui.label("Opening…");
-                }
+                    );
+                    if !app.opening.is_empty() {
+                        ui.add_space(12.0);
+                        ui.label("Opening…");
+                    }
+
+                    if !recent.is_empty() {
+                        ui.add_space(28.0);
+                        ui.label(RichText::new("Recent").size(13.0).color(TEXT_DIM));
+                        ui.add_space(8.0);
+                        let list_width = ui.available_width().min(440.0).max(280.0);
+                        for path in &recent {
+                            let name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("document.pdf");
+                            let exists = path.is_file();
+                            let parent = path
+                                .parent()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default();
+                            let (rect, response) = ui.allocate_exact_size(
+                                Vec2::new(list_width, 44.0),
+                                Sense::click(),
+                            );
+                            let fill = if response.hovered() {
+                                Color32::from_white_alpha(18)
+                            } else {
+                                Color32::from_white_alpha(10)
+                            };
+                            ui.painter()
+                                .rect_filled(rect, CornerRadius::same(8), fill);
+                            let name_color = if exists { TEXT } else { TEXT_DIM };
+                            ui.painter().text(
+                                Pos2::new(rect.left() + 12.0, rect.top() + 7.0),
+                                Align2::LEFT_TOP,
+                                name,
+                                FontId::new(13.0, FontFamily::Proportional),
+                                name_color,
+                            );
+                            if !parent.is_empty() {
+                                ui.painter().text(
+                                    Pos2::new(rect.left() + 12.0, rect.top() + 24.0),
+                                    Align2::LEFT_TOP,
+                                    if exists {
+                                        parent.as_str()
+                                    } else {
+                                        "(missing)"
+                                    },
+                                    FontId::new(11.0, FontFamily::Proportional),
+                                    TEXT_DIM,
+                                );
+                            }
+                            let response = if parent.is_empty() {
+                                response
+                            } else {
+                                response.on_hover_text(&parent)
+                            };
+                            if response.clicked() {
+                                if exists {
+                                    open_path = Some(path.clone());
+                                } else {
+                                    forget = Some(path.clone());
+                                    app.error =
+                                        Some(format!("File not found: {}", path.display()));
+                                }
+                            }
+                            if response.secondary_clicked() {
+                                forget = Some(path.clone());
+                            }
+                        }
+                    }
+                    ui.add_space(40.0);
+                });
             });
-        });
     });
+    if let Some(path) = open_path {
+        app.open_path(path);
+    }
+    if let Some(path) = forget {
+        app.settings.forget_recent(&path);
+    }
 }
 
 fn outline_node(

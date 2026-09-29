@@ -308,6 +308,7 @@ impl MarkerApp {
     pub(crate) fn open_path(&mut self, path: PathBuf) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.doc.path == path) {
             self.active = index;
+            self.settings.remember_open(&path);
             return;
         }
         self.next_gen += 1;
@@ -750,10 +751,12 @@ impl MarkerApp {
                         {
                             self.active = index;
                         }
+                        self.settings.remember_open(&opened.path);
                         return;
                     }
                     let tops = DocState::rebuild_tops(&opened.pages);
                     let has_outline = !opened.outline.is_empty();
+                    self.settings.remember_open(&opened.path);
                     self.tabs.push(Tab {
                         doc: DocState {
                             path: opened.path,

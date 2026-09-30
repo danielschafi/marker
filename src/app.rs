@@ -34,6 +34,8 @@ pub(crate) struct MarkerApp {
     pub(crate) tab_menu: Option<(usize, egui::Pos2)>,
     /// Tab being dragged for split / pane assignment.
     pub(crate) tab_drag: Option<usize>,
+    /// Ephemeral or pinned open-tabs overlay (top-right).
+    pub(crate) tab_list: Option<TabListState>,
     pub(crate) opening: HashSet<u64>,
     pub(crate) error: Option<String>,
     pub(crate) page_focus: bool,
@@ -80,6 +82,13 @@ impl SplitState {
             self.first
         }
     }
+}
+
+/// Open-tabs overlay: brief flash on switch, or pinned until dismissed.
+#[derive(Clone, Copy)]
+pub(crate) enum TabListState {
+    Ephemeral { until: Instant },
+    Pinned,
 }
 
 /// Where a dragged tab would land relative to the viewport.
@@ -403,6 +412,7 @@ impl MarkerApp {
             split: None,
             tab_menu: None,
             tab_drag: None,
+            tab_list: None,
             opening: HashSet::new(),
             error: None,
             page_focus: false,
@@ -477,7 +487,10 @@ impl MarkerApp {
 
     pub(crate) fn open_path(&mut self, path: PathBuf) {
         if let Some(index) = self.tabs.iter().position(|tab| tab.doc.path == path) {
-            self.active = index;
+            if self.active != index {
+                self.active = index;
+                self.pulse_tab_list();
+            }
             self.settings.remember_open(&path);
             return;
         }
@@ -486,6 +499,61 @@ impl MarkerApp {
         self.opening.insert(gen);
         self.error = None;
         self.worker.open(gen, path);
+    }
+
+    /// Briefly show the open-tabs list (e.g. after Ctrl+Tab). No-op while pinned.
+    pub(crate) fn pulse_tab_list(&mut self) {
+        if self.tabs.len() < 2 {
+            return;
+        }
+        if matches!(self.tab_list, Some(TabListState::Pinned)) {
+            return;
+        }
+        self.tab_list = Some(TabListState::Ephemeral {
+            until: Instant::now() + Duration::from_millis(2500),
+        });
+    }
+
+    /// Toggle the pinned open-tabs list (title / indicator click).
+    pub(crate) fn toggle_tab_list(&mut self) {
+        if self.tabs.is_empty() {
+            self.tab_list = None;
+            return;
+        }
+        if self.tab_list.is_some() {
+            self.tab_list = None;
+        } else {
+            self.tab_list = Some(TabListState::Pinned);
+        }
+    }
+
+    pub(crate) fn dismiss_tab_list(&mut self) {
+        self.tab_list = None;
+    }
+
+    /// Activate a tab from the switcher / list, respecting split pane assignment.
+    pub(crate) fn activate_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        if let Some(split) = self.split {
+            if split.contains(index) {
+                self.active = index;
+            } else {
+                let focus_first = self.active == split.first;
+                if let Some(s) = self.split.as_mut() {
+                    if focus_first {
+                        s.first = index;
+                    } else {
+                        s.second = index;
+                    }
+                }
+                self.active = index;
+            }
+        } else {
+            self.active = index;
+        }
+        self.pulse_tab_list();
     }
 
     pub(crate) fn close_tab(&mut self, index: usize) {
@@ -529,6 +597,7 @@ impl MarkerApp {
             self.split = None;
             self.tab_drag = None;
             self.tab_menu = None;
+            self.tab_list = None;
             return;
         }
         if self.active >= self.tabs.len() {
@@ -704,6 +773,7 @@ impl MarkerApp {
             return;
         };
         self.active = split.other(self.active);
+        self.pulse_tab_list();
     }
 
     pub(crate) fn fit_width(&mut self) {
@@ -1169,6 +1239,9 @@ impl MarkerApp {
             self.cancel_capture();
             return;
         }
+        if self.tab_list.take().is_some() {
+            return;
+        }
         if self.tab_menu.take().is_some() {
             return;
         }
@@ -1342,7 +1415,10 @@ impl MarkerApp {
                         if let Some(index) =
                             self.tabs.iter().position(|tab| tab.doc.path == opened.path)
                         {
-                            self.active = index;
+                            if self.active != index {
+                                self.active = index;
+                                self.pulse_tab_list();
+                            }
                         }
                         self.settings.remember_open(&opened.path);
                         return;
@@ -1396,6 +1472,9 @@ impl MarkerApp {
                         page_op: None,
                     });
                     self.active = self.tabs.len() - 1;
+                    if self.tabs.len() > 1 {
+                        self.pulse_tab_list();
+                    }
                 }
                 Err(message) => {
                     self.opening.clear();
@@ -1990,12 +2069,13 @@ impl MarkerApp {
             self.assistant_stop();
         }
         if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command) {
-            if !self.tabs.is_empty() {
+            if self.tabs.len() >= 2 {
                 if input_shift(ctx) {
                     self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
                 } else {
                     self.active = (self.active + 1) % self.tabs.len();
                 }
+                self.pulse_tab_list();
             }
         }
         if ctx.input(|input| {

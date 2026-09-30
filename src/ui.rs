@@ -6,7 +6,7 @@ use egui::{
     StrokeKind, TextEdit, TopBottomPanel, Vec2,
 };
 
-use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, Tool};
+use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, TabListState, Tool};
 use crate::assistant::{AssistantAttachment, AssistantRole, CaptureMode};
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 use crate::pdf::OutlineNode;
@@ -30,6 +30,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
         outline_panel(app, ctx);
         assistant_panel(app, ctx);
     }
+    paint_tab_list(app, ctx, show_chrome);
 }
 
 const TAB_BAR_H: f32 = 32.0;
@@ -52,121 +53,184 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
         .show(ctx, |ui| {
             ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
             ui.spacing_mut().button_padding = vec2(6.0, 2.0);
-            ui.horizontal_centered(|ui| {
-                if chrome_button(ui, "Open", false)
-                    .on_hover_text("Open a PDF (Ctrl+O)")
-                    .clicked()
-                {
-                    app.open_dialog();
-                }
-                let outline_on = app.tab().map(|tab| tab.outline_open).unwrap_or(false);
-                if app.tab().is_some()
-                    && chrome_button(ui, "Outline", outline_on)
-                        .on_hover_text("Document outline")
-                        .clicked()
-                {
-                    if let Some(tab) = app.tab_mut() {
-                        tab.outline_open = !tab.outline_open;
-                    }
-                }
-                if app.tab().is_some() {
-                    let tools_on = app.settings.toolbar_visible;
-                    if chrome_button(ui, "Tools", tools_on)
-                        .on_hover_text("Show or hide the annotation toolbar (Ctrl+Shift+B)")
-                        .clicked()
-                    {
-                        app.toggle_toolbar();
-                    }
-                    if chrome_button(ui, "Zen", app.zen)
-                        .on_hover_text("Fullscreen reading; chrome hides until the pointer hits the top (F11)")
-                        .clicked()
-                    {
-                        app.toggle_zen(ui.ctx());
-                    }
-                    if chrome_button(ui, "Assistant", app.assistant_open)
-                        .on_hover_text("Cursor learning assistant (Ctrl+Alt+I)")
-                        .clicked()
-                    {
-                        app.toggle_assistant();
-                    }
-                }
-                ui.add_space(4.0);
+            let row_h = ui.available_height();
+            let full = ui.available_rect_before_wrap();
+            let (_, row_response) =
+                ui.allocate_exact_size(vec2(full.width(), row_h), Sense::hover());
+            let row = row_response.rect;
 
-                let mut close = None;
-                let mut select = None;
-                let mut tab_menu = None;
-                let mut drag_tab = None;
-                let split = app.split;
-                for (index, tab) in app.tabs.iter().enumerate() {
-                    let name = tab
-                        .doc
-                        .path
-                        .file_name()
-                        .and_then(|name| name.to_str())
-                        .unwrap_or("document.pdf");
-                    let in_split = split.is_some_and(|s| s.contains(index));
-                    let action = tab_pill(
-                        ui,
-                        name,
-                        index == app.active || in_split,
-                        tab.doc.session.is_dirty(),
-                        index,
-                    );
-                    if action.select {
-                        select = Some(index);
-                    }
-                    if action.close {
-                        close = Some(index);
-                    }
-                    if action.drag {
-                        drag_tab = Some(index);
-                    }
-                    if action.menu {
-                        tab_menu = action
-                            .pointer
-                            .map(|pos| (index, pos))
-                            .or_else(|| Some((index, ui.ctx().pointer_latest_pos().unwrap_or(Pos2::ZERO))));
-                    }
-                }
-                if !app.opening.is_empty() {
-                    ui.label(RichText::new("Opening…").weak().size(12.0));
-                }
-                document_controls(app, ui);
-                if let Some(index) = select {
-                    if let Some(split) = app.split {
-                        if split.contains(index) {
-                            app.active = index;
-                        } else {
-                            // Replace the focused pane's document.
-                            let focus_first = app.active == split.first;
-                            if let Some(s) = app.split.as_mut() {
-                                if focus_first {
-                                    s.first = index;
-                                } else {
-                                    s.second = index;
-                                }
-                            }
-                            app.active = index;
-                        }
-                    } else {
-                        app.active = index;
-                    }
-                }
-                if let Some(index) = close {
-                    app.close_tab(index);
-                }
-                if let Some(index) = drag_tab {
-                    if app.tabs.len() >= 2 {
-                        app.tab_drag = Some(index);
-                        app.tab_menu = None;
-                    }
-                }
-                if let Some(menu) = tab_menu {
-                    app.tab_menu = Some(menu);
-                }
-            });
+            let center_reserve = 160.0;
+            let left_rect = Rect::from_min_max(
+                row.left_top(),
+                Pos2::new((row.center().x - center_reserve).max(row.left() + 8.0), row.bottom()),
+            );
+            let right_rect = Rect::from_min_max(
+                Pos2::new((row.center().x + center_reserve).min(row.right() - 8.0), row.top()),
+                row.right_bottom(),
+            );
+
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(left_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+                |ui| {
+                    chrome_nav(app, ui);
+                },
+            );
+            ui.scope_builder(
+                egui::UiBuilder::new()
+                    .max_rect(right_rect)
+                    .layout(Layout::left_to_right(Align::Center)),
+                |ui| {
+                    document_controls(app, ui);
+                },
+            );
+            paint_current_title(app, ui, row);
         });
     paint_tab_menu(app, ctx);
+}
+
+fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
+    if chrome_button(ui, "Open", false)
+        .on_hover_text("Open a PDF (Ctrl+O)")
+        .clicked()
+    {
+        app.open_dialog();
+    }
+    let outline_on = app.tab().map(|tab| tab.outline_open).unwrap_or(false);
+    if app.tab().is_some()
+        && chrome_button(ui, "Outline", outline_on)
+            .on_hover_text("Document outline")
+            .clicked()
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.outline_open = !tab.outline_open;
+        }
+    }
+    if app.tab().is_some() {
+        let tools_on = app.settings.toolbar_visible;
+        if chrome_button(ui, "Tools", tools_on)
+            .on_hover_text("Show or hide the annotation toolbar (Ctrl+Shift+B)")
+            .clicked()
+        {
+            app.toggle_toolbar();
+        }
+        if chrome_button(ui, "Zen", app.zen)
+            .on_hover_text(
+                "Fullscreen reading; chrome hides until the pointer hits the top (F11)",
+            )
+            .clicked()
+        {
+            app.toggle_zen(ui.ctx());
+        }
+        if chrome_button(ui, "Assistant", app.assistant_open)
+            .on_hover_text("Cursor learning assistant (Ctrl+Alt+I)")
+            .clicked()
+        {
+            app.toggle_assistant();
+        }
+    }
+}
+
+fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
+    let colors = p(ui.ctx());
+    let opening = !app.opening.is_empty();
+    let Some(tab) = app.tab() else {
+        if opening {
+            ui.painter().text(
+                row.center(),
+                Align2::CENTER_CENTER,
+                "Opening…",
+                FontId::new(12.5, FontFamily::Proportional),
+                colors.text_dim,
+            );
+        }
+        return;
+    };
+    let name = tab_file_name(tab);
+    let dirty = tab.doc.session.is_dirty();
+    let tab_count = app.tabs.len();
+    let list_open = app.tab_list.is_some();
+
+    let title_color = colors.text;
+    let galley = ui.painter().layout_no_wrap(
+        name.to_owned(),
+        FontId::new(13.0, FontFamily::Proportional),
+        title_color,
+    );
+    let mut width = galley.size().x + 20.0;
+    if dirty {
+        width += 12.0;
+    }
+    if tab_count > 1 {
+        width += 22.0;
+    }
+    let max_w = (row.width() * 0.38).clamp(120.0, 420.0);
+    width = width.min(max_w);
+
+    let title_rect = Rect::from_center_size(row.center(), vec2(width, TAB_PILL_H + 4.0));
+    let response = ui.interact(title_rect, Id::new("marker-current-tab"), Sense::click());
+    let fill = if list_open {
+        colors.chrome_raised
+    } else if response.hovered() {
+        Color32::from_white_alpha(14)
+    } else {
+        Color32::TRANSPARENT
+    };
+    if fill != Color32::TRANSPARENT {
+        ui.painter()
+            .rect_filled(title_rect, CornerRadius::same(6), fill);
+    }
+
+    let mut cursor_x = title_rect.center().x - galley.size().x * 0.5;
+    if dirty {
+        cursor_x -= 6.0;
+    }
+    if tab_count > 1 {
+        cursor_x -= 10.0;
+    }
+    let text_pos = Pos2::new(cursor_x, title_rect.center().y - galley.size().y * 0.5);
+    let text_right = text_pos.x + galley.size().x;
+    ui.painter().galley(text_pos, galley, title_color);
+    if dirty {
+        ui.painter().circle_filled(
+            Pos2::new(text_right + 8.0, title_rect.center().y),
+            2.5,
+            colors.dirty,
+        );
+    }
+    if tab_count > 1 {
+        let badge_x = if dirty {
+            text_right + 18.0
+        } else {
+            text_right + 8.0
+        };
+        ui.painter().text(
+            Pos2::new(badge_x, title_rect.center().y),
+            Align2::LEFT_CENTER,
+            format!("▾{tab_count}"),
+            FontId::new(11.0, FontFamily::Proportional),
+            colors.text_dim,
+        );
+    }
+
+    if response.clicked() {
+        app.toggle_tab_list();
+    }
+    let tip = if tab_count > 1 {
+        "Show open tabs · Ctrl+Tab to cycle"
+    } else {
+        "Current document"
+    };
+    response.on_hover_text(tip);
+}
+
+fn tab_file_name(tab: &crate::app::Tab) -> &str {
+    tab.doc
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document.pdf")
 }
 
 struct TabAction {
@@ -175,9 +239,17 @@ struct TabAction {
     menu: bool,
     drag: bool,
     pointer: Option<Pos2>,
+    hovered: bool,
 }
 
-fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: usize) -> TabAction {
+fn tab_list_row(
+    ui: &mut egui::Ui,
+    name: &str,
+    selected: bool,
+    dirty: bool,
+    index: usize,
+    row_width: f32,
+) -> TabAction {
     let colors = p(ui.ctx());
     let color = if selected { colors.text } else { colors.text_dim };
     let galley = ui.painter().layout_no_wrap(
@@ -185,16 +257,10 @@ fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: u
         FontId::new(12.5, FontFamily::Proportional),
         color,
     );
-    let mut width = galley.size().x + 16.0;
-    if dirty {
-        width += 12.0;
-    }
-    if selected {
-        width += 16.0;
-    }
-    let (rect, response) = ui.allocate_exact_size(vec2(width, TAB_PILL_H), Sense::click_and_drag());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(row_width, TAB_LIST_ROW_H), Sense::click_and_drag());
     let fill = if selected {
-        colors.chrome_raised
+        accent_fill(ui.ctx(), 36)
     } else if response.hovered() || response.dragged() {
         Color32::from_white_alpha(14)
     } else {
@@ -203,29 +269,38 @@ fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: u
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, CornerRadius::same(6), fill);
     }
+
+    let text_pos = Pos2::new(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5);
     let text_width = galley.size().x;
-    let text_pos = Pos2::new(rect.left() + 8.0, rect.center().y - galley.size().y * 0.5);
     ui.painter().galley(text_pos, galley, color);
     if dirty {
         ui.painter().circle_filled(
-            Pos2::new(rect.left() + 12.0 + text_width, rect.center().y),
+            Pos2::new(
+                (rect.left() + 14.0 + text_width).min(rect.right() - 28.0),
+                rect.center().y,
+            ),
             2.5,
             colors.dirty,
         );
     }
 
     let mut close_clicked = false;
-    if selected {
+    let show_close = selected || response.hovered();
+    if show_close {
         let close_rect = Rect::from_center_size(
-            Pos2::new(rect.right() - 11.0, rect.center().y),
-            Vec2::splat(14.0),
+            Pos2::new(rect.right() - 14.0, rect.center().y),
+            Vec2::splat(16.0),
         );
         let close = ui.interact(
             close_rect,
-            ui.id().with(("tab-close", index)),
+            ui.id().with(("tab-list-close", index)),
             Sense::click(),
         );
-        let close_color = if close.hovered() { colors.text } else { colors.text_dim };
+        let close_color = if close.hovered() {
+            colors.text
+        } else {
+            colors.text_dim
+        };
         ui.painter().text(
             close_rect.center(),
             Align2::CENTER_CENTER,
@@ -248,7 +323,171 @@ fn tab_pill(ui: &mut egui::Ui, name: &str, selected: bool, dirty: bool, index: u
         menu: response.secondary_clicked(),
         drag: response.drag_started() && !close_clicked,
         pointer: response.interact_pointer_pos(),
+        hovered: response.hovered(),
     }
+}
+
+const TAB_LIST_ROW_H: f32 = 26.0;
+
+fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
+    let Some(state) = app.tab_list else {
+        return;
+    };
+    if app.tabs.is_empty() {
+        app.tab_list = None;
+        return;
+    }
+
+    let now = std::time::Instant::now();
+    if let TabListState::Ephemeral { until } = state {
+        if now >= until {
+            app.tab_list = None;
+            return;
+        }
+        ctx.request_repaint_after(until.saturating_duration_since(now));
+    }
+
+    let colors = p(ctx);
+    let mut close = None;
+    let mut select = None;
+    let mut tab_menu = None;
+    let mut drag_tab = None;
+    let mut keep_alive = false;
+    let split = app.split;
+    let names: Vec<(usize, String, bool, bool)> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .map(|(index, tab)| {
+            let in_split = split.is_some_and(|s| s.contains(index));
+            (
+                index,
+                tab_file_name(tab).to_owned(),
+                index == app.active || in_split,
+                tab.doc.session.is_dirty(),
+            )
+        })
+        .collect();
+
+    let mut row_width: f32 = 180.0;
+    for (_, name, selected, dirty) in &names {
+        let mut w = ui_measure_text(ctx, name, 12.5) + 36.0;
+        if *dirty {
+            w += 12.0;
+        }
+        if *selected {
+            w += 8.0;
+        }
+        row_width = row_width.max(w);
+    }
+    row_width = row_width.clamp(180.0, 320.0);
+
+    let top = if show_chrome {
+        TAB_BAR_H
+            + if app.settings.toolbar_visible {
+                TOOL_BAR_H
+            } else {
+                0.0
+            }
+            + 8.0
+    } else {
+        12.0
+    };
+
+    let area = egui::Area::new(Id::new("marker-tab-list"))
+        .order(egui::Order::Foreground)
+        .anchor(Align2::RIGHT_TOP, vec2(-14.0, top))
+        .interactable(true)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style())
+                .fill(colors.chrome)
+                .stroke(Stroke::new(1.0, colors.hairline))
+                .corner_radius(CornerRadius::same(10))
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.set_width(row_width);
+                    ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                    for (index, name, selected, dirty) in &names {
+                        let action =
+                            tab_list_row(ui, name, *selected, *dirty, *index, row_width);
+                        if action.hovered {
+                            keep_alive = true;
+                        }
+                        if action.select {
+                            select = Some(*index);
+                        }
+                        if action.close {
+                            close = Some(*index);
+                        }
+                        if action.drag {
+                            drag_tab = Some(*index);
+                        }
+                        if action.menu {
+                            tab_menu = action
+                                .pointer
+                                .map(|pos| (*index, pos))
+                                .or_else(|| {
+                                    Some((
+                                        *index,
+                                        ui.ctx()
+                                            .pointer_latest_pos()
+                                            .unwrap_or(Pos2::ZERO),
+                                    ))
+                                });
+                        }
+                    }
+                });
+        });
+
+    if keep_alive {
+        if let Some(TabListState::Ephemeral { .. }) = app.tab_list {
+            app.tab_list = Some(TabListState::Ephemeral {
+                until: now + std::time::Duration::from_millis(2500),
+            });
+        }
+    }
+
+    if let Some(index) = select {
+        app.activate_tab(index);
+    }
+    if let Some(index) = close {
+        app.close_tab(index);
+    }
+    if let Some(index) = drag_tab {
+        if app.tabs.len() >= 2 {
+            app.tab_drag = Some(index);
+            app.tab_menu = None;
+        }
+    }
+    if let Some(menu) = tab_menu {
+        app.tab_menu = Some(menu);
+    }
+
+    let pinned = matches!(app.tab_list, Some(TabListState::Pinned));
+    // Title toggle already ran this frame; ignore that primary click for dismiss.
+    let title_clicked = ctx
+        .read_response(Id::new("marker-current-tab"))
+        .is_some_and(|r| r.clicked());
+    let outside = pinned
+        && ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
+        && !area.response.contains_pointer()
+        && !title_clicked;
+    if outside {
+        app.dismiss_tab_list();
+    }
+}
+
+fn ui_measure_text(ctx: &egui::Context, text: &str, size: f32) -> f32 {
+    ctx.fonts_mut(|fonts| {
+        fonts
+            .layout_no_wrap(
+                text.to_owned(),
+                FontId::new(size, FontFamily::Proportional),
+                Color32::WHITE,
+            )
+            .size()
+            .x
+    })
 }
 
 fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {

@@ -71,12 +71,14 @@ impl DocState {
         self.last_zoom = Instant::now();
     }
 
-    pub(crate) fn render_scale(&self) -> f32 {
-        if self.last_zoom.elapsed().as_millis() < 140 {
+    /// MuPDF device pixels per PDF point for tiles (logical zoom × display ppp).
+    pub(crate) fn render_scale(&self, pixels_per_point: f32) -> f32 {
+        let logical = if self.last_zoom.elapsed().as_millis() < 140 {
             zoom_bucket(self.scale)
         } else {
             self.scale
-        }
+        };
+        logical * pixels_per_point.max(0.5)
     }
 
     fn page_origin(&self, page: usize, view: Rect) -> Pos2 {
@@ -226,7 +228,7 @@ pub(crate) fn viewport_tab(
     let painter = ui.painter_at(response.rect);
     painter.rect_filled(response.rect, 0.0, theme::palette(ui.ctx()).backdrop);
     ensure_image_textures(app, ui.ctx());
-    paint_document(app, &painter, response.rect);
+    paint_document(app, &painter, response.rect, ui.ctx().pixels_per_point());
     paint_scrollbar(app, ui, response.rect);
     if focused {
         inline_editors(app, ui.ctx(), response.rect);
@@ -1521,11 +1523,11 @@ fn resize_target(
     None
 }
 
-fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
+fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
     let Some(tab) = app.tab() else {
         return;
     };
-    let render_scale = tab.doc.render_scale();
+    let render_scale = tab.doc.render_scale(pixels_per_point);
     let (first, last) = visible_pages(&tab.doc, view);
     for page in first..=last {
         let rect = tab.doc.page_rect(page, view);
@@ -1534,7 +1536,7 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
         painter.rect_filled(rect, 1.0, Color32::WHITE);
         // Highlights underpaint paper so glyphs (opaque tile ink) stay readable.
         paint_highlight_fills(app, painter, page, view);
-        paint_tiles(&tab.doc, painter, page, view, render_scale);
+        paint_tiles(&tab.doc, painter, page, view, render_scale, pixels_per_point);
         paint_search_hits(tab, painter, page, view);
         paint_annotations(app, painter, page, view);
     }
@@ -1627,6 +1629,7 @@ fn paint_tiles(
     page: usize,
     view: Rect,
     render_scale: f32,
+    pixels_per_point: f32,
 ) {
     let target_bits = render_scale.to_bits();
     let mut tiles: Vec<_> = doc
@@ -1642,7 +1645,7 @@ fn paint_tiles(
         let y1 = (tile.y as f32 + tile.h as f32) / tile.scale;
         let min = doc.page_to_screen(page, PdfPoint::new(x0, y0), view);
         let max = doc.page_to_screen(page, PdfPoint::new(x1, y1), view);
-        let dest = Rect::from_min_max(min, max);
+        let dest = snap_rect_to_pixels(Rect::from_min_max(min, max), pixels_per_point);
         if dest.intersects(view) {
             painter.image(
                 tile.texture.id(),
@@ -1652,6 +1655,16 @@ fn paint_tiles(
             );
         }
     }
+}
+
+/// Align tile quads to the physical pixel grid to avoid subpixel resampling blur.
+fn snap_rect_to_pixels(rect: Rect, pixels_per_point: f32) -> Rect {
+    let ppp = pixels_per_point.max(0.5);
+    let snap = |v: f32| (v * ppp).round() / ppp;
+    Rect::from_min_max(
+        Pos2::new(snap(rect.min.x), snap(rect.min.y)),
+        Pos2::new(snap(rect.max.x), snap(rect.max.y)),
+    )
 }
 
 fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect) {
@@ -2844,6 +2857,7 @@ pub(crate) fn wanted_tiles(
     inflight: &std::collections::HashSet<crate::app::TileKey>,
     _tool: Tool,
     view: Rect,
+    pixels_per_point: f32,
 ) -> TileWant {
     let mut want = TileWant {
         tiles: Vec::new(),
@@ -2852,7 +2866,7 @@ pub(crate) fn wanted_tiles(
     if doc.pages.is_empty() {
         return want;
     }
-    let render_scale = doc.render_scale();
+    let render_scale = doc.render_scale(pixels_per_point);
     let bits = render_scale.to_bits();
     let (first, last) = visible_pages(doc, view);
     let view_top = doc.scroll_y;

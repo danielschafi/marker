@@ -1490,7 +1490,7 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
     ui.scope_builder(egui::UiBuilder::new().max_rect(second_rect), |ui| {
         viewport_tab(app, ui, second, !focus_first);
     });
-    app.dispatch_tiles();
+    app.dispatch_tiles(ui.ctx().pixels_per_point());
 }
 
 fn vbar(ui: &mut egui::Ui) {

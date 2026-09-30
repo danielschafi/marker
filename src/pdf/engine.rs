@@ -443,34 +443,75 @@ fn rgba_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
             let source = x * components;
             let dest = (y * width + x) * 4;
             if components >= 3 {
-                let r = row[source];
-                let g = row[source + 1];
-                let b = row[source + 2];
+                let (r, g, b, a) = knock_out_paper(row[source], row[source + 1], row[source + 2]);
                 out[dest] = r;
                 out[dest + 1] = g;
                 out[dest + 2] = b;
-                // Knock out near-white paper so underpainted highlights sit behind ink.
-                out[dest + 3] = paper_knockout_alpha(r, g, b);
+                out[dest + 3] = a;
             }
         }
     }
     out
 }
 
-/// Soft alpha for page tiles: pure white is transparent; ink stays opaque.
-/// Lets highlight fills paint under glyphs without a Multiply blend mode.
-fn paper_knockout_alpha(r: u8, g: u8, b: u8) -> u8 {
-    let dist = (255u16.saturating_sub(r as u16))
-        .max(255u16.saturating_sub(g as u16))
-        .max(255u16.saturating_sub(b as u16));
-    const RAMP: u16 = 12;
-    if dist == 0 {
-        0
-    } else if dist >= RAMP {
-        255
-    } else {
-        ((dist * 255) / RAMP) as u8
+/// Convert white-backed page pixels to ink-on-transparent.
+///
+/// Lets highlight fills underpaint glyphs without a Multiply blend mode. Achromatic
+/// anti-aliased edges are unpremultiplied against white so gray AA becomes dark ink
+/// at partial alpha (clean over marker tint) instead of an opaque silver rim.
+///
+/// Transparent paper keeps RGB white so LINEAR texture filtering does not pull a
+/// dark fringe from `(0,0,0,0)` neighbors into glyph edges.
+fn knock_out_paper(r: u8, g: u8, b: u8) -> (u8, u8, u8, u8) {
+    let max_c = r.max(g).max(b);
+    let min_c = r.min(g).min(b);
+    let chroma = max_c as u16 - min_c as u16;
+
+    // Pure / near-white paper (white RGB, alpha 0 — important for LINEAR filtering).
+    if min_c >= 253 {
+        return (255, 255, 255, 0);
     }
+
+    if chroma <= 16 {
+        // Grayscale ink on white → recover coverage for clean underpaint.
+        let a = 255u16 - min_c as u16;
+        if a == 0 {
+            return (255, 255, 255, 0);
+        }
+        if a == 255 {
+            return (r, g, b, 255);
+        }
+        return (
+            unpremul_against_white(r, a),
+            unpremul_against_white(g, a),
+            unpremul_against_white(b, a),
+            a as u8,
+        );
+    }
+
+    // Chromatic content (images / colored ink): keep the body opaque; only soft-knock
+    // near-white fringes so photos are not rewritten into dark translucent mush.
+    let dist = 255u16 - min_c as u16;
+    const RAMP: u16 = 12;
+    if dist >= RAMP {
+        (r, g, b, 255)
+    } else if dist == 0 {
+        (255, 255, 255, 0)
+    } else {
+        let a = ((dist * 255) / RAMP).max(1);
+        (
+            unpremul_against_white(r, a),
+            unpremul_against_white(g, a),
+            unpremul_against_white(b, a),
+            a as u8,
+        )
+    }
+}
+
+fn unpremul_against_white(c: u8, a: u16) -> u8 {
+    debug_assert!(a > 0);
+    let v = 255u32.saturating_sub(((255u32 - c as u32) * 255) / a as u32);
+    v.min(255) as u8
 }
 
 fn show(err: impl ToString) -> String {
@@ -1497,5 +1538,31 @@ mod tests {
             .chunks_exact(4)
             .filter(|px| px[0] > 220 && px[1] > 180 && px[2] < 120)
             .count()
+    }
+
+    #[test]
+    fn knock_out_paper_white_is_transparent() {
+        assert_eq!(knock_out_paper(255, 255, 255), (255, 255, 255, 0));
+        assert_eq!(knock_out_paper(254, 254, 253), (255, 255, 255, 0));
+    }
+
+    #[test]
+    fn knock_out_paper_black_stays_opaque() {
+        assert_eq!(knock_out_paper(0, 0, 0), (0, 0, 0, 255));
+    }
+
+    #[test]
+    fn knock_out_paper_gray_aa_becomes_dark_partial_alpha() {
+        let (r, g, b, a) = knock_out_paper(128, 128, 128);
+        assert!(a > 100 && a < 140, "coverage alpha {a}");
+        assert!(
+            r < 16 && g < 16 && b < 16,
+            "ink should be near-black, got {r},{g},{b}"
+        );
+    }
+
+    #[test]
+    fn knock_out_paper_chromatic_midtone_stays_opaque() {
+        assert_eq!(knock_out_paper(100, 150, 180), (100, 150, 180, 255));
     }
 }

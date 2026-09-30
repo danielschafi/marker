@@ -1355,7 +1355,7 @@ impl eframe::App for MarkerApp {
                     ui::split_viewports(self, ui, split);
                 } else {
                     viewport(self, ui, true);
-                    self.dispatch_tiles();
+                    self.dispatch_tiles(ctx.pixels_per_point());
                 }
             });
         ui::tab_drag_overlay(self, ctx);
@@ -1497,6 +1497,7 @@ impl MarkerApp {
                         gen, key.page, key.scale_bits, key.col, key.row
                     ),
                     image,
+                    // Linear at ~1:1 (HiDPI) keeps glyph AA smooth; nearest looked crunchy.
                     egui::TextureOptions::LINEAR,
                 );
                 tab.doc.tiles.insert(
@@ -1941,18 +1942,23 @@ impl MarkerApp {
         self.math.request(gen, id, req, source, size, color);
     }
 
-    pub(crate) fn dispatch_tiles(&mut self) {
-        self.dispatch_tiles_at(self.active, self.view_rect);
+    pub(crate) fn dispatch_tiles(&mut self, pixels_per_point: f32) {
+        self.dispatch_tiles_at(self.active, self.view_rect, pixels_per_point);
         if let Some(split) = self.split {
-            self.dispatch_tiles_at(split.other(self.active), self.split_view_rect);
+            self.dispatch_tiles_at(
+                split.other(self.active),
+                self.split_view_rect,
+                pixels_per_point,
+            );
         }
     }
 
-    fn dispatch_tiles_at(&mut self, index: usize, view: egui::Rect) {
+    fn dispatch_tiles_at(&mut self, index: usize, view: egui::Rect, pixels_per_point: f32) {
         let Some(tab) = self.tabs.get(index) else {
             return;
         };
-        let wanted = view::wanted_tiles(&tab.doc, &tab.inflight, self.tool, view);
+        let wanted =
+            view::wanted_tiles(&tab.doc, &tab.inflight, self.tool, view, pixels_per_point);
         let gen = tab.doc.gen;
         let mut glyph_pages = Vec::new();
         let mut tiles = Vec::new();

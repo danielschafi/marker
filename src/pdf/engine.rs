@@ -443,13 +443,34 @@ fn rgba_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
             let source = x * components;
             let dest = (y * width + x) * 4;
             if components >= 3 {
-                out[dest] = row[source];
-                out[dest + 1] = row[source + 1];
-                out[dest + 2] = row[source + 2];
+                let r = row[source];
+                let g = row[source + 1];
+                let b = row[source + 2];
+                out[dest] = r;
+                out[dest + 1] = g;
+                out[dest + 2] = b;
+                // Knock out near-white paper so underpainted highlights sit behind ink.
+                out[dest + 3] = paper_knockout_alpha(r, g, b);
             }
         }
     }
     out
+}
+
+/// Soft alpha for page tiles: pure white is transparent; ink stays opaque.
+/// Lets highlight fills paint under glyphs without a Multiply blend mode.
+fn paper_knockout_alpha(r: u8, g: u8, b: u8) -> u8 {
+    let dist = (255u16.saturating_sub(r as u16))
+        .max(255u16.saturating_sub(g as u16))
+        .max(255u16.saturating_sub(b as u16));
+    const RAMP: u16 = 12;
+    if dist == 0 {
+        0
+    } else if dist >= RAMP {
+        255
+    } else {
+        ((dist * 255) / RAMP) as u8
+    }
 }
 
 fn show(err: impl ToString) -> String {

@@ -97,7 +97,10 @@ pub(crate) enum SplitDropZone {
 
 pub(crate) struct Tab {
     pub(crate) doc: DocState,
-    pub(crate) selected: Option<u64>,
+    /// Selected annotation ids (order = primary first for style/edit).
+    pub(crate) selected: Vec<u64>,
+    /// Ephemeral page-text selection for copy (Select tool).
+    pub(crate) text_sel: Option<TextSel>,
     pub(crate) editing: Option<u64>,
     pub(crate) drag: Option<Drag>,
     pub(crate) pending_jump: Option<(usize, Option<f32>)>,
@@ -116,7 +119,7 @@ pub(crate) struct Tab {
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
-    pub(crate) menu: Option<(egui::Pos2, Option<u64>)>,
+    pub(crate) menu: Option<ContextMenu>,
     /// Compact color/size strip next to an annotation (right-click or just after create).
     pub(crate) style_bar: Option<StyleBar>,
     pending_undo: Option<Session>,
@@ -125,6 +128,44 @@ pub(crate) struct Tab {
     redo: Vec<UndoEntry>,
     /// In-flight page insert/delete that participates in undo/redo.
     page_op: Option<PendingPageOp>,
+}
+
+/// Page-space glyph range selected with the Select tool (for copy, etc.).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TextSel {
+    pub page: usize,
+    pub glyph_lo: usize,
+    pub glyph_hi: usize,
+}
+
+/// Right-click page menu snapshot.
+#[derive(Clone, Debug)]
+pub(crate) struct ContextMenu {
+    pub pos: egui::Pos2,
+    pub page: usize,
+    pub point: PdfPoint,
+    pub hit: Option<u64>,
+}
+
+impl Tab {
+    pub(crate) fn select_only(&mut self, id: u64) {
+        self.selected.clear();
+        self.selected.push(id);
+        self.text_sel = None;
+    }
+
+    pub(crate) fn select_many(&mut self, ids: Vec<u64>) {
+        self.selected = ids;
+        self.text_sel = None;
+    }
+
+    pub(crate) fn primary_selected(&self) -> Option<u64> {
+        self.selected.first().copied()
+    }
+
+    pub(crate) fn is_selected(&self, id: u64) -> bool {
+        self.selected.contains(&id)
+    }
 }
 
 /// Floating style controls for one annotation.
@@ -238,7 +279,7 @@ impl Tool {
 
     pub(crate) fn hint(self) -> &'static str {
         match self {
-            Tool::Select => "Move and resize",
+            Tool::Select => "Select, move, and copy",
             Tool::Highlight => "Mark text",
             Tool::Text => "Write on the page",
             Tool::Rect => "Rectangle",
@@ -284,6 +325,20 @@ pub(crate) enum Drag {
         origin: PdfPoint,
         current_pt: PdfPoint,
     },
+    /// Select-tool text drag (copyable page text; not an annotation).
+    TextSelect {
+        page: usize,
+        anchor: Option<usize>,
+        current: Option<usize>,
+        origin: PdfPoint,
+        current_pt: PdfPoint,
+    },
+    /// Select-tool area drag — bulk-select by annotation center.
+    Marquee {
+        page: usize,
+        origin: PdfPoint,
+        current: PdfPoint,
+    },
     Highlight {
         page: usize,
         anchor: Option<usize>,
@@ -307,8 +362,9 @@ pub(crate) enum Drag {
         kind: CreateKind,
     },
     Move {
-        id: u64,
-        origin: AnnotKind,
+        /// Ids being translated (primary first).
+        ids: Vec<u64>,
+        origins: Vec<(u64, AnnotKind)>,
         grab: PdfPoint,
         page: usize,
         moved: bool,
@@ -818,12 +874,8 @@ impl MarkerApp {
                 tab.undo_edit = None;
                 tab.menu = None;
                 tab.style_bar = None;
-                if tab
-                    .selected
-                    .is_some_and(|id| tab.doc.session.get(id).is_none())
-                {
-                    tab.selected = None;
-                }
+                tab.selected
+                    .retain(|id| tab.doc.session.get(*id).is_some());
                 if !matches!(tab.save, SaveState::Saving) {
                     tab.save = SaveState::Dirty {
                         since: Instant::now(),
@@ -867,12 +919,8 @@ impl MarkerApp {
                 tab.undo_edit = None;
                 tab.menu = None;
                 tab.style_bar = None;
-                if tab
-                    .selected
-                    .is_some_and(|id| tab.doc.session.get(id).is_none())
-                {
-                    tab.selected = None;
-                }
+                tab.selected
+                    .retain(|id| tab.doc.session.get(*id).is_some());
                 if !matches!(tab.save, SaveState::Saving) {
                     tab.save = SaveState::Dirty {
                         since: Instant::now(),
@@ -896,22 +944,72 @@ impl MarkerApp {
         }
     }
 
+    /// Text available for Ctrl+C: page text selection, highlight glyphs, or text annot.
+    pub(crate) fn copyable_selection_text(&self) -> Option<String> {
+        let tab = self.tab()?;
+        if let Some(sel) = &tab.text_sel {
+            let glyphs = tab.doc.glyphs.get(&sel.page)?;
+            let text = crate::assistant::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi);
+            if !text.trim().is_empty() {
+                return Some(text);
+            }
+        }
+        if tab.selected.len() == 1 {
+            let id = tab.selected[0];
+            let annot = tab.doc.session.get(id)?;
+            match &annot.kind {
+                AnnotKind::Highlight { quads, .. } => {
+                    let glyphs = tab.doc.glyphs.get(&annot.page)?;
+                    let indices = crate::assistant::glyphs_intersecting_rects(glyphs, quads);
+                    let (&lo, &hi) = (indices.first()?, indices.last()?);
+                    let text = crate::assistant::reconstruct_text(glyphs, lo, hi);
+                    if !text.trim().is_empty() {
+                        return Some(text);
+                    }
+                }
+                AnnotKind::Text { content, .. } | AnnotKind::Note { content, .. } => {
+                    if !content.is_empty() {
+                        return Some(content.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Word under a page point (for right-click Copy when nothing is selected).
+    pub(crate) fn word_at_point(&self, page: usize, point: PdfPoint) -> Option<String> {
+        let tab = self.tab()?;
+        let glyphs = tab.doc.glyphs.get(&page)?;
+        let index = crate::annot::glyph_at(glyphs, point)?;
+        let (lo, hi) = crate::annot::word_range(glyphs, index)?;
+        let text = crate::assistant::reconstruct_text(glyphs, lo, hi);
+        (!text.trim().is_empty()).then_some(text)
+    }
+
     pub(crate) fn delete_selected(&mut self) {
         self.end_edit_undo();
         if let Some(tab) = self.tab_mut() {
             tab.editing = None;
         }
-        let Some(id) = self.tab().and_then(|tab| tab.selected) else {
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
+        if ids.is_empty() {
             return;
-        };
+        }
         self.seal_then_arm();
         if let Some(tab) = self.tab_mut() {
-            tab.doc.session.remove(id);
-            tab.selected = None;
+            for id in &ids {
+                tab.doc.session.remove(*id);
+                tab.previews.remove(id);
+                tab.image_textures.remove(id);
+            }
+            tab.selected.clear();
             tab.menu = None;
             tab.style_bar = None;
-            tab.previews.remove(&id);
-            tab.image_textures.remove(&id);
             tab.editing = None;
         }
         self.seal_undo();
@@ -964,7 +1062,7 @@ impl MarkerApp {
                 height,
             },
         );
-        tab.selected = Some(id);
+        tab.select_only(id);
         tab.editing = None;
         tab.menu = None;
         tab.style_bar = None;
@@ -1089,10 +1187,12 @@ impl MarkerApp {
                 tab.focus_edit = false;
                 seal = true;
             } else if tab.assistant.learning.take().is_some()
-                || tab.selected.take().is_some()
+                || !tab.selected.is_empty()
+                || tab.text_sel.take().is_some()
             {
+                tab.selected.clear();
                 tab.editing = None;
-                // Cleared learning selection and/or annotation selection.
+                // Cleared learning selection and/or annotation/text selection.
             } else if tab.search.open {
                 tab.search.open = false;
                 tab.search.hits.clear();
@@ -1116,7 +1216,8 @@ impl MarkerApp {
     /// Clear annotation selection, style bar, and assistant learning selection.
     pub(crate) fn clear_page_selection(&mut self) {
         if let Some(tab) = self.tab_mut() {
-            tab.selected = None;
+            tab.selected.clear();
+            tab.text_sel = None;
             tab.editing = None;
             tab.style_bar = None;
             tab.assistant.learning = None;
@@ -1266,7 +1367,8 @@ impl MarkerApp {
                             glyphs: HashMap::new(),
                             tiles: HashMap::new(),
                         },
-                        selected: None,
+                        selected: Vec::new(),
+                        text_sel: None,
                         editing: None,
                         drag: None,
                         pending_jump: None,
@@ -1489,11 +1591,9 @@ impl MarkerApp {
                 *page -= 1;
             }
         }
-        if tab
-            .selected
-            .is_some_and(|id| tab.doc.session.get(id).is_none())
-        {
-            tab.selected = None;
+        tab.selected
+            .retain(|id| tab.doc.session.get(*id).is_some());
+        if tab.selected.is_empty() {
             tab.editing = None;
         }
         let jump = index.min(tab.doc.pages.len().saturating_sub(1));
@@ -1942,6 +2042,17 @@ impl MarkerApp {
         if paste_image && !editing {
             let _ = self.paste_clipboard_image();
         }
+        let want_copy = ctx.input(|input| {
+            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
+                || (input.modifiers.command
+                    && !input.modifiers.shift
+                    && input.key_pressed(Key::C))
+        });
+        if want_copy && !editing {
+            if let Some(text) = self.copyable_selection_text() {
+                ctx.copy_text(text);
+            }
+        }
         let mut fit = false;
         let mut zoom = None;
         let mut search_delta = None;
@@ -1986,7 +2097,7 @@ impl MarkerApp {
             if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
                 if self
                     .tab()
-                    .is_some_and(|tab| tab.editing.is_none() && tab.selected.is_some())
+                    .is_some_and(|tab| tab.editing.is_none() && !tab.selected.is_empty())
                 {
                     delete_selected = true;
                 }
@@ -2612,7 +2723,13 @@ impl MarkerApp {
         if tab.doc.session.get(id).is_none() {
             return;
         }
-        tab.selected = Some(id);
+        if !tab.is_selected(id) {
+            tab.select_only(id);
+        } else {
+            // Keep multi-select; ensure `id` is primary for the strip anchor.
+            tab.selected.retain(|x| *x != id);
+            tab.selected.insert(0, id);
+        }
         tab.menu = None;
         tab.style_bar = Some(StyleBar {
             id,
@@ -2655,16 +2772,7 @@ impl MarkerApp {
 
     /// Compact icon row for the floating annotation style strip. Returns true if Delete was chosen.
     pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui) -> bool {
-        let flags = match self.selected_kind() {
-            Some(AnnotKind::Highlight { .. }) => (true, true, false, false),
-            Some(AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Note { .. }) => {
-                (false, true, true, false)
-            }
-            Some(AnnotKind::Shape { .. }) => (false, true, false, true),
-            Some(AnnotKind::Image { .. } | AnnotKind::Future(_)) | None => {
-                (false, false, false, false)
-            }
-        };
+        let flags = self.selection_style_flags();
         let (highlight_palette, show_color, show_size, show_stroke) = flags;
         let colors: &[Rgb] = if highlight_palette {
             &crate::geom::HIGHLIGHT_COLORS
@@ -2769,7 +2877,7 @@ impl MarkerApp {
 
     fn selected_color(&self) -> Option<Rgb> {
         let tab = self.tab()?;
-        let annot = tab.doc.session.get(tab.selected?)?;
+        let annot = tab.doc.session.get(tab.primary_selected()?)?;
         Some(match &annot.kind {
             AnnotKind::Highlight { color, .. }
             | AnnotKind::Text { color, .. }
@@ -2782,8 +2890,8 @@ impl MarkerApp {
 
     fn active_text_size(&self) -> f32 {
         if let Some(tab) = self.tab() {
-            if let Some(id) = tab.selected {
-                if let Some(annot) = tab.doc.session.get(id) {
+            for id in &tab.selected {
+                if let Some(annot) = tab.doc.session.get(*id) {
                     match &annot.kind {
                         AnnotKind::Text { size, .. } | AnnotKind::Math { size, .. } => {
                             return *size
@@ -2798,9 +2906,9 @@ impl MarkerApp {
 
     fn active_stroke(&self) -> f32 {
         if let Some(tab) = self.tab() {
-            if let Some(id) = tab.selected {
+            for id in &tab.selected {
                 if let Some(AnnotKind::Shape { width, .. }) =
-                    tab.doc.session.get(id).map(|a| &a.kind)
+                    tab.doc.session.get(*id).map(|a| &a.kind)
                 {
                     return *width;
                 }
@@ -2810,57 +2918,101 @@ impl MarkerApp {
     }
 
     fn selected_is_text_like(&self) -> bool {
-        matches!(
-            self.selected_kind(),
-            Some(AnnotKind::Text { .. } | AnnotKind::Math { .. })
-        )
+        self.tab().is_some_and(|tab| {
+            tab.selected.iter().any(|id| {
+                matches!(
+                    tab.doc.session.get(*id).map(|a| &a.kind),
+                    Some(AnnotKind::Text { .. } | AnnotKind::Math { .. })
+                )
+            })
+        })
     }
 
     fn selected_is_shape(&self) -> bool {
-        matches!(self.selected_kind(), Some(AnnotKind::Shape { .. }))
+        self.tab().is_some_and(|tab| {
+            tab.selected.iter().any(|id| {
+                matches!(
+                    tab.doc.session.get(*id).map(|a| &a.kind),
+                    Some(AnnotKind::Shape { .. })
+                )
+            })
+        })
     }
 
-    fn selected_kind(&self) -> Option<&AnnotKind> {
-        let tab = self.tab()?;
-        Some(&tab.doc.session.get(tab.selected?)?.kind)
+    /// (highlight_palette, show_color, show_size, show_stroke) for the current selection.
+    fn selection_style_flags(&self) -> (bool, bool, bool, bool) {
+        let Some(tab) = self.tab() else {
+            return (false, false, false, false);
+        };
+        let mut highlight = false;
+        let mut ink = false;
+        let mut size = false;
+        let mut stroke = false;
+        for id in &tab.selected {
+            match tab.doc.session.get(*id).map(|a| &a.kind) {
+                Some(AnnotKind::Highlight { .. }) => {
+                    highlight = true;
+                }
+                Some(AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Note { .. }) => {
+                    ink = true;
+                    size = true;
+                }
+                Some(AnnotKind::Shape { .. }) => {
+                    ink = true;
+                    stroke = true;
+                }
+                Some(AnnotKind::Image { .. } | AnnotKind::Future(_)) | None => {}
+            }
+        }
+        // Prefer highlight swatches when any highlight is selected.
+        let show_color = highlight || ink;
+        (highlight, show_color, size, stroke)
     }
 
     fn apply_color(&mut self, color: Rgb) {
         let mut kind_bucket = None;
-        let mut math_id = None;
+        let mut math_ids = Vec::new();
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
         if let Some(tab) = self.tab_mut() {
-            if let Some(id) = tab.selected {
+            for id in ids {
+                let mut touched = None;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
                     match &mut annot.kind {
                         AnnotKind::Highlight { color: slot, .. } => {
                             *slot = color;
-                            kind_bucket = Some(0);
+                            touched = Some(0);
                         }
                         AnnotKind::Text { color: slot, .. }
                         | AnnotKind::Note { color: slot, .. }
                         | AnnotKind::Math { color: slot, .. } => {
                             *slot = color;
-                            kind_bucket = Some(1);
+                            touched = Some(1);
+                            if matches!(annot.kind, AnnotKind::Math { .. }) {
+                                math_ids.push(id);
+                            }
                         }
                         AnnotKind::Shape { stroke, .. } => {
                             *stroke = color;
-                            kind_bucket = Some(2);
+                            touched = Some(2);
                         }
                         AnnotKind::Image { .. } | AnnotKind::Future(_) => {}
                     }
                 }
-                if kind_bucket.is_some() {
+                if let Some(bucket) = touched {
+                    kind_bucket = Some(bucket);
                     tab.doc.session.mark_dirty(id);
                     if !matches!(tab.save, SaveState::Saving) {
                         tab.save = SaveState::Dirty {
                             since: Instant::now(),
                         };
                     }
-                    math_id = Some(id);
                 }
             }
         }
-        if let Some(id) = math_id {
+        for id in math_ids {
             self.queue_math(id);
         }
         match kind_bucket.unwrap_or(match self.tool {
@@ -2877,15 +3029,24 @@ impl MarkerApp {
 
     fn apply_text_size(&mut self, size: f32) {
         let size = size.clamp(6.0, 96.0);
-        let mut math_id = None;
+        let mut math_ids = Vec::new();
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
         if let Some(tab) = self.tab_mut() {
-            if let Some(id) = tab.selected {
+            for id in ids {
                 let mut changed = false;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
                     match &mut annot.kind {
-                        AnnotKind::Text { size: slot, .. } | AnnotKind::Math { size: slot, .. } => {
+                        AnnotKind::Text { size: slot, .. } => {
                             *slot = size;
                             changed = true;
+                        }
+                        AnnotKind::Math { size: slot, .. } => {
+                            *slot = size;
+                            changed = true;
+                            math_ids.push(id);
                         }
                         _ => {}
                     }
@@ -2897,11 +3058,10 @@ impl MarkerApp {
                             since: Instant::now(),
                         };
                     }
-                    math_id = Some(id);
                 }
             }
         }
-        if let Some(id) = math_id {
+        for id in math_ids {
             self.queue_math(id);
         }
         self.settings.text_size = size;
@@ -2910,8 +3070,12 @@ impl MarkerApp {
 
     fn apply_stroke(&mut self, width: f32) {
         let width = width.clamp(0.25, 16.0);
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
         if let Some(tab) = self.tab_mut() {
-            if let Some(id) = tab.selected {
+            for id in ids {
                 let mut changed = false;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
                     if let AnnotKind::Shape { width: slot, .. } = &mut annot.kind {

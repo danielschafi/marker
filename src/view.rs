@@ -6,7 +6,7 @@ use egui::{
 };
 
 use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind};
-use crate::app::{CreateKind, DocState, Drag, MarkerApp, Tab, Tool};
+use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
 use crate::assistant::{CaptureMode, LearningSelection};
 use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
@@ -382,10 +382,19 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         Some(Drag::Pan { .. })
     ) {
         response.ctx.set_cursor_icon(CursorIcon::Grabbing);
-    } else if matches!(app.capture, CaptureMode::Region) {
+    } else if matches!(app.capture, CaptureMode::Region)
+        || matches!(
+            app.tab().and_then(|tab| tab.drag.as_ref()),
+            Some(Drag::Marquee { .. })
+        )
+    {
         response.clone().on_hover_cursor(CursorIcon::Crosshair);
     } else if matches!(app.capture, CaptureMode::LearningText)
         || matches!(app.tool, Tool::Highlight | Tool::Text | Tool::Math)
+        || matches!(
+            app.tab().and_then(|tab| tab.drag.as_ref()),
+            Some(Drag::TextSelect { .. })
+        )
     {
         response.clone().on_hover_cursor(CursorIcon::Text);
     }
@@ -431,61 +440,23 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
     let Some(tab) = app.tab_mut() else {
         return;
     };
-    if space || tool == Tool::Select {
-        if let Some((page, point)) = tab.doc.screen_to_page(pos, view) {
-            if tool == Tool::Select {
-                if let Some((id, handle)) = resize_target(&tab.doc, tab.selected, tool, pos, view) {
-                    if let Some(annot) = tab.doc.session.get(id) {
-                        let origin = annot.kind.clone();
-                        let page = annot.page;
-                        tab.selected = Some(id);
-                        tab.editing = None;
-                        tab.drag = Some(Drag::Resize {
-                            id,
-                            handle,
-                            origin,
-                            page,
-                        });
-                        return;
-                    }
-                }
-                if let Some(id) = tab.doc.session.hit_test(page, point, 4.0 / tab.doc.scale) {
-                    let origin = tab.doc.session.get(id).map(|annot| annot.kind.clone());
-                    tab.selected = Some(id);
-                    tab.editing = None;
-                    if let Some(origin) = origin {
-                        tab.drag = Some(Drag::Move {
-                            id,
-                            origin,
-                            grab: point,
-                            page,
-                            moved: false,
-                        });
-                    }
-                    return;
-                }
-            }
-        }
-        if space || tool == Tool::Select {
-            tab.selected = None;
-            tab.editing = None;
-            tab.style_bar = None;
-            tab.assistant.learning = None;
-            tab.drag = Some(Drag::Pan {
-                scroll_x: tab.doc.scroll_x,
-                scroll_y: tab.doc.scroll_y,
-                pos,
-            });
-            return;
-        }
+    if space {
+        tab.drag = Some(Drag::Pan {
+            scroll_x: tab.doc.scroll_x,
+            scroll_y: tab.doc.scroll_y,
+            pos,
+        });
+        return;
     }
 
     let Some((page, point)) = tab.doc.screen_to_page(pos, view) else {
-        tab.selected = None;
+        tab.selected.clear();
+        tab.text_sel = None;
         tab.editing = None;
         return;
     };
     match tool {
+        Tool::Select => begin_select(tab, page, point, pos, view),
         Tool::Highlight => begin_highlight(tab, page, point),
         Tool::Rect | Tool::Ellipse | Tool::Line => {
             tab.drag = Some(Drag::Shape {
@@ -500,11 +471,13 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
             });
         }
         Tool::Text | Tool::Math => {
-            if let Some((id, handle)) = resize_target(&tab.doc, tab.selected, tool, pos, view) {
+            if let Some((id, handle)) =
+                resize_target(&tab.doc, tab.primary_selected(), tool, pos, view)
+            {
                 if let Some(annot) = tab.doc.session.get(id) {
                     let origin = annot.kind.clone();
                     let annot_page = annot.page;
-                    tab.selected = Some(id);
+                    tab.select_only(id);
                     tab.editing = None;
                     tab.drag = Some(Drag::Resize {
                         id,
@@ -523,11 +496,11 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
                 });
                 if matches_tool {
                     let origin = tab.doc.session.get(id).unwrap().kind.clone();
-                    tab.selected = Some(id);
+                    tab.select_only(id);
                     tab.editing = None;
                     tab.drag = Some(Drag::Move {
-                        id,
-                        origin,
+                        ids: vec![id],
+                        origins: vec![(id, origin)],
                         grab: point,
                         page,
                         moved: false,
@@ -546,12 +519,93 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
                 },
             });
         }
-        Tool::Select => {}
+    }
+}
+
+fn begin_select(tab: &mut Tab, page: usize, point: PdfPoint, pos: Pos2, view: Rect) {
+    let tool = Tool::Select;
+    if let Some((id, handle)) = resize_target(&tab.doc, tab.primary_selected(), tool, pos, view) {
+        if let Some(annot) = tab.doc.session.get(id) {
+            let origin = annot.kind.clone();
+            let page = annot.page;
+            if !tab.is_selected(id) {
+                tab.select_only(id);
+            }
+            tab.editing = None;
+            tab.drag = Some(Drag::Resize {
+                id,
+                handle,
+                origin,
+                page,
+            });
+            return;
+        }
+    }
+    if let Some(id) = tab.doc.session.hit_test(page, point, 4.0 / tab.doc.scale) {
+        let origins = if tab.is_selected(id) && tab.selected.len() > 1 {
+            // Dragging one of a multi-selection moves the whole set.
+            tab.selected
+                .iter()
+                .filter_map(|sid| {
+                    tab.doc
+                        .session
+                        .get(*sid)
+                        .map(|annot| (*sid, annot.kind.clone()))
+                })
+                .collect::<Vec<_>>()
+        } else {
+            tab.select_only(id);
+            tab.doc
+                .session
+                .get(id)
+                .map(|annot| vec![(id, annot.kind.clone())])
+                .unwrap_or_default()
+        };
+        tab.editing = None;
+        tab.style_bar = None;
+        if !origins.is_empty() {
+            let ids = origins.iter().map(|(id, _)| *id).collect();
+            tab.drag = Some(Drag::Move {
+                ids,
+                origins,
+                grab: point,
+                page,
+                moved: false,
+            });
+        }
+        return;
+    }
+    // Empty page: text select when starting on a glyph, otherwise marquee bulk-select.
+    tab.selected.clear();
+    tab.editing = None;
+    tab.style_bar = None;
+    tab.assistant.learning = None;
+    let index = tab
+        .doc
+        .glyphs
+        .get(&page)
+        .and_then(|glyphs| glyph_at(glyphs, point));
+    if index.is_some() {
+        tab.drag = Some(Drag::TextSelect {
+            page,
+            anchor: index,
+            current: index,
+            origin: point,
+            current_pt: point,
+        });
+    } else {
+        tab.text_sel = None;
+        tab.drag = Some(Drag::Marquee {
+            page,
+            origin: point,
+            current: point,
+        });
     }
 }
 
 fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint) {
-    tab.selected = None;
+    tab.selected.clear();
+    tab.text_sel = None;
     tab.style_bar = None;
     tab.assistant.learning = None;
     let glyphs = tab.doc.glyphs.get(&page);
@@ -687,6 +741,54 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 current_pt: point,
             });
         }
+        Drag::TextSelect {
+            page,
+            anchor,
+            origin,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            let point = tab
+                .doc
+                .screen_to_page(pos, view)
+                .filter(|(hit, _)| *hit == page)
+                .map(|(_, point)| point)
+                .unwrap_or(origin);
+            let current = tab
+                .doc
+                .glyphs
+                .get(&page)
+                .and_then(|glyphs| glyph_at(glyphs, point));
+            tab.drag = Some(Drag::TextSelect {
+                page,
+                anchor,
+                current,
+                origin,
+                current_pt: point,
+            });
+        }
+        Drag::Marquee {
+            page,
+            origin,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            let point = tab
+                .doc
+                .screen_to_page(pos, view)
+                .filter(|(hit, _)| *hit == page)
+                .map(|(_, point)| point)
+                .unwrap_or(origin);
+            tab.drag = Some(Drag::Marquee {
+                page,
+                origin,
+                current: point,
+            });
+        }
         Drag::Region {
             page,
             origin,
@@ -746,8 +848,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             });
         }
         Drag::Move {
-            id,
-            origin,
+            origins,
             grab,
             page,
             ..
@@ -764,10 +865,14 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 else {
                     return;
                 };
-                if let Some(annot) = tab.doc.session.get_mut(id) {
-                    let mut kind = origin.clone();
-                    kind.translate(point.x - grab.x, point.y - grab.y);
-                    annot.kind = kind;
+                let dx = point.x - grab.x;
+                let dy = point.y - grab.y;
+                for (id, origin) in &origins {
+                    if let Some(annot) = tab.doc.session.get_mut(*id) {
+                        let mut kind = origin.clone();
+                        kind.translate(dx, dy);
+                        annot.kind = kind;
+                    }
                 }
             }
             if let Some(Drag::Move { moved, .. }) = app.tab_mut().and_then(|tab| tab.drag.as_mut())
@@ -818,21 +923,26 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool)
             Drag::Highlight {
                 anchor: Some(_), ..
             }
-            | Drag::LearningSelect {
+            |             Drag::LearningSelect {
+                anchor: Some(_), ..
+            }
+            | Drag::TextSelect {
                 anchor: Some(_), ..
             } => commit_drag(app, drag, view),
-            Drag::Region { .. } => {
-                // Tiny click — ignore empty crop.
+            Drag::Region { .. } | Drag::Marquee { .. } => {
+                // Tiny click — ignore empty crop / marquee.
             }
             Drag::Create {
                 page, origin, kind, ..
             } => {
                 place_box(app, *page, *origin, None, *kind);
             }
-            Drag::Move { id, .. } => {
+            Drag::Move { ids, .. } => {
                 click(app, pos, view, double);
                 if let Some(tab) = app.tab_mut() {
-                    tab.selected = Some(*id);
+                    if !ids.is_empty() {
+                        tab.select_many(ids.clone());
+                    }
                 }
             }
             _ => click(app, pos, view, double),
@@ -890,9 +1000,24 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
             origin,
             current_pt,
             ..
+        }
+        | Drag::TextSelect {
+            page,
+            origin,
+            current_pt,
+            ..
         } => {
             let a = tab.doc.page_to_screen(*page, *origin, view);
             let b = tab.doc.page_to_screen(*page, *current_pt, view);
+            a.distance(b) > 3.0
+        }
+        Drag::Marquee {
+            page,
+            origin,
+            current,
+        } => {
+            let a = tab.doc.page_to_screen(*page, *origin, view);
+            let b = tab.doc.page_to_screen(*page, *current, view);
             a.distance(b) > 3.0
         }
     }
@@ -927,7 +1052,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                     app.end_edit_undo();
                 }
                 if let Some(tab) = app.tab_mut() {
-                    tab.selected = Some(id);
+                    tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.style_bar = None;
                     if open && editable {
@@ -959,7 +1084,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
             if let Some(id) = text {
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_mut() {
-                    tab.selected = Some(id);
+                    tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
@@ -983,7 +1108,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
             if let Some(id) = math {
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_mut() {
-                    tab.selected = Some(id);
+                    tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
@@ -1030,6 +1155,60 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 app.capture = CaptureMode::None;
                 app.assistant_open = true;
                 app.attach_learning_text();
+            }
+        }
+        Drag::TextSelect {
+            page,
+            anchor,
+            current,
+            ..
+        } => {
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            if let (Some(a), Some(c)) = (anchor, current) {
+                tab.selected.clear();
+                tab.text_sel = Some(TextSel {
+                    page,
+                    glyph_lo: a.min(c),
+                    glyph_hi: a.max(c),
+                });
+            }
+        }
+        Drag::Marquee {
+            page,
+            origin,
+            current,
+        } => {
+            let rect = PdfRect::from_points(origin, current);
+            if rect.is_empty() {
+                return;
+            }
+            let style_id = {
+                let Some(tab) = app.tab_mut() else {
+                    return;
+                };
+                let mut ids = Vec::new();
+                for annot in &tab.doc.session.annotations {
+                    if annot.page != page {
+                        continue;
+                    }
+                    if let Some(bounds) = annot.bounds() {
+                        if rect.contains(bounds.center()) {
+                            ids.push(annot.id);
+                        }
+                    }
+                }
+                tab.text_sel = None;
+                tab.select_many(ids);
+                tab.primary_selected().filter(|&id| {
+                    tab.doc.session.get(id).is_some_and(|annot| {
+                        !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                    })
+                })
+            };
+            if let Some(id) = style_id {
+                app.open_style_bar(id, false);
             }
         }
         Drag::Region {
@@ -1092,7 +1271,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 .doc
                 .session
                 .insert(page, AnnotKind::Highlight { quads, color });
-            tab.selected = Some(id);
+            tab.select_only(id);
             if let Some(glyphs) = tab.doc.glyphs.get(&page) {
                 if let Some(index) = anchor.or(current) {
                     if let Some(glyph) = glyphs.get(index) {
@@ -1141,7 +1320,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     width,
                 },
             );
-            tab.selected = Some(id);
+            tab.select_only(id);
             if !matches!(tab.save, crate::app::SaveState::Saving) {
                 tab.save = crate::app::SaveState::Dirty {
                     since: Instant::now(),
@@ -1161,33 +1340,46 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             place_box(app, page, origin, sized.then_some(rect), kind);
         }
         Drag::Move {
-            id, origin, moved, ..
+            ids,
+            origins,
+            moved,
+            ..
         } => {
-            let changed = moved
-                && app
-                    .tab()
-                    .and_then(|tab| tab.doc.session.get(id))
-                    .is_some_and(|annot| annot.kind != origin);
-            if changed {
+            if moved {
+                let mut dirty = Vec::new();
                 if let Some(tab) = app.tab_mut() {
-                    tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, crate::app::SaveState::Saving) {
+                    for (id, origin) in &origins {
+                        if tab
+                            .doc
+                            .session
+                            .get(*id)
+                            .is_some_and(|annot| annot.kind != *origin)
+                        {
+                            tab.doc.session.mark_dirty(*id);
+                            dirty.push(*id);
+                        }
+                    }
+                    if !dirty.is_empty() && !matches!(tab.save, crate::app::SaveState::Saving) {
                         tab.save = crate::app::SaveState::Dirty {
                             since: Instant::now(),
                         };
                     }
                 }
-                app.queue_math(id);
+                for id in dirty {
+                    app.queue_math(id);
+                }
             }
             if let Some(tab) = app.tab_mut() {
-                tab.selected = Some(id);
+                tab.select_many(ids);
             }
             app.seal_undo();
         }
         Drag::Resize { id, .. } => {
             if let Some(tab) = app.tab_mut() {
                 tab.doc.session.mark_dirty(id);
-                tab.selected = Some(id);
+                if !tab.is_selected(id) {
+                    tab.select_only(id);
+                }
                 if !matches!(tab.save, crate::app::SaveState::Saving) {
                     tab.save = crate::app::SaveState::Dirty {
                         since: Instant::now(),
@@ -1215,7 +1407,7 @@ fn place_box(
             return;
         };
         place_box_tab(tab, page, point, rect, kind, &settings);
-        tab.selected
+        tab.primary_selected()
     };
     if let Some(id) = id {
         app.tag_undo_edit(id);
@@ -1268,7 +1460,7 @@ fn place_box_tab(
             },
         ),
     };
-    tab.selected = Some(id);
+    tab.select_only(id);
     tab.editing = Some(id);
     tab.focus_edit = true;
     if !matches!(tab.save, crate::app::SaveState::Saving) {
@@ -1340,12 +1532,74 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
         let shadow = rect.expand(2.0).translate(Vec2::new(0.0, 4.0));
         painter.rect_filled(shadow, 6.0, Color32::from_black_alpha(28));
         painter.rect_filled(rect, 1.0, Color32::WHITE);
+        // Highlights underpaint paper so glyphs (opaque tile ink) stay readable.
+        paint_highlight_fills(app, painter, page, view);
         paint_tiles(&tab.doc, painter, page, view, render_scale);
         paint_search_hits(tab, painter, page, view);
         paint_annotations(app, painter, page, view);
     }
     paint_drag_preview(app, painter, view);
     paint_learning_selection(app, painter, view);
+}
+
+/// Marker-tint fill used for on-screen highlights (matches PDF opacity ~0.45).
+fn highlight_fill(color: crate::geom::Rgb) -> Color32 {
+    let c = color.to_color32();
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 115)
+}
+
+fn paint_highlight_fills(app: &MarkerApp, painter: &egui::Painter, page: usize, view: Rect) {
+    let Some(tab) = app.tab() else {
+        return;
+    };
+    let page_rect = tab.doc.page_rect(page, view);
+    let painter = painter.with_clip_rect(page_rect.intersect(view));
+    for annot in tab
+        .doc
+        .session
+        .annotations
+        .iter()
+        .filter(|annot| annot.page == page)
+    {
+        if let AnnotKind::Highlight { quads, color } = &annot.kind {
+            let fill = highlight_fill(*color);
+            for quad in quads {
+                painter.rect_filled(pdf_rect_screen(&tab.doc, page, *quad, view), 1.0, fill);
+            }
+        }
+    }
+    // Drag preview for the highlight tool also belongs under the ink.
+    if let Some(Drag::Highlight {
+        page: drag_page,
+        anchor,
+        current,
+        origin,
+        current_pt,
+        word_lo,
+        word_hi,
+        ..
+    }) = &tab.drag
+    {
+        if *drag_page != page {
+            return;
+        }
+        let fill = highlight_fill(app.settings.highlight_color);
+        let range = match (anchor, current, word_lo, word_hi) {
+            (Some(a), Some(c), Some(wlo), Some(whi)) => {
+                Some(((*a).min(*c).min(*wlo), (*a).max(*c).max(*whi)))
+            }
+            (Some(a), Some(c), _, _) => Some(((*a).min(*c), (*a).max(*c))),
+            _ => None,
+        };
+        if let (Some((lo, hi)), Some(glyphs)) = (range, tab.doc.glyphs.get(&page)) {
+            for rect in highlight_quads(glyphs, lo, hi) {
+                painter.rect_filled(pdf_rect_screen(&tab.doc, page, rect, view), 1.0, fill);
+            }
+        } else {
+            let rect = PdfRect::from_points(*origin, *current_pt);
+            painter.rect_filled(pdf_rect_screen(&tab.doc, page, rect, view), 1.0, fill);
+        }
+    }
 }
 
 fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
@@ -1434,16 +1688,11 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
         .iter()
         .filter(|annot| annot.page == page)
     {
-        let selected = tab.selected == Some(annot.id);
+        let selected = tab.is_selected(annot.id);
         let editing = tab.editing == Some(annot.id);
         match &annot.kind {
-            AnnotKind::Highlight { quads, color } => {
-                let mut fill = color.to_color32();
-                fill = Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 96);
-                for quad in quads {
-                    painter.rect_filled(pdf_rect_screen(&tab.doc, page, *quad, view), 1.0, fill);
-                }
-            }
+            // Highlight fills are underpainted before tiles; only selection chrome remains here.
+            AnnotKind::Highlight { .. } => {}
             AnnotKind::Text {
                 rect,
                 content,
@@ -1604,9 +1853,20 @@ fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, view: Rect
     let Some(tab) = app.tab() else {
         return;
     };
-    // Skip while actively dragging a new learning select.
-    if matches!(tab.drag, Some(Drag::LearningSelect { .. })) {
+    // Skip while actively dragging a new learning / text select.
+    if matches!(
+        tab.drag,
+        Some(Drag::LearningSelect { .. } | Drag::TextSelect { .. })
+    ) {
         return;
+    }
+    let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 56);
+    if let Some(sel) = &tab.text_sel {
+        if let Some(glyphs) = tab.doc.glyphs.get(&sel.page) {
+            for rect in highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi) {
+                painter.rect_filled(pdf_rect_screen(&tab.doc, sel.page, rect, view), 1.0, fill);
+            }
+        }
     }
     let Some(sel) = &tab.assistant.learning else {
         return;
@@ -1614,7 +1874,6 @@ fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, view: Rect
     let Some(glyphs) = tab.doc.glyphs.get(&sel.page) else {
         return;
     };
-    let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 56);
     for rect in highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi) {
         painter.rect_filled(pdf_rect_screen(&tab.doc, sel.page, rect, view), 1.0, fill);
     }
@@ -1626,6 +1885,13 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
     };
     match &tab.drag {
         Some(Drag::LearningSelect {
+            page,
+            anchor,
+            current,
+            origin,
+            current_pt,
+        })
+        | Some(Drag::TextSelect {
             page,
             anchor,
             current,
@@ -1647,6 +1913,11 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
             page,
             origin,
             current,
+        })
+        | Some(Drag::Marquee {
+            page,
+            origin,
+            current,
         }) => {
             let stroke = Stroke::new(1.5, Color32::from_rgb(80, 160, 255));
             let rect = pdf_rect_screen(
@@ -1662,33 +1933,8 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
                 Color32::from_rgba_unmultiplied(80, 160, 255, 40),
             );
         }
-        Some(Drag::Highlight {
-            page,
-            anchor,
-            current,
-            origin,
-            current_pt,
-            word_lo,
-            word_hi,
-            ..
-        }) => {
-            let mut fill = app.settings.highlight_color.to_color32();
-            fill = Color32::from_rgba_unmultiplied(fill.r(), fill.g(), fill.b(), 96);
-            let range = match (anchor, current, word_lo, word_hi) {
-                (Some(a), Some(c), Some(wlo), Some(whi)) => {
-                    Some(((*a).min(*c).min(*wlo), (*a).max(*c).max(*whi)))
-                }
-                (Some(a), Some(c), _, _) => Some(((*a).min(*c), (*a).max(*c))),
-                _ => None,
-            };
-            if let (Some((lo, hi)), Some(glyphs)) = (range, tab.doc.glyphs.get(page)) {
-                for rect in highlight_quads(glyphs, lo, hi) {
-                    painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
-                }
-                return;
-            }
-            let rect = PdfRect::from_points(*origin, *current_pt);
-            painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
+        Some(Drag::Highlight { .. }) => {
+            // Filled in `paint_highlight_fills` under the page tiles.
         }
         Some(Drag::Shape {
             page,
@@ -2072,18 +2318,27 @@ fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
-    let hit = app.tab().and_then(|tab| {
+    let located = app.tab().and_then(|tab| {
         let (page, point) = tab.doc.screen_to_page(pos, view)?;
-        tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale)
+        let hit = tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale);
+        Some((page, point, hit))
     });
-    if let Some(id) = hit {
-        // Always reopen the style strip on right-click, even if it just auto-hid.
-        app.open_style_bar(id, false);
+    let Some((page, point, hit)) = located else {
         return;
-    }
+    };
     if let Some(tab) = app.tab_mut() {
         tab.style_bar = None;
-        tab.menu = Some((pos, None));
+        if let Some(id) = hit {
+            if !tab.is_selected(id) {
+                tab.select_only(id);
+            }
+        }
+        tab.menu = Some(ContextMenu {
+            pos,
+            page,
+            point,
+            hit,
+        });
     }
 }
 
@@ -2155,7 +2410,9 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     let left_outside = left_press && !over_bar && !area.response.clicked() && !right_click;
     if delete {
         if let Some(tab) = app.tab_mut() {
-            tab.selected = Some(bar.id);
+            if !tab.is_selected(bar.id) {
+                tab.select_only(bar.id);
+            }
             tab.style_bar = None;
         }
         app.delete_selected();
@@ -2180,47 +2437,119 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
 }
 
 fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
-    let Some((pos, id)) = app.tab().and_then(|tab| tab.menu) else {
+    let Some(menu) = app.tab().and_then(|tab| tab.menu.clone()) else {
         return;
     };
     let has_learning = app
         .tab()
         .is_some_and(|tab| tab.assistant.learning.is_some());
-    let mut delete = false;
-    let mut paste = false;
-    let mut attach_text = false;
-    let mut attach_shot = false;
-    let mut explain = false;
-    let mut lookup = false;
+    let has_text_sel = app.tab().is_some_and(|tab| tab.text_sel.is_some());
+    let copy_text = app
+        .copyable_selection_text()
+        .or_else(|| {
+            if menu.hit.is_some() {
+                None
+            } else {
+                app.word_at_point(menu.page, menu.point)
+            }
+        });
+    let hit_kind = menu.hit.and_then(|id| {
+        app.tab()
+            .and_then(|tab| tab.doc.session.get(id))
+            .map(|annot| annot.kind.clone())
+    });
+    let multi = app
+        .tab()
+        .is_some_and(|tab| tab.selected.len() > 1);
+    let can_style = hit_kind.as_ref().is_some_and(|kind| {
+        !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+    }) || app.tab().is_some_and(|tab| {
+        tab.selected.iter().any(|id| {
+            tab.doc.session.get(*id).is_some_and(|annot| {
+                !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+            })
+        })
+    });
+    let can_edit = matches!(
+        hit_kind,
+        Some(AnnotKind::Text { .. } | AnnotKind::Note { .. } | AnnotKind::Math { .. })
+    ) && !multi;
+    let can_delete = menu.hit.is_some()
+        || app.tab().is_some_and(|tab| !tab.selected.is_empty());
+
+    let mut action = MenuAction::None;
     let area = egui::Area::new(Id::new("marker-context"))
         .order(egui::Order::Tooltip)
-        .fixed_pos(pos)
+        .fixed_pos(menu.pos)
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(160.0);
+                ui.set_min_width(168.0);
+                if let Some(kind) = &hit_kind {
+                    ui.label(
+                        egui::RichText::new(annot_menu_label(kind, multi))
+                            .small()
+                            .weak(),
+                    );
+                    ui.add_space(2.0);
+                }
+                if can_edit {
+                    if ui.button("Edit").clicked() {
+                        action = MenuAction::Edit;
+                    }
+                }
+                if can_style {
+                    if ui
+                        .button(if multi {
+                            "Style selected…"
+                        } else {
+                            "Style…"
+                        })
+                        .clicked()
+                    {
+                        action = MenuAction::Style;
+                    }
+                }
+                if let Some(text) = &copy_text {
+                    let label = if text.chars().count() > 24 {
+                        "Copy text"
+                    } else {
+                        "Copy"
+                    };
+                    if ui.button(label).clicked() {
+                        action = MenuAction::Copy;
+                    }
+                }
+                if can_delete {
+                    if ui.button("Delete").clicked() {
+                        action = MenuAction::Delete;
+                    }
+                }
+                if hit_kind.is_some() || can_delete || copy_text.is_some() || can_style || can_edit
+                {
+                    ui.separator();
+                }
                 if ui.button("Paste image").clicked() {
-                    paste = true;
+                    action = MenuAction::Paste;
                 }
-                if ui.button("Select text for Assistant").clicked() {
-                    attach_text = true;
-                }
-                if has_learning {
+                ui.separator();
+                ui.label(egui::RichText::new("Assistant").small().weak());
+                if has_learning || has_text_sel {
                     if ui.button("Attach selected text").clicked() {
-                        attach_text = true;
+                        action = MenuAction::AttachText;
                     }
-                    if ui.button("Attach screenshot of selection").clicked() {
-                        attach_shot = true;
+                    if has_learning && ui.button("Attach screenshot of selection").clicked() {
+                        action = MenuAction::AttachShot;
                     }
-                    if ui.button("Explain with Cursor").clicked() {
-                        explain = true;
+                    if (has_learning || has_text_sel) && ui.button("Explain with Cursor").clicked()
+                    {
+                        action = MenuAction::Explain;
                     }
-                    if ui.button("Look up in browser").clicked() {
-                        lookup = true;
+                    if (has_learning || has_text_sel) && ui.button("Look up in browser").clicked() {
+                        action = MenuAction::Lookup;
                     }
-                }
-                if id.is_some() && ui.button("Delete").clicked() {
-                    delete = true;
+                } else if ui.button("Select text for Assistant").clicked() {
+                    action = MenuAction::AttachText;
                 }
             });
         });
@@ -2230,47 +2559,161 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let outside = ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.hovered()
         && !area.response.clicked();
-    if paste {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
-        }
-        let _ = app.paste_clipboard_image();
-    } else if attach_text {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
-        }
-        if has_learning {
-            app.attach_learning_text();
-        } else {
-            app.begin_learning_select();
-        }
-    } else if attach_shot {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
-        }
-        app.attach_learning_screenshot();
-    } else if explain {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
-        }
-        app.explain_selection();
-    } else if lookup {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
-        }
-        app.lookup_selection_in_browser();
-    } else if delete {
-        if let Some(tab) = app.tab_mut() {
-            if let Some(id) = id {
-                tab.selected = Some(id);
+    match action {
+        MenuAction::None => {
+            if outside {
+                if let Some(tab) = app.tab_mut() {
+                    tab.menu = None;
+                }
             }
-            tab.menu = None;
         }
-        app.delete_selected();
-    } else if outside {
-        if let Some(tab) = app.tab_mut() {
-            tab.menu = None;
+        MenuAction::Paste => {
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+            let _ = app.paste_clipboard_image();
         }
+        MenuAction::Copy => {
+            if let Some(text) = copy_text {
+                ctx.copy_text(text);
+            }
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+        }
+        MenuAction::Style => {
+            let id = menu.hit.or_else(|| app.tab().and_then(|tab| tab.primary_selected()));
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+            if let Some(id) = id {
+                app.open_style_bar(id, false);
+            }
+        }
+        MenuAction::Edit => {
+            if let Some(id) = menu.hit {
+                if let Some(tab) = app.tab_mut() {
+                    tab.menu = None;
+                }
+                app.begin_edit_undo(id);
+                if let Some(tab) = app.tab_mut() {
+                    tab.select_only(id);
+                    tab.editing = Some(id);
+                    tab.focus_edit = true;
+                }
+            }
+        }
+        MenuAction::Delete => {
+            if let Some(tab) = app.tab_mut() {
+                if let Some(id) = menu.hit {
+                    if !tab.is_selected(id) {
+                        tab.select_only(id);
+                    }
+                }
+                tab.menu = None;
+            }
+            app.delete_selected();
+        }
+        MenuAction::AttachText => {
+            if let Some(tab) = app.tab_mut() {
+                // Prefer Select-tool text for assistant attach when present.
+                if tab.assistant.learning.is_none() {
+                    if let Some(sel) = tab.text_sel.clone() {
+                        tab.assistant.learning = Some(LearningSelection {
+                            page: sel.page,
+                            glyph_lo: sel.glyph_lo,
+                            glyph_hi: sel.glyph_hi,
+                        });
+                    }
+                }
+                tab.menu = None;
+            }
+            if app
+                .tab()
+                .is_some_and(|tab| tab.assistant.learning.is_some())
+            {
+                app.attach_learning_text();
+            } else {
+                app.begin_learning_select();
+            }
+        }
+        MenuAction::AttachShot => {
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+            app.attach_learning_screenshot();
+        }
+        MenuAction::Explain => {
+            // Promote text_sel into learning selection when needed.
+            if let Some(tab) = app.tab_mut() {
+                if tab.assistant.learning.is_none() {
+                    if let Some(sel) = tab.text_sel.clone() {
+                        tab.assistant.learning = Some(LearningSelection {
+                            page: sel.page,
+                            glyph_lo: sel.glyph_lo,
+                            glyph_hi: sel.glyph_hi,
+                        });
+                    }
+                }
+                tab.menu = None;
+            }
+            app.explain_selection();
+        }
+        MenuAction::Lookup => {
+            if let Some(tab) = app.tab_mut() {
+                if tab.assistant.learning.is_none() {
+                    if let Some(sel) = tab.text_sel.clone() {
+                        tab.assistant.learning = Some(LearningSelection {
+                            page: sel.page,
+                            glyph_lo: sel.glyph_lo,
+                            glyph_hi: sel.glyph_hi,
+                        });
+                    }
+                }
+                tab.menu = None;
+            }
+            app.lookup_selection_in_browser();
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MenuAction {
+    None,
+    Paste,
+    Copy,
+    Style,
+    Edit,
+    Delete,
+    AttachText,
+    AttachShot,
+    Explain,
+    Lookup,
+}
+
+fn annot_menu_label(kind: &AnnotKind, multi: bool) -> &'static str {
+    if multi {
+        return "Selected annotations";
+    }
+    match kind {
+        AnnotKind::Highlight { .. } => "Highlight",
+        AnnotKind::Text { .. } => "Text",
+        AnnotKind::Note { .. } => "Note",
+        AnnotKind::Math { .. } => "Equation",
+        AnnotKind::Shape {
+            kind: ShapeKind::Rect,
+            ..
+        } => "Rectangle",
+        AnnotKind::Shape {
+            kind: ShapeKind::Ellipse,
+            ..
+        } => "Ellipse",
+        AnnotKind::Shape {
+            kind: ShapeKind::Line,
+            ..
+        } => "Line",
+        AnnotKind::Image { .. } => "Image",
+        AnnotKind::Future(_) => "Annotation",
     }
 }
 

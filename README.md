@@ -65,7 +65,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 
 | Key | Tool |
 | --- | --- |
-| `S` | Select, move, and resize |
+| `S` | Select text or objects, move, and resize |
 | `H` | Highlight |
 | `T` | Text |
 | `R` | Rectangle |
@@ -93,7 +93,8 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `Ctrl+0` | Fit width, then fit height |
 | `Ctrl+G` | Jump to a page |
 | `Ctrl+Shift+Enter` | Insert a blank page after the current page |
-| `Delete` or `Backspace` | Delete the selected annotation |
+| `Ctrl+C` | Copy selected page text (or highlight / text annotation) |
+| `Delete` or `Backspace` | Delete the selected annotation(s) |
 
 Vim-style navigation uses `J`/`K` to pan vertically and `L`/`Shift+L` to pan
 horizontally (`H` is Highlight), plus `Ctrl+U`/`Ctrl+D` for half-page movement,

@@ -86,6 +86,10 @@ impl PdfRect {
             self.y1 + amount,
         )
     }
+
+    pub fn center(self) -> PdfPoint {
+        PdfPoint::new((self.x0 + self.x1) * 0.5, (self.y0 + self.y1) * 0.5)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,5 +231,11 @@ mod tests {
         let a = zoom_bucket(1.30);
         let b = zoom_bucket(1.32);
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn center_is_midpoint() {
+        let r = PdfRect::new(10.0, 20.0, 30.0, 40.0);
+        assert_eq!(r.center(), PdfPoint::new(20.0, 30.0));
     }
 }

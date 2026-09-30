@@ -40,14 +40,14 @@ pub struct AssistantWorker {
 }
 
 impl AssistantWorker {
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: egui::Context) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (event_tx, event_rx) = mpsc::channel();
         let active = Arc::new(Mutex::new(None));
         let active_loop = Arc::clone(&active);
         thread::Builder::new()
             .name("marker-assistant".into())
-            .spawn(move || worker_loop(job_rx, event_tx, active_loop))
+            .spawn(move || worker_loop(ctx, job_rx, event_tx, active_loop))
             .expect("assistant thread");
         Self {
             jobs: job_tx,
@@ -96,7 +96,13 @@ impl Drop for AssistantWorker {
     }
 }
 
+fn emit(ctx: &egui::Context, events: &Sender<AssistantEvent>, event: AssistantEvent) {
+    let _ = events.send(event);
+    ctx.request_repaint();
+}
+
 fn worker_loop(
+    ctx: egui::Context,
     jobs: Receiver<Job>,
     events: Sender<AssistantEvent>,
     active: Arc<Mutex<Option<ActiveChild>>>,
@@ -114,7 +120,7 @@ fn worker_loop(
             }
             Job::Send(request) => {
                 clear_any_active(&active);
-                run_turn(&mut capability, request, &events, &active);
+                run_turn(&ctx, &mut capability, request, &events, &active);
             }
         }
     }
@@ -146,6 +152,7 @@ fn clear_active_if(active: &Arc<Mutex<Option<ActiveChild>>>, gen: u64, seq: u64)
 }
 
 fn run_turn(
+    ctx: &egui::Context,
     capability: &mut Option<AgentCapability>,
     request: AssistantRequest,
     events: &Sender<AssistantEvent>,
@@ -162,17 +169,21 @@ fn run_turn(
                 c
             }
             Err(message) => {
-                let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+                emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
                 return;
             }
         },
     };
     if !cap.logged_in {
-        let _ = events.send(AssistantEvent::AuthRequired {
-            gen,
-            seq,
-            message: "Cursor Agent is not signed in. Run `agent login` and try again.".into(),
-        });
+        emit(
+            ctx,
+            events,
+            AssistantEvent::AuthRequired {
+                gen,
+                seq,
+                message: "Cursor Agent is not signed in. Run `agent login` and try again.".into(),
+            },
+        );
         return;
     }
 
@@ -181,7 +192,7 @@ fn run_turn(
         None => match create_chat(&cap.path) {
             Ok(id) => id,
             Err(message) => {
-                let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+                emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
                 return;
             }
         },
@@ -190,23 +201,27 @@ fn run_turn(
     let bundle = match build_bundle(&request.bundle) {
         Ok(b) => b,
         Err(message) => {
-            let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
             return;
         }
     };
 
-    let _ = events.send(AssistantEvent::Started {
-        gen,
-        seq,
-        chat_id: chat_id.clone(),
-    });
+    emit(
+        ctx,
+        events,
+        AssistantEvent::Started {
+            gen,
+            seq,
+            chat_id: chat_id.clone(),
+        },
+    );
 
     let cancel = Arc::new(AtomicBool::new(false));
     let mut child = match spawn_agent(&cap.path, &bundle.root, &chat_id) {
         Ok(child) => child,
         Err(message) => {
             cleanup_bundle(&bundle);
-            let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
             return;
         }
     };
@@ -224,8 +239,9 @@ fn run_turn(
     let stdout = child.stdout.take();
     let events_stream = events.clone();
     let cancel_stream = Arc::clone(&cancel);
+    let ctx_stream = ctx.clone();
     let reader = thread::spawn(move || {
-        stream_stdout(stdout, gen, seq, &events_stream, &cancel_stream)
+        stream_stdout(stdout, gen, seq, &ctx_stream, &events_stream, &cancel_stream)
     });
 
     let status = loop {
@@ -258,7 +274,7 @@ fn run_turn(
     cleanup_bundle(&bundle);
 
     if was_cancelled {
-        let _ = events.send(AssistantEvent::Cancelled { gen, seq });
+        emit(ctx, events, AssistantEvent::Cancelled { gen, seq });
         return;
     }
 
@@ -274,16 +290,20 @@ fn run_turn(
             let message = streamed
                 .error
                 .unwrap_or_else(|| format!("Cursor Agent exited with {status}"));
-            let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
             return;
         }
     }
 
-    let _ = events.send(AssistantEvent::Completed {
-        gen,
-        seq,
-        text: streamed.assistant_text,
-    });
+    emit(
+        ctx,
+        events,
+        AssistantEvent::Completed {
+            gen,
+            seq,
+            text: streamed.assistant_text,
+        },
+    );
 }
 
 struct StreamOutcome {
@@ -306,6 +326,7 @@ fn stream_stdout(
     stdout: Option<std::process::ChildStdout>,
     gen: u64,
     seq: u64,
+    ctx: &egui::Context,
     events: &Sender<AssistantEvent>,
     cancel: &AtomicBool,
 ) -> StreamOutcome {
@@ -337,11 +358,15 @@ fn stream_stdout(
                     // Full chunks without --stream-partial-output: append if new.
                     if !assembled.ends_with(&text) {
                         assembled.push_str(&text);
-                        let _ = events.send(AssistantEvent::Delta {
-                            gen,
-                            seq,
-                            text: text.clone(),
-                        });
+                        emit(
+                            ctx,
+                            events,
+                            AssistantEvent::Delta {
+                                gen,
+                                seq,
+                                text: text.clone(),
+                            },
+                        );
                     }
                 }
             }
@@ -358,7 +383,7 @@ fn stream_stdout(
                         .and_then(|v| v.as_str())
                         .unwrap_or("Cursor Agent reported an error.")
                         .to_string();
-                    let _ = events.send(AssistantEvent::Failed { gen, seq, message });
+                    emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
                 } else {
                     let text = value
                         .get("result")
@@ -367,7 +392,11 @@ fn stream_stdout(
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| assembled.clone());
                     assembled = text.clone();
-                    let _ = events.send(AssistantEvent::Completed { gen, seq, text });
+                    emit(
+                        ctx,
+                        events,
+                        AssistantEvent::Completed { gen, seq, text },
+                    );
                 }
             }
             _ => {}
@@ -498,7 +527,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello"}'
             .unwrap();
         let (tx, rx) = mpsc::channel();
         let cancel = AtomicBool::new(false);
-        let outcome = stream_stdout(child.stdout, 1, 1, &tx, &cancel);
+        let ctx = egui::Context::default();
+        let outcome = stream_stdout(child.stdout, 1, 1, &ctx, &tx, &cancel);
         assert!(outcome.had_result);
         let events: Vec<_> = rx.try_iter().collect();
         assert!(events.iter().any(|e| matches!(e, AssistantEvent::Delta { .. })));

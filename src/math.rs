@@ -88,12 +88,12 @@ pub struct MathWorker {
 }
 
 impl MathWorker {
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: egui::Context) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         thread::Builder::new()
             .name("marker-math".into())
-            .spawn(move || math_loop(job_rx, reply_tx))
+            .spawn(move || math_loop(ctx, job_rx, reply_tx))
             .expect("math thread");
         Self {
             jobs: job_tx,
@@ -127,7 +127,12 @@ impl Drop for MathWorker {
     }
 }
 
-fn math_loop(jobs: Receiver<Job>, replies: Sender<MathRender>) {
+fn reply(ctx: &egui::Context, replies: &Sender<MathRender>, msg: MathRender) {
+    let _ = replies.send(msg);
+    ctx.request_repaint();
+}
+
+fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender>) {
     let mut engine = None;
     while let Ok(job) = jobs.recv() {
         match job {
@@ -168,7 +173,7 @@ fn math_loop(jobs: Receiver<Job>, replies: Sender<MathRender>) {
                                 size,
                                 color,
                             );
-                            let _ = replies.send(to_reply(gen, id, req, rendered));
+                            reply(&ctx, &replies, to_reply(gen, id, req, rendered));
                         }
                     }
                 }
@@ -179,7 +184,7 @@ fn math_loop(jobs: Receiver<Job>, replies: Sender<MathRender>) {
                     size,
                     color,
                 );
-                let _ = replies.send(to_reply(gen, id, req, rendered));
+                reply(&ctx, &replies, to_reply(gen, id, req, rendered));
             }
         }
     }

@@ -124,13 +124,13 @@ pub struct PdfWorker {
 }
 
 impl PdfWorker {
-    pub fn spawn() -> Self {
+    pub fn spawn(ctx: egui::Context) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let loop_tx = job_tx.clone();
         thread::Builder::new()
             .name("marker-pdf".into())
-            .spawn(move || worker_loop(job_rx, loop_tx, reply_tx))
+            .spawn(move || worker_loop(ctx, job_rx, loop_tx, reply_tx))
             .expect("pdf thread");
         Self {
             jobs: job_tx,
@@ -225,7 +225,17 @@ fn job_rank(job: &PdfJob) -> u8 {
     }
 }
 
-fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<PdfReply>) {
+fn reply(ctx: &egui::Context, replies: &Sender<PdfReply>, msg: PdfReply) {
+    let _ = replies.send(msg);
+    ctx.request_repaint();
+}
+
+fn worker_loop(
+    ctx: egui::Context,
+    jobs: Receiver<PdfJob>,
+    jobs_tx: Sender<PdfJob>,
+    replies: Sender<PdfReply>,
+) {
     let mut engines: HashMap<u64, DocumentEngine> = HashMap::new();
     let mut latest_search: HashMap<u64, u64> = HashMap::new();
     let mut queued = VecDeque::new();
@@ -260,13 +270,17 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                         annotations: loaded.annotations,
                     };
                     engines.insert(gen, loaded.engine);
-                    let _ = replies.send(PdfReply::Opened(Ok(opened)));
+                    reply(&ctx, &replies, PdfReply::Opened(Ok(opened)));
                 }
                 Err(err) => {
-                    let _ = replies.send(PdfReply::Failed {
-                        gen: Some(gen),
-                        message: err,
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Failed {
+                            gen: Some(gen),
+                            message: err,
+                        },
+                    );
                 }
             },
             PdfJob::Close { gen } => {
@@ -284,22 +298,30 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                 };
                 match engine.render_tile(page, scale, col, row) {
                     Ok(Some(tile)) => {
-                        let _ = replies.send(PdfReply::Tile { gen, tile });
+                        reply(&ctx, &replies, PdfReply::Tile { gen, tile });
                     }
                     Ok(None) => {
-                        let _ = replies.send(PdfReply::TileMiss {
-                            gen,
-                            page,
-                            scale,
-                            col,
-                            row,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::TileMiss {
+                                gen,
+                                page,
+                                scale,
+                                col,
+                                row,
+                            },
+                        );
                     }
                     Err(err) => {
-                        let _ = replies.send(PdfReply::Failed {
-                            gen: Some(gen),
-                            message: err,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::Failed {
+                                gen: Some(gen),
+                                message: err,
+                            },
+                        );
                     }
                 }
             }
@@ -309,13 +331,17 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                 };
                 match engine.glyphs(page) {
                     Ok(glyphs) => {
-                        let _ = replies.send(PdfReply::Glyphs { gen, page, glyphs });
+                        reply(&ctx, &replies, PdfReply::Glyphs { gen, page, glyphs });
                     }
                     Err(err) => {
-                        let _ = replies.send(PdfReply::Failed {
-                            gen: Some(gen),
-                            message: err,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::Failed {
+                                gen: Some(gen),
+                                message: err,
+                            },
+                        );
                     }
                 }
             }
@@ -327,15 +353,19 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                 dpi,
             } => {
                 let Some(engine) = engines.get_mut(&gen) else {
-                    let _ = replies.send(PdfReply::Crop {
-                        gen,
-                        seq,
-                        result: Err("No document is open.".into()),
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Crop {
+                            gen,
+                            seq,
+                            result: Err("No document is open.".into()),
+                        },
+                    );
                     continue;
                 };
                 let result = engine.render_crop_png(page, rect, dpi);
-                let _ = replies.send(PdfReply::Crop { gen, seq, result });
+                reply(&ctx, &replies, PdfReply::Crop { gen, seq, result });
             }
             PdfJob::Search {
                 gen,
@@ -367,19 +397,27 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
                     }
                 }
                 if let Some(message) = failed {
-                    let _ = replies.send(PdfReply::Failed {
-                        gen: Some(gen),
-                        message,
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Failed {
+                            gen: Some(gen),
+                            message,
+                        },
+                    );
                     continue;
                 }
                 let done = end >= page_count;
-                let _ = replies.send(PdfReply::Search {
-                    gen,
-                    seq,
-                    hits,
-                    done,
-                });
+                reply(
+                    &ctx,
+                    &replies,
+                    PdfReply::Search {
+                        gen,
+                        seq,
+                        hits,
+                        done,
+                    },
+                );
                 if !done {
                     let _ = jobs_tx.send(PdfJob::Search {
                         gen,
@@ -391,72 +429,100 @@ fn worker_loop(jobs: Receiver<PdfJob>, jobs_tx: Sender<PdfJob>, replies: Sender<
             }
             PdfJob::Save { gen, snapshot } => {
                 let Some(engine) = engines.get_mut(&gen) else {
-                    let _ = replies.send(PdfReply::Saved {
-                        gen,
-                        result: Err("No document is open.".into()),
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Saved {
+                            gen,
+                            result: Err("No document is open.".into()),
+                        },
+                    );
                     continue;
                 };
                 let result = engine.save(&snapshot);
-                let _ = replies.send(PdfReply::Saved { gen, result });
+                reply(&ctx, &replies, PdfReply::Saved { gen, result });
             }
             PdfJob::InsertPage { gen, after } => {
                 let Some(engine) = engines.get_mut(&gen) else {
-                    let _ = replies.send(PdfReply::Failed {
-                        gen: Some(gen),
-                        message: "No document is open.".into(),
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Failed {
+                            gen: Some(gen),
+                            message: "No document is open.".into(),
+                        },
+                    );
                     continue;
                 };
                 match engine.insert_blank_page(after) {
                     Ok((index, pages)) => {
-                        let _ = replies.send(PdfReply::PageInserted { gen, index, pages });
+                        reply(&ctx, &replies, PdfReply::PageInserted { gen, index, pages });
                     }
                     Err(message) => {
-                        let _ = replies.send(PdfReply::Failed {
-                            gen: Some(gen),
-                            message,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::Failed {
+                                gen: Some(gen),
+                                message,
+                            },
+                        );
                     }
                 }
             }
             PdfJob::InsertPageAt { gen, at } => {
                 let Some(engine) = engines.get_mut(&gen) else {
-                    let _ = replies.send(PdfReply::Failed {
-                        gen: Some(gen),
-                        message: "No document is open.".into(),
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Failed {
+                            gen: Some(gen),
+                            message: "No document is open.".into(),
+                        },
+                    );
                     continue;
                 };
                 match engine.insert_blank_page_at(at) {
                     Ok((index, pages)) => {
-                        let _ = replies.send(PdfReply::PageInserted { gen, index, pages });
+                        reply(&ctx, &replies, PdfReply::PageInserted { gen, index, pages });
                     }
                     Err(message) => {
-                        let _ = replies.send(PdfReply::Failed {
-                            gen: Some(gen),
-                            message,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::Failed {
+                                gen: Some(gen),
+                                message,
+                            },
+                        );
                     }
                 }
             }
             PdfJob::DeletePage { gen, index } => {
                 let Some(engine) = engines.get_mut(&gen) else {
-                    let _ = replies.send(PdfReply::Failed {
-                        gen: Some(gen),
-                        message: "No document is open.".into(),
-                    });
+                    reply(
+                        &ctx,
+                        &replies,
+                        PdfReply::Failed {
+                            gen: Some(gen),
+                            message: "No document is open.".into(),
+                        },
+                    );
                     continue;
                 };
                 match engine.delete_page_at(index) {
                     Ok(pages) => {
-                        let _ = replies.send(PdfReply::PageDeleted { gen, index, pages });
+                        reply(&ctx, &replies, PdfReply::PageDeleted { gen, index, pages });
                     }
                     Err(message) => {
-                        let _ = replies.send(PdfReply::Failed {
-                            gen: Some(gen),
-                            message,
-                        });
+                        reply(
+                            &ctx,
+                            &replies,
+                            PdfReply::Failed {
+                                gen: Some(gen),
+                                message,
+                            },
+                        );
                     }
                 }
             }

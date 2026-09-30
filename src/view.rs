@@ -292,6 +292,7 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
         tab.doc.scroll_y -= scroll.y;
         tab.doc.scroll_x -= scroll.x;
         tab.doc.clamp_scroll(response.rect);
+        tab.doc.last_scroll = Instant::now();
     }
 }
 
@@ -335,6 +336,7 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
                     tab.doc.scroll_x = scroll_x - (now.x - pos.x);
                     tab.doc.scroll_y = scroll_y - (now.y - pos.y);
                     tab.doc.clamp_scroll(rect);
+                    tab.doc.last_scroll = Instant::now();
                 }
             }
         }
@@ -679,6 +681,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 tab.doc.scroll_x = scroll_x - (pos.x - start.x);
                 tab.doc.scroll_y = scroll_y - (pos.y - start.y);
                 tab.doc.clamp_scroll(view);
+                tab.doc.last_scroll = Instant::now();
             }
         }
         Drag::Highlight {
@@ -2838,11 +2841,13 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     if response.dragged() {
         tab.doc.scroll_y += response.drag_delta().y / travel * (height - view.height());
         tab.doc.clamp_scroll(view);
+        tab.doc.last_scroll = Instant::now();
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
             let t = ((pos.y - bar_rect.top() - thumb_h * 0.5) / travel).clamp(0.0, 1.0);
             tab.doc.scroll_y = t * (height - view.height());
             tab.doc.clamp_scroll(view);
+            tab.doc.last_scroll = Instant::now();
         }
     }
 }

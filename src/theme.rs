@@ -110,21 +110,31 @@ fn install_visuals(ctx: &Context, theme: Theme, c: &ThemeColors) {
 
 /// Refresh Linux color-scheme / accent when winit has no system theme.
 pub(crate) fn sync_os_theme(ctx: &Context) {
+    let prev_theme = cached_linux_theme();
+    let prev_accent = cached_linux_accent();
     refresh_linux_cache();
+    let theme = cached_linux_theme();
+    let accent = cached_linux_accent();
+
     if ctx.system_theme().is_some() {
         // Native path (Win/macOS/web) already feeds RawInput.system_theme.
-        if let Some(accent) = cached_linux_accent() {
-            let theme = ctx.theme();
-            let mut colors = match theme {
-                Theme::Dark => ThemeColors::DARK,
-                Theme::Light => ThemeColors::LIGHT,
-            };
-            colors.accent = accent;
-            install_visuals(ctx, theme, &colors);
+        if accent != prev_accent {
+            if let Some(accent) = accent {
+                let current = ctx.theme();
+                let mut colors = match current {
+                    Theme::Dark => ThemeColors::DARK,
+                    Theme::Light => ThemeColors::LIGHT,
+                };
+                colors.accent = accent;
+                install_visuals(ctx, current, &colors);
+            }
         }
         return;
     }
-    if let Some(theme) = cached_linux_theme() {
+    if theme == prev_theme && accent == prev_accent {
+        return;
+    }
+    if let Some(theme) = theme {
         if ctx.theme() != theme {
             ctx.set_theme(theme);
         }
@@ -132,7 +142,7 @@ pub(crate) fn sync_os_theme(ctx: &Context) {
             Theme::Dark => ThemeColors::DARK,
             Theme::Light => ThemeColors::LIGHT,
         };
-        if let Some(accent) = cached_linux_accent() {
+        if let Some(accent) = accent {
             colors.accent = accent;
         }
         install_visuals(ctx, theme, &colors);

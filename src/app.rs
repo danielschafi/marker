@@ -58,6 +58,8 @@ pub(crate) struct MarkerApp {
     dialog_tx: Sender<Option<PathBuf>>,
     dialog_rx: Receiver<Option<PathBuf>>,
     dialog_busy: bool,
+    /// Cloned into worker/dialog threads so they can wake the UI on completion.
+    egui_ctx: egui::Context,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -197,6 +199,8 @@ pub(crate) struct DocState {
     pub(crate) scroll_y: f32,
     pub(crate) fitted: bool,
     pub(crate) last_zoom: Instant,
+    /// Last pan/scroll; keeps the interactive frame budget warm between wheel samples.
+    pub(crate) last_scroll: Instant,
     /// Last Fit action; cleared when zoom changes by other means.
     pub(crate) last_fit: Option<FitKind>,
     pub(crate) glyphs: HashMap<usize, Vec<Glyph>>,
@@ -402,6 +406,7 @@ impl MarkerApp {
     pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
         ui::apply_theme(&cc.egui_ctx);
         let (dialog_tx, dialog_rx) = mpsc::channel();
+        let egui_ctx = cc.egui_ctx.clone();
         let mut app = Self {
             settings: Settings::load(),
             tool: Tool::Select,
@@ -422,15 +427,16 @@ impl MarkerApp {
             capture: CaptureMode::None,
             vim_count: 0,
             vim_g: false,
-            worker: PdfWorker::spawn(),
-            math: MathWorker::spawn(),
-            assistant: AssistantWorker::spawn(),
+            worker: PdfWorker::spawn(egui_ctx.clone()),
+            math: MathWorker::spawn(egui_ctx.clone()),
+            assistant: AssistantWorker::spawn(egui_ctx.clone()),
             math_seq: 1,
             math_deadline: None,
             next_gen: 1,
             dialog_tx,
             dialog_rx,
             dialog_busy: false,
+            egui_ctx,
         };
         for path in paths {
             app.open_path(path);
@@ -477,11 +483,13 @@ impl MarkerApp {
         }
         self.dialog_busy = true;
         let tx = self.dialog_tx.clone();
+        let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let path = rfd::FileDialog::new()
                 .add_filter("PDF", &["pdf"])
                 .pick_file();
             let _ = tx.send(path);
+            ctx.request_repaint();
         });
     }
 
@@ -1360,22 +1368,43 @@ impl eframe::App for MarkerApp {
             });
         ui::tab_drag_overlay(self, ctx);
         self.set_title(ctx);
-        let busy = !self.opening.is_empty()
+
+        // Soft frame budget while interacting (~60fps). Background work wakes the
+        // UI via egui::Context::request_repaint from worker threads; a slow safety
+        // net covers a missed wake without burning CPU.
+        //
+        // With vsync off (Hyprland hidden-workspace workaround), Wayland/OpenGL
+        // may deliver uncapped RedrawRequested. Pace idle frames so that path
+        // cannot spin the CPU when nothing is changing.
+        let interacting = ctx.input(|input| {
+            let scroll = input.smooth_scroll_delta.length_sq() > 0.01
+                || input.raw_scroll_delta.length_sq() > 0.01;
+            let zoom = (input.zoom_delta() - 1.0).abs() > 0.001;
+            input.pointer.any_down() || scroll || zoom
+        }) || self.tabs.iter().any(|tab| {
+            tab.doc.last_zoom.elapsed().as_millis() < 150
+                || tab.doc.last_scroll.elapsed().as_millis() < 150
+        });
+        let pending = !self.opening.is_empty()
             || self.dialog_busy
+            || self.math_deadline.is_some()
             || self.tabs.iter().any(|tab| {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
                     || tab.search.pending
                     || tab.assistant.streaming
                     || tab.assistant.pending_crop.is_some()
-                    || tab.doc.last_zoom.elapsed().as_millis() < 200
             });
-        if busy {
+        if interacting {
             let focused = ctx.input(|input| input.focused);
-            let wait = if focused { 8 } else { 200 };
+            let wait = if focused { 16 } else { 33 };
             ctx.request_repaint_after(Duration::from_millis(wait));
-        } else if self.tabs.iter().any(|tab| tab.assistant.streaming) {
-            ctx.request_repaint_after(Duration::from_millis(50));
+        } else if let Some((_, _, when)) = self.math_deadline {
+            ctx.request_repaint_after(when.saturating_duration_since(Instant::now()));
+        } else if pending {
+            ctx.request_repaint_after(Duration::from_millis(500));
+        } else {
+            thread::sleep(Duration::from_millis(100));
         }
     }
 }
@@ -1439,6 +1468,7 @@ impl MarkerApp {
                             scroll_y: 0.0,
                             fitted: false,
                             last_zoom: Instant::now(),
+                            last_scroll: Instant::now(),
                             last_fit: None,
                             glyphs: HashMap::new(),
                             tiles: HashMap::new(),
@@ -2689,7 +2719,7 @@ impl MarkerApp {
         }
     }
 
-    fn on_assistant(&mut self, ctx: &egui::Context, event: AssistantEvent) {
+    fn on_assistant(&mut self, _ctx: &egui::Context, event: AssistantEvent) {
         let (gen, seq) = match &event {
             AssistantEvent::Started { gen, seq, .. }
             | AssistantEvent::Delta { gen, seq, .. }
@@ -2720,7 +2750,6 @@ impl MarkerApp {
                     turn.text.push_str(&text);
                     turn.incomplete = true;
                 }
-                ctx.request_repaint();
             }
             AssistantEvent::Completed { text, .. } => {
                 if let Some(turn) = tab

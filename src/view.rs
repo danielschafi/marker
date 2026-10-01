@@ -5,7 +5,9 @@ use egui::{
     TextEdit, Vec2,
 };
 
-use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind};
+use crate::annot::{
+    click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind,
+};
 use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
 use crate::assistant::{CaptureMode, LearningSelection};
 use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
@@ -1029,6 +1031,21 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
 }
 
 fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
+    // True clicks never start a drag (`Sense::click_and_drag` waits for movement), so
+    // text / highlight / learning selection must be handled here — including double-click
+    // whole-word selection (#34).
+    if app.capture == CaptureMode::LearningText {
+        let Some((page, point)) = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view))
+        else {
+            return;
+        };
+        select_glyphs_at_point(app, page, point, double, GlyphClick::Learning);
+        return;
+    }
+    if app.capture == CaptureMode::Region {
+        return;
+    }
+
     let tool = app.tool;
     let located = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view));
     let Some((page, point)) = located else {
@@ -1067,13 +1084,19 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                         tab.editing = None;
                     }
                 }
+            } else if double
+                && select_glyphs_at_point(app, page, point, true, GlyphClick::TextSelect)
+            {
+                app.end_edit_undo();
             } else {
                 app.end_edit_undo();
                 app.clear_page_selection();
             }
         }
         Tool::Highlight => {
-            if hit.is_none() {
+            if select_glyphs_at_point(app, page, point, double, GlyphClick::Highlight) {
+                // Highlight created (single glyph, or whole word on double-click).
+            } else if hit.is_none() {
                 app.clear_page_selection();
             }
         }
@@ -1138,6 +1161,128 @@ fn is_editable(tab: &Tab, id: u64) -> bool {
         tab.doc.session.get(id).map(|annot| &annot.kind),
         Some(AnnotKind::Text { .. } | AnnotKind::Note { .. } | AnnotKind::Math { .. })
     )
+}
+
+#[derive(Clone, Copy)]
+enum GlyphClick {
+    TextSelect,
+    Highlight,
+    Learning,
+}
+
+/// Select / highlight glyphs under a click. Double-click expands to the whole word.
+/// Returns false when no glyph is under the point.
+fn select_glyphs_at_point(
+    app: &mut MarkerApp,
+    page: usize,
+    point: PdfPoint,
+    whole_word: bool,
+    kind: GlyphClick,
+) -> bool {
+    let (lo, hi, word) = {
+        let Some(tab) = app.tab() else {
+            return false;
+        };
+        let Some(glyphs) = tab.doc.glyphs.get(&page) else {
+            return false;
+        };
+        let Some(index) = glyph_at(glyphs, point) else {
+            return false;
+        };
+        let Some((lo, hi)) = click_glyph_range(glyphs, index, whole_word) else {
+            return false;
+        };
+        let word = glyphs.get(index).map(|g| g.word);
+        (lo, hi, word)
+    };
+
+    match kind {
+        GlyphClick::TextSelect => {
+            let Some(tab) = app.tab_mut() else {
+                return false;
+            };
+            tab.selected.clear();
+            tab.editing = None;
+            tab.style_bar = None;
+            tab.assistant.learning = None;
+            tab.text_sel = Some(TextSel {
+                page,
+                glyph_lo: lo,
+                glyph_hi: hi,
+            });
+            true
+        }
+        GlyphClick::Learning => {
+            let Some(tab) = app.tab_mut() else {
+                return false;
+            };
+            tab.assistant.learning = Some(LearningSelection {
+                page,
+                glyph_lo: lo,
+                glyph_hi: hi,
+            });
+            app.capture = CaptureMode::None;
+            app.assistant_open = true;
+            app.attach_learning_text();
+            true
+        }
+        GlyphClick::Highlight => {
+            let color = app.settings.highlight_color;
+            let replace = {
+                let Some(tab) = app.tab() else {
+                    return false;
+                };
+                if !whole_word {
+                    None
+                } else {
+                    tab.last_hl.and_then(|(when, hit_page, hit_word, id)| {
+                        (when.elapsed() < Duration::from_millis(420)
+                            && hit_page == page
+                            && word == Some(hit_word))
+                        .then_some(id)
+                        .flatten()
+                    })
+                }
+            };
+            let quads = {
+                let Some(tab) = app.tab() else {
+                    return false;
+                };
+                let Some(glyphs) = tab.doc.glyphs.get(&page) else {
+                    return false;
+                };
+                highlight_quads(glyphs, lo, hi)
+            };
+            if quads.is_empty() {
+                return false;
+            }
+            app.seal_then_arm();
+            let Some(tab) = app.tab_mut() else {
+                return false;
+            };
+            if let Some(old) = replace {
+                tab.doc.session.remove(old);
+            }
+            let id = tab
+                .doc
+                .session
+                .insert(page, AnnotKind::Highlight { quads, color });
+            tab.select_only(id);
+            if let Some(w) = word {
+                // Remember single-glyph marks so a quick second click can upgrade to the word.
+                let remembered = (!whole_word).then_some(id);
+                tab.last_hl = Some((Instant::now(), page, w, remembered));
+            }
+            if !matches!(tab.save, crate::app::SaveState::Saving) {
+                tab.save = crate::app::SaveState::Dirty {
+                    since: Instant::now(),
+                };
+            }
+            app.seal_undo();
+            app.open_style_bar(id, true);
+            true
+        }
+    }
 }
 
 fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {

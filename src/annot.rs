@@ -363,6 +363,16 @@ pub fn word_range(glyphs: &[Glyph], index: usize) -> Option<(usize, usize)> {
     Some((lo, hi))
 }
 
+/// Glyph range for a click: one glyph, or the whole word under the cursor.
+pub fn click_glyph_range(glyphs: &[Glyph], index: usize, whole_word: bool) -> Option<(usize, usize)> {
+    if whole_word {
+        word_range(glyphs, index)
+    } else {
+        glyphs.get(index)?;
+        Some((index, index))
+    }
+}
+
 /// Merge selected glyphs into one quad per line so highlights read as a marker stroke.
 pub fn highlight_quads(glyphs: &[Glyph], a: usize, b: usize) -> Vec<PdfRect> {
     if glyphs.is_empty() || a >= glyphs.len() || b >= glyphs.len() {
@@ -507,6 +517,10 @@ mod tests {
         assert_eq!(quads[1].x0, 0.0);
         assert_eq!(word_range(&glyphs, 2), Some((2, 2)));
         assert_eq!(word_range(&glyphs, 1), Some((0, 1)));
+        assert_eq!(click_glyph_range(&glyphs, 1, false), Some((1, 1)));
+        assert_eq!(click_glyph_range(&glyphs, 1, true), Some((0, 1)));
+        assert_eq!(click_glyph_range(&glyphs, 2, true), Some((2, 2)));
+        assert_eq!(click_glyph_range(&glyphs, 99, true), None);
     }
 
     #[test]

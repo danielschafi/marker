@@ -31,6 +31,8 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
         assistant_panel(app, ctx);
     }
     paint_tab_list(app, ctx, show_chrome);
+    // Menu must paint even in zen (tab list still opens there).
+    paint_tab_menu(app, ctx);
 }
 
 const TAB_BAR_H: f32 = 32.0;
@@ -87,7 +89,6 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
             );
             paint_current_title(app, ui, row);
         });
-    paint_tab_menu(app, ctx);
 }
 
 fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
@@ -166,8 +167,13 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     width = width.min(max_w);
 
     let title_rect = Rect::from_center_size(row.center(), vec2(width, TAB_PILL_H + 4.0));
-    let response = ui.interact(title_rect, Id::new("marker-current-tab"), Sense::click());
-    let fill = if list_open {
+    let sense = if tab_count > 1 {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let response = ui.interact(title_rect, Id::new("marker-current-tab"), sense);
+    let fill = if list_open || response.dragged() {
         colors.chrome_raised
     } else if response.hovered() && tab_count > 1 {
         Color32::from_white_alpha(14)
@@ -194,11 +200,26 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
         );
     }
 
-    if tab_count > 1 && response.clicked() {
+    if response.secondary_clicked() {
+        let pos = response
+            .interact_pointer_pos()
+            .or_else(|| ui.ctx().pointer_latest_pos())
+            .unwrap_or(title_rect.center());
+        app.tab_menu = Some((app.active, pos));
+    } else if response.drag_started() && tab_count > 1 {
+        app.tab_drag = Some(app.active);
+        app.tab_menu = None;
+        if app.tab_list.is_none() {
+            app.tab_list = Some(TabListState::Pinned);
+        }
+    } else if response.clicked() {
         app.toggle_tab_list();
     }
+    if response.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    }
     let tip = if tab_count > 1 {
-        "Show open tabs · Ctrl+Tab to cycle"
+        "Open tabs · drag to split · right-click to split · Ctrl+Tab · Ctrl+\\"
     } else {
         "Current document"
     };
@@ -228,6 +249,7 @@ fn tab_list_row(
     dirty: bool,
     index: usize,
     row_width: f32,
+    drop_target: bool,
 ) -> TabAction {
     let colors = p(ui.ctx());
     let color = if selected { colors.text } else { colors.text_dim };
@@ -238,7 +260,9 @@ fn tab_list_row(
     );
     let (rect, response) =
         ui.allocate_exact_size(vec2(row_width, TAB_LIST_ROW_H), Sense::click_and_drag());
-    let fill = if selected {
+    let fill = if drop_target {
+        colors.accent.gamma_multiply(0.28)
+    } else if selected {
         accent_fill(ui.ctx(), 36)
     } else if response.hovered() || response.dragged() {
         Color32::from_white_alpha(14)
@@ -309,20 +333,27 @@ const TAB_LIST_ROW_H: f32 = 26.0;
 
 fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
     let Some(state) = app.tab_list else {
+        app.tab_drag_over = None;
         return;
     };
     if app.tabs.is_empty() {
         app.tab_list = None;
+        app.tab_drag_over = None;
         return;
     }
 
+    let dragging = app.tab_drag.is_some();
+    let drop_over = app.tab_drag_over;
     let now = std::time::Instant::now();
     if let TabListState::Ephemeral { until } = state {
-        if now >= until {
+        if !dragging && now >= until {
             app.tab_list = None;
+            app.tab_drag_over = None;
             return;
         }
-        ctx.request_repaint_after(until.saturating_duration_since(now));
+        if !dragging {
+            ctx.request_repaint_after(until.saturating_duration_since(now));
+        }
     }
 
     let colors = p(ctx);
@@ -369,6 +400,9 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         12.0
     };
 
+    let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+    let drag_src = app.tab_drag;
+
     let area = egui::Area::new(Id::new("marker-tab-list"))
         .order(egui::Order::Foreground)
         .anchor(Align2::RIGHT_TOP, vec2(-14.0, top))
@@ -383,18 +417,30 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                     ui.set_width(row_width);
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                     for (index, name, selected, dirty) in &names {
-                        let action =
-                            tab_list_row(ui, name, *selected, *dirty, *index, row_width);
-                        if action.select {
+                        let is_drop = drop_over == Some(*index)
+                            && drag_src.is_some_and(|src| src != *index);
+                        let action = tab_list_row(
+                            ui,
+                            name,
+                            *selected,
+                            *dirty,
+                            *index,
+                            row_width,
+                            is_drop,
+                        );
+                        if action.hovered {
+                            keep_alive = true;
+                        }
+                        if action.select && !dragging {
                             select = Some(*index);
                         }
-                        if action.close {
+                        if action.close && !dragging {
                             close = Some(*index);
                         }
                         if action.drag {
                             drag_tab = Some(*index);
                         }
-                        if action.menu {
+                        if action.menu && !dragging {
                             tab_menu = action
                                 .pointer
                                 .map(|pos| (*index, pos))
@@ -411,8 +457,27 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                 });
         });
 
-    // Hovering the overlay counts as activity and resets the auto-hide timer.
-    if area.response.contains_pointer() {
+    // Geometric hit-test so list drops work while the drag owns the pointer.
+    app.tab_drag_over = None;
+    if let (Some(pos), Some(src)) = (pointer, drag_src) {
+        if area.response.rect.contains(pos) {
+            let inner = area.response.rect.shrink(6.0);
+            let mut y = inner.top();
+            for (index, _, _, _) in &names {
+                let row = Rect::from_min_max(
+                    Pos2::new(inner.left(), y),
+                    Pos2::new(inner.right(), y + TAB_LIST_ROW_H),
+                );
+                if row.contains(pos) && *index != src {
+                    app.tab_drag_over = Some(*index);
+                    break;
+                }
+                y += TAB_LIST_ROW_H + 2.0;
+            }
+        }
+    }
+
+    if keep_alive || dragging {
         if let Some(TabListState::Ephemeral { .. }) = app.tab_list {
             app.tab_list = Some(TabListState::Ephemeral {
                 until: now + std::time::Duration::from_millis(2500),
@@ -442,6 +507,7 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         ctx.read_response(Id::new(*id)).is_some_and(|r| r.clicked())
     });
     let outside = pinned
+        && !dragging
         && ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.contains_pointer()
         && !chrome_toggle;
@@ -1201,23 +1267,25 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     }
     let can_split = app.tabs.len() >= 2;
     let split_open = app.split.is_some();
+    let active = app.active;
     let mut split_side = false;
     let mut split_stack = false;
+    let mut split_with: Option<(usize, bool)> = None;
     let mut unsplit = false;
     let mut move_window = false;
     let mut close_menu = false;
-    let with_label = if index == app.active {
-        let other = (app.active + 1) % app.tabs.len();
-        app.tabs.get(other).and_then(|tab| {
-            tab.doc
-                .path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| format!(" with {name}"))
-        })
-    } else {
-        None
-    };
+    let others: Vec<(usize, String)> = app
+        .tabs
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != index)
+        .map(|(i, tab)| (i, tab_file_name(tab).to_owned()))
+        .collect();
+    let next_label = others
+        .iter()
+        .find(|(i, _)| *i == (active + 1) % app.tabs.len().max(1))
+        .or_else(|| others.first())
+        .map(|(_, name)| format!(" with {name}"));
 
     let area = egui::Area::new(Id::new("marker-tab-menu"))
         .order(egui::Order::Foreground)
@@ -1225,19 +1293,40 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(168.0);
+                ui.set_min_width(188.0);
                 if can_split {
-                    let side = format!(
-                        "Split side-by-side{}",
-                        with_label.as_deref().unwrap_or("")
-                    );
-                    let stack =
-                        format!("Split stacked{}", with_label.as_deref().unwrap_or(""));
-                    if ui.button(side).clicked() {
-                        split_side = true;
-                    }
-                    if ui.button(stack).clicked() {
-                        split_stack = true;
+                    if index == active && others.len() > 1 {
+                        ui.menu_button("Split side-by-side with…", |ui| {
+                            for (other, name) in &others {
+                                if ui.button(name).clicked() {
+                                    split_with = Some((*other, false));
+                                    ui.close();
+                                }
+                            }
+                        });
+                        ui.menu_button("Split stacked with…", |ui| {
+                            for (other, name) in &others {
+                                if ui.button(name).clicked() {
+                                    split_with = Some((*other, true));
+                                    ui.close();
+                                }
+                            }
+                        });
+                    } else {
+                        let suffix = if index == active {
+                            next_label.as_deref().unwrap_or("")
+                        } else {
+                            ""
+                        };
+                        if ui
+                            .button(format!("Split side-by-side{suffix}"))
+                            .clicked()
+                        {
+                            split_side = true;
+                        }
+                        if ui.button(format!("Split stacked{suffix}")).clicked() {
+                            split_stack = true;
+                        }
                     }
                 }
                 if split_open && ui.button("Unsplit").clicked() {
@@ -1257,7 +1346,15 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let outside = ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.hovered()
         && !area.response.clicked();
-    if split_side {
+    if let Some((other, stacked)) = split_with {
+        if index == app.active {
+            app.split_with(other, stacked);
+        } else {
+            app.active = index;
+            app.split_with(other, stacked);
+        }
+        close_menu = true;
+    } else if split_side {
         app.split_from_tab(index, false);
         close_menu = true;
     } else if split_stack {
@@ -1284,6 +1381,7 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
     };
     if dragged >= app.tabs.len() || app.tabs.len() < 2 {
         app.tab_drag = None;
+        app.tab_drag_over = None;
         return;
     }
 
@@ -1293,6 +1391,7 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
 
     if !primary_down && !released {
         app.tab_drag = None;
+        app.tab_drag_over = None;
         return;
     }
 
@@ -1306,12 +1405,17 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
             app.apply_tab_drop(dragged, zone);
         }
         app.tab_drag = None;
+        app.tab_drag_over = None;
     } else {
         ctx.request_repaint();
     }
 }
 
 fn hit_split_drop_zone(app: &MarkerApp, pos: Pos2) -> Option<SplitDropZone> {
+    if let Some(target) = app.tab_drag_over {
+        return Some(SplitDropZone::Tab(target));
+    }
+
     if let Some(split) = app.split {
         let other = app.split_view_rect;
         let active = app.view_rect;
@@ -1330,7 +1434,9 @@ fn hit_split_drop_zone(app: &MarkerApp, pos: Pos2) -> Option<SplitDropZone> {
                 let flips = match edge {
                     SplitDropZone::Left | SplitDropZone::Right => split.stacked,
                     SplitDropZone::Top | SplitDropZone::Bottom => !split.stacked,
-                    SplitDropZone::OtherPane | SplitDropZone::ActivePane => false,
+                    SplitDropZone::OtherPane
+                    | SplitDropZone::ActivePane
+                    | SplitDropZone::Tab(_) => false,
                 };
                 if flips {
                     return Some(edge);
@@ -1436,6 +1542,8 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
     match zone {
         SplitDropZone::OtherPane => app.split_view_rect,
         SplitDropZone::ActivePane => app.view_rect,
+        // List-row highlight is painted in the open-tabs overlay.
+        SplitDropZone::Tab(_) => Rect::NOTHING,
         SplitDropZone::Left
         | SplitDropZone::Right
         | SplitDropZone::Top
@@ -1471,7 +1579,9 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
                 SplitDropZone::Bottom => {
                     Rect::from_min_max(Pos2::new(full.left(), mid_y), full.max)
                 }
-                SplitDropZone::OtherPane | SplitDropZone::ActivePane => unreachable!(),
+                SplitDropZone::OtherPane
+                | SplitDropZone::ActivePane
+                | SplitDropZone::Tab(_) => unreachable!(),
             }
         }
     }

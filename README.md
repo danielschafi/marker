@@ -94,7 +94,11 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Shift+B` | Show or hide the tools strip |
 | `F11` | Toggle zen mode |
-| Right-click tab | Split, unsplit, or move tab to a new window |
+| Click title / `Ctrl+Tab` | Open or cycle tabs |
+| Drag tab (title or list) to viewport edge | Split side-by-side (left/right) or stacked (top/bottom) |
+| Right-click title or tab in list | Split side-by-side / stacked / with…, unsplit, or move to a new window |
+| `Ctrl+\` / `Ctrl+Shift+\` | Toggle side-by-side / stacked split with next tab |
+| `Ctrl+Alt+\` | Focus the other split pane |
 | `Ctrl+=` / `Ctrl+-` | Zoom in / out |
 | `Ctrl+0` | Fit width, then fit height |
 | `Ctrl+G` | Jump to a page |

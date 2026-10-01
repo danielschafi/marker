@@ -36,6 +36,8 @@ pub(crate) struct MarkerApp {
     pub(crate) tab_menu: Option<(usize, egui::Pos2)>,
     /// Tab being dragged for split / pane assignment.
     pub(crate) tab_drag: Option<usize>,
+    /// While dragging, open-tabs row under the pointer (if any).
+    pub(crate) tab_drag_over: Option<usize>,
     /// Ephemeral or pinned open-tabs overlay (top-right).
     pub(crate) tab_list: Option<TabListState>,
     pub(crate) opening: HashSet<u64>,
@@ -110,6 +112,8 @@ pub(crate) enum SplitDropZone {
     OtherPane,
     /// Focus / place the dragged tab in the focused pane.
     ActivePane,
+    /// Pair with this tab (drop on a row in the open-tabs list).
+    Tab(usize),
 }
 
 pub(crate) struct Tab {
@@ -442,6 +446,7 @@ impl MarkerApp {
             split: None,
             tab_menu: None,
             tab_drag: None,
+            tab_drag_over: None,
             tab_list: None,
             opening: HashSet::new(),
             error: None,
@@ -853,6 +858,20 @@ impl MarkerApp {
                         s.second = dragged;
                     }
                     self.active = dragged;
+                }
+            }
+            SplitDropZone::Tab(target) => {
+                if target == dragged || target >= self.tabs.len() {
+                    return;
+                }
+                let stacked = self.split.map(|s| s.stacked).unwrap_or(false);
+                if self.active == dragged {
+                    self.set_split_panes(dragged, target, stacked);
+                } else if self.active == target {
+                    self.set_split_panes(target, dragged, stacked);
+                } else {
+                    self.active = dragged;
+                    self.set_split_panes(dragged, target, stacked);
                 }
             }
         }
@@ -1340,6 +1359,7 @@ impl MarkerApp {
             return;
         }
         if self.tab_drag.take().is_some() {
+            self.tab_drag_over = None;
             return;
         }
         if let Some(tab) = self.tab_mut() {

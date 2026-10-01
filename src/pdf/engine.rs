@@ -671,10 +671,14 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         .ok()
         .flatten()
         .and_then(|value| value.as_string().ok());
-    let png = marker.get_dict("Png").ok().flatten().and_then(|obj| {
-        let resolved = obj.resolve().ok().flatten().unwrap_or(obj);
-        resolved.read_stream().ok()
-    });
+    // Read the stream on the dictionary value itself. Resolving an indirect
+    // stream first yields a plain dict in MuPDF, and read_stream then fails
+    // with "object is not a stream" — which dropped pasted images on reload.
+    let png = marker
+        .get_dict("Png")
+        .ok()
+        .flatten()
+        .and_then(|obj| obj.read_stream().ok());
     MarkerMeta {
         kind,
         id,
@@ -1538,6 +1542,79 @@ mod tests {
             .chunks_exact(4)
             .filter(|px| px[0] > 220 && px[1] > 180 && px[2] < 120)
             .count()
+    }
+
+    #[test]
+    fn image_stamp_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-img-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let mut rgba = vec![0u8; 8 * 8 * 4];
+        for px in rgba.chunks_exact_mut(4) {
+            px[0] = 200;
+            px[1] = 40;
+            px[2] = 40;
+            px[3] = 255;
+        }
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Image {
+                rect: PdfRect::new(72.0, 72.0, 172.0, 172.0),
+                rgba: std::sync::Arc::from(rgba),
+                width: 8,
+                height: 8,
+            },
+        );
+        let snapshot = SaveSnapshot {
+            upserts: session.annotations.clone(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+        };
+        let xrefs = engine.save(&snapshot).unwrap();
+        assert_eq!(xrefs.len(), 1, "expected one saved xref: {xrefs:?}");
+
+        let reloaded = DocumentEngine::open(&path).unwrap();
+        let images: Vec<_> = reloaded
+            .annotations
+            .iter()
+            .filter(|annot| matches!(annot.kind, AnnotKind::Image { .. }))
+            .collect();
+        assert_eq!(
+            images.len(),
+            1,
+            "expected image after reload, got {} annots",
+            reloaded.annotations.len()
+        );
+        let AnnotKind::Image {
+            width,
+            height,
+            rgba,
+            rect,
+        } = &images[0].kind
+        else {
+            unreachable!();
+        };
+        assert_eq!(*width, 8);
+        assert_eq!(*height, 8);
+        assert_eq!(rgba.len(), 8 * 8 * 4);
+        assert!((rect.x0 - 72.0).abs() < 0.5);
+        assert_eq!(rgba[0], 200);
+        assert_eq!(rgba[1], 40);
+        assert_eq!(rgba[2], 40);
+        assert_eq!(rgba[3], 255);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

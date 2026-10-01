@@ -2554,8 +2554,16 @@ impl MarkerApp {
     }
 
     pub(crate) fn toggle_assistant(&mut self) {
-        self.assistant_open = !self.assistant_open;
-        if !self.assistant_open {
+        self.set_assistant_open(!self.assistant_open);
+    }
+
+    /// Show or hide the assistant panel without ending the Cursor session (#27).
+    ///
+    /// Hiding clears ephemeral capture UI only. `chat_id`, transcript, and any
+    /// in-flight turn keep running; reopening reconnects to the same state.
+    pub(crate) fn set_assistant_open(&mut self, open: bool) {
+        self.assistant_open = open;
+        if !open {
             self.capture = CaptureMode::None;
         }
     }
@@ -2587,7 +2595,7 @@ impl MarkerApp {
     }
 
     pub(crate) fn begin_learning_select(&mut self) {
-        self.assistant_open = true;
+        self.set_assistant_open(true);
         self.capture = CaptureMode::LearningText;
         if let Some(tab) = self.tab_mut() {
             tab.drag = None;
@@ -2595,7 +2603,7 @@ impl MarkerApp {
     }
 
     pub(crate) fn begin_region_capture(&mut self) {
-        self.assistant_open = true;
+        self.set_assistant_open(true);
         self.capture = CaptureMode::Region;
         if let Some(tab) = self.tab_mut() {
             tab.drag = None;
@@ -2615,7 +2623,7 @@ impl MarkerApp {
     }
 
     pub(crate) fn attach_learning_text(&mut self) {
-        self.assistant_open = true;
+        self.set_assistant_open(true);
         let Some(tab) = self.tab_mut() else {
             return;
         };
@@ -2647,7 +2655,7 @@ impl MarkerApp {
     }
 
     pub(crate) fn attach_learning_screenshot(&mut self) {
-        self.assistant_open = true;
+        self.set_assistant_open(true);
         let Some(tab) = self.tab() else {
             return;
         };
@@ -2673,7 +2681,7 @@ impl MarkerApp {
     }
 
     pub(crate) fn explain_selection(&mut self) {
-        self.assistant_open = true;
+        self.set_assistant_open(true);
         self.attach_learning_text();
         if let Some(tab) = self.tab_mut() {
             if tab.assistant.draft.trim().is_empty() {
@@ -2772,7 +2780,8 @@ impl MarkerApp {
         }
         let gen = tab.doc.gen;
         let seq = tab.assistant.bump_seq();
-        let chat_id = tab.assistant.chat_id.clone();
+        // Reuse create-chat id across panel hide / tab background / between turns.
+        let chat_id = tab.assistant.resume_chat_id();
         tab.assistant.streaming = true;
         tab.assistant.error = None;
         tab.assistant.status_line = Some(if agent_mode {
@@ -2918,6 +2927,7 @@ impl MarkerApp {
                     turn.incomplete = false;
                 }
                 tab.assistant.streaming = false;
+                // Clear busy status; panel hint shows session-alive / resume (#27).
                 tab.assistant.status_line = None;
             }
             AssistantEvent::Cancelled { .. } => {

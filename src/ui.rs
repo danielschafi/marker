@@ -7,7 +7,9 @@ use egui::{
 };
 
 use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, TabListState, Tool};
-use crate::assistant::{AssistantAttachment, AssistantRole, CaptureMode};
+use crate::assistant::{
+    assistant_session_hint, AssistantAttachment, AssistantRole, CaptureMode,
+};
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 use crate::pdf::OutlineNode;
 use crate::theme::{self, ThemeColors};
@@ -125,7 +127,9 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
             app.toggle_zen(ui.ctx());
         }
         if chrome_button(ui, "Assistant", app.assistant_open)
-            .on_hover_text("Cursor learning assistant (Ctrl+Alt+I)")
+            .on_hover_text(
+                "Cursor learning assistant (Ctrl+Alt+I). Hiding the panel keeps the session alive.",
+            )
             .clicked()
         {
             app.toggle_assistant();
@@ -906,10 +910,20 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Cursor").strong().size(14.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui.small_button("×").on_hover_text("Close panel").clicked() {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Hide panel (keeps session and any running reply)")
+                        .clicked()
+                    {
                         close = true;
                     }
-                    if ui.small_button("New").on_hover_text("New chat").clicked() {
+                    if ui
+                        .small_button("New")
+                        .on_hover_text(
+                            "New chat — clears local transcript; next send creates a fresh Cursor chat",
+                        )
+                        .clicked()
+                    {
                         new_chat = true;
                     }
                 });
@@ -917,7 +931,12 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
             let capture = app.capture;
             let status = app
                 .tab()
-                .and_then(|t| t.assistant.status_line.clone())
+                .and_then(|t| {
+                    t.assistant
+                        .status_line
+                        .clone()
+                        .or_else(|| assistant_session_hint(&t.assistant))
+                })
                 .unwrap_or_else(|| match capture {
                     CaptureMode::LearningText => "Drag to select text for the assistant.".into(),
                     CaptureMode::Region => "Drag a rectangle to capture a screenshot.".into(),
@@ -1092,8 +1111,8 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
         });
 
     if close {
-        app.assistant_open = false;
-        app.capture = CaptureMode::None;
+        // Hide only — do not call new_chat(); session + streaming stay alive (#27).
+        app.set_assistant_open(false);
     }
     if new_chat {
         app.assistant_new_chat();

@@ -1301,7 +1301,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     glyph_hi: a.max(c),
                 });
                 app.capture = CaptureMode::None;
-                app.assistant_open = true;
+                app.set_assistant_open(true);
                 app.attach_learning_text();
             }
         }
@@ -1365,7 +1365,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 return;
             }
             app.capture = CaptureMode::None;
-            app.assistant_open = true;
+            app.set_assistant_open(true);
             app.request_crop(page, rect);
         }
         Drag::Highlight {

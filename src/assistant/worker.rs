@@ -190,6 +190,8 @@ fn run_turn(
         return;
     }
 
+    // Prefer the tab's existing chat id (--resume). Only create-chat when absent
+    // so panel hide / background / between-turn idle keep the same session (#27).
     let chat_id = match request.chat_id {
         Some(id) => id,
         None => match create_chat(&cap.path) {

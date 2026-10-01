@@ -13,6 +13,7 @@ use crate::assistant::{
     AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode, PendingCrop,
     TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
 };
+use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::math::{MathRender, MathWorker, RgbaImage};
 use crate::pdf::{OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
@@ -47,6 +48,8 @@ pub(crate) struct MarkerApp {
     pub(crate) assistant_open: bool,
     /// Temporary capture mode for assistant attachments.
     pub(crate) capture: CaptureMode,
+    /// Shared cache for assistant Markdown rendering (issue #26).
+    pub(crate) assistant_md_cache: CommonMarkCache,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
@@ -433,6 +436,7 @@ impl MarkerApp {
             zen_chrome_until: None,
             assistant_open: false,
             capture: CaptureMode::None,
+            assistant_md_cache: CommonMarkCache::default(),
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(egui_ctx.clone()),

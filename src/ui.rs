@@ -887,7 +887,26 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                             AssistantRole::Assistant => "Cursor",
                         };
                         ui.label(RichText::new(who).strong().size(12.0));
-                        ui.label(&turn.text);
+                        match turn.role {
+                            // User prompts stay plain so typed Markdown is not re-interpreted.
+                            AssistantRole::User => {
+                                ui.label(&turn.text);
+                            }
+                            AssistantRole::Assistant => {
+                                // While streaming, prefer plain text so half-open fences stay readable.
+                                if turn.incomplete {
+                                    if !turn.text.is_empty() {
+                                        ui.label(&turn.text);
+                                    }
+                                } else {
+                                    crate::assistant::show_markdown(
+                                        ui,
+                                        &mut app.assistant_md_cache,
+                                        &turn.text,
+                                    );
+                                }
+                            }
+                        }
                         if turn.incomplete {
                             ui.label(RichText::new("…").weak());
                         }

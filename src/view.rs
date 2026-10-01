@@ -7,6 +7,7 @@ use egui::{
 
 use crate::annot::{
     click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind,
+    HIGHLIGHT_OPACITY,
 };
 use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
 use crate::assistant::{CaptureMode, LearningSelection};
@@ -1683,10 +1684,11 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect, pixels_p
     paint_learning_selection(app, painter, view);
 }
 
-/// Marker-tint fill used for on-screen highlights (matches PDF opacity ~0.45).
+/// Marker-tint fill used for on-screen highlights (underpainted before tiles).
 fn highlight_fill(color: crate::geom::Rgb) -> Color32 {
     let c = color.to_color32();
-    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), 115)
+    let a = (HIGHLIGHT_OPACITY * 255.0).round().clamp(0.0, 255.0) as u8;
+    Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
 fn paint_highlight_fills(app: &MarkerApp, painter: &egui::Painter, page: usize, view: Rect) {

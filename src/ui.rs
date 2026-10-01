@@ -243,6 +243,7 @@ struct TabAction {
     close: bool,
     menu: bool,
     drag: bool,
+    hovered: bool,
     pointer: Option<Pos2>,
 }
 
@@ -329,6 +330,7 @@ fn tab_list_row(
         close: close_clicked || response.middle_clicked(),
         menu: response.secondary_clicked(),
         drag: response.drag_started() && !close_clicked,
+        hovered: response.hovered() || response.dragged(),
         pointer: response.interact_pointer_pos(),
     }
 }
@@ -365,6 +367,7 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
     let mut select = None;
     let mut tab_menu = None;
     let mut drag_tab = None;
+    let mut keep_alive = false;
     let names: Vec<(usize, String, bool, bool)> = app
         .tabs
         .iter()

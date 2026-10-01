@@ -12,6 +12,8 @@ arboard = { version = "3.6.1", features = ["wayland-data-control"] }
 directories = "6"
 eframe = "0.33"
 egui = "0.33"
+# Match egui 0.33; default-features off so assistant MD never fetches/loads images.
+egui_commonmark = { version = "0.22", default-features = false, features = ["pulldown_cmark"] }
 image = { version = "0.25.10", features = ["png"] }
 mitex = "0.2.4"
 mupdf = { version = "0.8.0", default-features = false, features = [

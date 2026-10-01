@@ -164,6 +164,8 @@ pub(crate) struct ContextMenu {
     pub page: usize,
     pub point: PdfPoint,
     pub hit: Option<u64>,
+    /// Clipboard offered an image when the menu opened (avoids probing every frame).
+    pub can_paste: bool,
 }
 
 impl Tab {
@@ -3558,6 +3560,31 @@ fn urlencoding_minimal(text: &str) -> String {
         }
     }
     out
+}
+
+/// True when the system clipboard currently offers an image (for context menus).
+pub(crate) fn clipboard_has_image() -> bool {
+    // Prefer a cheap MIME listing on Wayland before pulling pixel data.
+    if let Ok(output) = Command::new("wl-paste")
+        .arg("-l")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+    {
+        if output.status.success() {
+            let list = String::from_utf8_lossy(&output.stdout);
+            if list.lines().any(|line| {
+                let line = line.trim().to_ascii_lowercase();
+                line.starts_with("image/") || line.contains("image/png") || line.contains("image/jpeg")
+            }) {
+                return true;
+            }
+        }
+    }
+    arboard::Clipboard::new()
+        .ok()
+        .and_then(|mut clipboard| clipboard.get_image().ok())
+        .is_some_and(|image| image.width > 0 && image.height > 0)
 }
 
 /// RGBA pixels from the system clipboard (arboard, then `wl-paste` on Wayland).

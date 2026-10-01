@@ -523,15 +523,18 @@ impl MarkerApp {
     }
 
     /// Toggle the pinned open-tabs list (title / indicator click).
+    /// An ephemeral flash (Ctrl+Tab) becomes pinned so the list stays open.
     pub(crate) fn toggle_tab_list(&mut self) {
         if self.tabs.is_empty() {
             self.tab_list = None;
             return;
         }
-        if self.tab_list.is_some() {
-            self.tab_list = None;
-        } else {
-            self.tab_list = Some(TabListState::Pinned);
+        match self.tab_list {
+            Some(TabListState::Pinned) => self.tab_list = None,
+            Some(TabListState::Ephemeral { .. }) => {
+                self.tab_list = Some(TabListState::Pinned);
+            }
+            None => self.tab_list = Some(TabListState::Pinned),
         }
     }
 

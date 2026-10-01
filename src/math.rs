@@ -15,7 +15,7 @@ const TEMPLATE: &str = r#"
 #eval(str(inputs.wrapped), mode: "markup")
 "#;
 
-/// Cycle-able LaTeX starters for the math editor (Shift+Tab).
+/// Cycle-able LaTeX starters for the math editor (Tab / Shift+Tab).
 pub const MATH_TEMPLATES: &[&str] = &[
     "",
     r"\frac{a}{b}",
@@ -36,12 +36,20 @@ f_{n1} & f_{n2} & \dots & f_{nn}
 ];
 
 pub fn cycle_math_template(current: &str) -> &'static str {
+    cycle_math_template_by(current, 1)
+}
+
+/// Cycle math presets. Positive `delta` moves forward (Tab); negative moves
+/// backward (Shift+Tab).
+pub fn cycle_math_template_by(current: &str, delta: isize) -> &'static str {
     let trimmed = current.trim();
     let idx = MATH_TEMPLATES
         .iter()
         .position(|t| t.trim() == trimmed)
         .unwrap_or(0);
-    MATH_TEMPLATES[(idx + 1) % MATH_TEMPLATES.len()]
+    let len = MATH_TEMPLATES.len() as isize;
+    let next = (idx as isize + delta).rem_euclid(len) as usize;
+    MATH_TEMPLATES[next]
 }
 
 pub fn wants_display_math(latex: &str) -> bool {
@@ -322,14 +330,24 @@ fn render_equation(
     }
 }
 
-/// MiTeX emits helpers (`bmatrix`, `zws`, `aligned`, …) that only exist in the
-/// MiTeX Typst package. Rewrite them to native Typst math so we stay offline.
+/// MiTeX emits helpers (`mitexsqrt`, `bmatrix`, `zws`, `aligned`, …) that only
+/// exist in the MiTeX Typst package. Rewrite them to native Typst math so we
+/// stay offline.
 fn mitex_to_typst(expr: &str) -> String {
     let mut s = expr.to_string();
     s = s.replace(" zws ", " ");
     s = s.replace("zws", "");
     s = s.replace("dots.h.c", "dots.c");
     s = s.replace("dots.h", "dots");
+    // Roots: `\sqrt{x}` → mitexsqrt(x); `\sqrt[n]{x}` → mitexsqrt(\[n\], x).
+    s = rewrite_call(&s, "mitexsqrt", rewrite_mitexsqrt);
+    s = rewrite_call(&s, "mitexmathbf", |args| format!("bold(upright({args}))"));
+    s = rewrite_call(&s, "mitexoverbrace", |args| format!("overbrace({args})"));
+    s = rewrite_call(&s, "mitexunderbrace", |args| format!("underbrace({args})"));
+    s = rewrite_call(&s, "operatorname", |args| {
+        let name: String = args.split_whitespace().collect();
+        format!("op(\"{name}\")")
+    });
     // Prefer display-friendly matrix delimiters and unwrap alignment envs.
     s = rewrite_call(&s, "bmatrix", |args| format!("mat(delim: \"[\", {args})"));
     s = rewrite_call(&s, "Bmatrix", |args| format!("mat(delim: \"{{\", {args})"));
@@ -345,6 +363,24 @@ fn mitex_to_typst(expr: &str) -> String {
     s = rewrite_call(&s, "gathered", |args| args);
     s = rewrite_call(&s, "split", |args| args);
     collapse_ws(&s)
+}
+
+fn rewrite_mitexsqrt(args: String) -> String {
+    let trimmed = args.trim();
+    // Optional index from `\sqrt[n]{...}` arrives as `\[n\]`, radicand.
+    if let Some(rest) = trimmed.strip_prefix(r"\[") {
+        if let Some((idx_body, after)) = rest.split_once(r"\]") {
+            let idx = idx_body.trim();
+            let radicand = after
+                .trim()
+                .strip_prefix(',')
+                .map(str::trim)
+                .unwrap_or("")
+                .to_string();
+            return format!("root({idx}, {radicand})");
+        }
+    }
+    format!("sqrt({trimmed})")
 }
 
 fn strip_first_arg(args: String) -> String {
@@ -553,9 +589,75 @@ mod tests {
     }
 
     #[test]
+    fn mitex_rewrite_maps_sqrt_helpers() {
+        assert_eq!(mitex_to_typst("mitexsqrt(x )"), "sqrt(x)");
+        assert_eq!(
+            mitex_to_typst(r"mitexsqrt(\[3 \],x )"),
+            "root(3, x)"
+        );
+        // Commas inside the radicand must not be treated as an optional index.
+        assert_eq!(
+            mitex_to_typst("mitexsqrt(f(a ,b ))"),
+            "sqrt(f(a ,b ))"
+        );
+    }
+
+    #[test]
+    fn renders_sqrt_and_nth_root() {
+        for latex in [r"\sqrt{x}", r"\sqrt{b^2 - 4ac}", r"\sqrt[3]{8}"] {
+            let rendered = render_equation_blocking(latex, 16.0, Rgb::new(0, 0, 0));
+            assert!(
+                rendered.error.is_none(),
+                "{latex}: {:?}",
+                rendered.error
+            );
+            assert!(rendered.width_pt > 1.0 && rendered.height_pt > 1.0);
+            assert!(rendered.pdf.is_some());
+        }
+    }
+
+    #[test]
+    fn renders_quadratic_formula_with_sqrt() {
+        let latex = r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}";
+        let rendered = render_equation_blocking(latex, 14.0, Rgb::new(0, 0, 0));
+        assert!(
+            rendered.error.is_none(),
+            "render error: {:?}",
+            rendered.error
+        );
+        assert!(rendered.width_pt > 10.0);
+    }
+
+    #[test]
+    fn renders_pmatrix() {
+        let latex = r"\begin{pmatrix} a & b \\ c & d \end{pmatrix}";
+        let rendered = render_equation_blocking(latex, 14.0, Rgb::new(0, 0, 0));
+        assert!(
+            rendered.error.is_none(),
+            "render error: {:?}",
+            rendered.error
+        );
+        assert!(rendered.height_pt > 5.0);
+    }
+
+    #[test]
+    fn renders_mathbf_and_operatorname() {
+        for latex in [r"\mathbf{v}", r"\operatorname{tr}(A)"] {
+            let rendered = render_equation_blocking(latex, 16.0, Rgb::new(0, 0, 0));
+            assert!(
+                rendered.error.is_none(),
+                "{latex}: {:?}",
+                rendered.error
+            );
+        }
+    }
+
+    #[test]
     fn template_cycle_wraps() {
         assert_eq!(cycle_math_template(""), MATH_TEMPLATES[1]);
         let last = MATH_TEMPLATES.last().unwrap();
         assert_eq!(cycle_math_template(last), MATH_TEMPLATES[0]);
+        assert_eq!(cycle_math_template_by(MATH_TEMPLATES[1], -1), MATH_TEMPLATES[0]);
+        assert_eq!(cycle_math_template_by("", -1), *last);
     }
 }

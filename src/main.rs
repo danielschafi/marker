@@ -2,6 +2,7 @@ mod annot;
 mod app;
 mod assistant;
 mod geom;
+mod instance;
 mod math;
 mod pdf;
 mod settings;
@@ -9,10 +10,18 @@ mod theme;
 mod ui;
 mod view;
 
-use std::path::PathBuf;
-
 fn main() -> eframe::Result<()> {
-    let paths = pdf_args();
+    let args = instance::LaunchArgs::from_env();
+    match instance::boot(args) {
+        instance::Boot::HandedOff => Ok(()),
+        instance::Boot::Run { paths, inbox } => run_ui(paths, inbox),
+    }
+}
+
+fn run_ui(
+    paths: Vec<std::path::PathBuf>,
+    inbox: Option<instance::IpcInbox>,
+) -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 840.0])
         .with_min_inner_size([760.0, 480.0])
@@ -32,20 +41,6 @@ fn main() -> eframe::Result<()> {
     eframe::run_native(
         "Marker",
         options,
-        Box::new(move |cc| Ok(Box::new(app::MarkerApp::new(cc, paths)))),
+        Box::new(move |cc| Ok(Box::new(app::MarkerApp::new(cc, paths, inbox)))),
     )
-}
-
-fn pdf_args() -> Vec<PathBuf> {
-    std::env::args()
-        .skip(1)
-        .map(PathBuf::from)
-        .filter(|path| {
-            path.is_file()
-                && path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-        })
-        .collect()
 }

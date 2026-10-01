@@ -14,6 +14,7 @@ use crate::assistant::{
     TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
+use crate::instance::{self, IpcInbox};
 use crate::math::{MathRender, MathWorker, RgbaImage};
 use crate::pdf::{OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
@@ -58,6 +59,8 @@ pub(crate) struct MarkerApp {
     dialog_tx: Sender<Option<PathBuf>>,
     dialog_rx: Receiver<Option<PathBuf>>,
     dialog_busy: bool,
+    /// External opens forwarded from secondary Marker processes (single-instance).
+    ipc: Option<IpcInbox>,
     /// Cloned into worker/dialog threads so they can wake the UI on completion.
     egui_ctx: egui::Context,
 }
@@ -125,6 +128,8 @@ pub(crate) struct Tab {
     pub(crate) force_save: bool,
     pub(crate) save_when_math_ready: bool,
     pub(crate) close_after_save: bool,
+    /// After a successful save, spawn this tab in a new window and drop it here.
+    pub(crate) detach_after_save: bool,
     pub(crate) outline_open: bool,
     pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
@@ -403,10 +408,17 @@ pub(crate) enum SaveState {
 }
 
 impl MarkerApp {
-    pub fn new(cc: &eframe::CreationContext<'_>, paths: Vec<PathBuf>) -> Self {
+    pub fn new(
+        cc: &eframe::CreationContext<'_>,
+        paths: Vec<PathBuf>,
+        ipc: Option<IpcInbox>,
+    ) -> Self {
         ui::apply_theme(&cc.egui_ctx);
         let (dialog_tx, dialog_rx) = mpsc::channel();
         let egui_ctx = cc.egui_ctx.clone();
+        if let Some(inbox) = ipc.as_ref() {
+            inbox.bind_ctx(egui_ctx.clone());
+        }
         let mut app = Self {
             settings: Settings::load(),
             tool: Tool::Select,
@@ -436,6 +448,7 @@ impl MarkerApp {
             dialog_tx,
             dialog_rx,
             dialog_busy: false,
+            ipc,
             egui_ctx,
         };
         for path in paths {
@@ -507,6 +520,62 @@ impl MarkerApp {
         self.opening.insert(gen);
         self.error = None;
         self.worker.open(gen, path);
+    }
+
+    /// Move a tab into its own Marker process/window, then close it here.
+    pub(crate) fn move_tab_to_new_window(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get_mut(index) else {
+            return;
+        };
+        if tab.doc.session.is_dirty() {
+            tab.force_save = true;
+            tab.detach_after_save = true;
+            return;
+        }
+        let path = tab.doc.path.clone();
+        if let Err(message) = instance::spawn_new_window(&path) {
+            self.error = Some(format!("Could not open new window: {message}"));
+            return;
+        }
+        self.drop_tab(index);
+    }
+
+    fn finish_detach_tab(&mut self, index: usize) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let path = tab.doc.path.clone();
+        if let Err(message) = instance::spawn_new_window(&path) {
+            if let Some(tab) = self.tabs.get_mut(index) {
+                tab.detach_after_save = false;
+            }
+            self.error = Some(format!("Could not open new window: {message}"));
+            return;
+        }
+        self.drop_tab(index);
+    }
+
+    fn focus_main_window(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(ViewportCommand::Focus);
+        ctx.send_viewport_cmd(ViewportCommand::RequestUserAttention(
+            egui::UserAttentionType::Informational,
+        ));
+    }
+
+    fn poll_ipc(&mut self, ctx: &egui::Context) {
+        let Some(inbox) = self.ipc.as_ref() else {
+            return;
+        };
+        let batches = inbox.poll();
+        if batches.is_empty() {
+            return;
+        }
+        self.focus_main_window(ctx);
+        for paths in batches {
+            for path in paths {
+                self.open_path(path);
+            }
+        }
     }
 
     /// Briefly show the open-tabs list (e.g. after Ctrl+Tab). No-op while pinned.
@@ -1343,6 +1412,7 @@ fn vim_digit(input: &egui::InputState) -> Option<u32> {
 
 impl eframe::App for MarkerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_ipc(ctx);
         self.poll_dialog();
         self.poll(ctx);
         self.flush_math();
@@ -1488,6 +1558,7 @@ impl MarkerApp {
                         force_save: false,
                         save_when_math_ready: false,
                         close_after_save: false,
+                        detach_after_save: false,
                         outline_open: has_outline,
                         assistant: TabAssistant::default(),
                         search: SearchState::default(),
@@ -1743,7 +1814,7 @@ impl MarkerApp {
             Ok(saved) => {
                 let epoch = self.tabs[index].save_epoch;
                 let sent = std::mem::take(&mut self.tabs[index].save_deletes);
-                let close = {
+                let (close, detach) = {
                     let tab = &mut self.tabs[index];
                     tab.doc
                         .session
@@ -1766,9 +1837,12 @@ impl MarkerApp {
                     } else {
                         tab.save = SaveState::Clean;
                     }
-                    tab.close_after_save && !tab.doc.session.is_dirty()
+                    let clean = !tab.doc.session.is_dirty();
+                    (tab.close_after_save && clean, tab.detach_after_save && clean)
                 };
-                if close {
+                if detach {
+                    self.finish_detach_tab(index);
+                } else if close {
                     self.drop_tab(index);
                 }
             }
@@ -2319,7 +2393,7 @@ impl MarkerApp {
     }
 
     fn start_save_gen(&mut self, gen: u64) {
-        let (snapshot, close) = {
+        let (snapshot, close, detach) = {
             let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.gen == gen) else {
                 return;
             };
@@ -2327,10 +2401,10 @@ impl MarkerApp {
                 tab.save = SaveState::Clean;
                 tab.force_save = false;
                 tab.save_when_math_ready = false;
-                (None, tab.close_after_save)
+                (None, tab.close_after_save, tab.detach_after_save)
             } else if !math_ready(tab) {
                 tab.save_when_math_ready = true;
-                (None, false)
+                (None, false, false)
             } else {
                 let epoch = tab.doc.session.epoch;
                 let upserts: Vec<Annotation> = tab
@@ -2366,14 +2440,17 @@ impl MarkerApp {
                         math_pdfs,
                     }),
                     false,
+                    false,
                 )
             }
         };
         if let Some(snapshot) = snapshot {
             self.worker.save(gen, snapshot);
         }
-        if close {
-            if let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) {
+            if detach {
+                self.finish_detach_tab(index);
+            } else if close {
                 self.drop_tab(index);
             }
         }

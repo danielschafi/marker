@@ -31,8 +31,13 @@ cargo run --release
 Pass one or more PDFs to open them immediately:
 
 ```sh
-cargo run --release -- document.pdf
+cargo run --release -- document.pdf other.pdf
 ```
+
+On Linux, a second launch forwards paths to the running Marker window and opens
+them as tabs (single-instance). Force a separate window with `--new-window`
+(or `-n`), or use the desktop action **Open in New Window**. From a tab’s
+right-click menu, choose **Move to new window** to detach that document.
 
 To build without running:
 
@@ -88,7 +93,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Shift+B` | Show or hide the tools strip |
 | `F11` | Toggle zen mode |
-| Right-click tab | Split side-by-side / stacked, or unsplit |
+| Right-click tab | Split, unsplit, or move tab to a new window |
 | `Ctrl+=` / `Ctrl+-` | Zoom in / out |
 | `Ctrl+0` | Fit width, then fit height |
 | `Ctrl+G` | Jump to a page |

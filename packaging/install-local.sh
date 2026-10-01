@@ -24,9 +24,9 @@ install -m 755 "$binary" "$bin_dir/marker"
 install -m 644 "$root/packaging/marker.desktop" "$app_dir/marker.desktop"
 install -m 644 "$root/packaging/marker.svg" "$icon_dir/marker.svg"
 
-# Point Exec at the installed binary with an absolute path so the launcher
-# works even when ~/.local/bin is not on the desktop session PATH.
-sed -i "s|^Exec=marker |Exec=$bin_dir/marker |" "$app_dir/marker.desktop"
+# Point every Exec= at the installed binary with an absolute path so the
+# launcher and desktop actions work even when ~/.local/bin is not on PATH.
+sed -i "s|^Exec=marker|Exec=$bin_dir/marker|g" "$app_dir/marker.desktop"
 
 update-desktop-database "$app_dir" 2>/dev/null || true
 gtk-update-icon-cache -f -t "$prefix/share/icons/hicolor" 2>/dev/null || true

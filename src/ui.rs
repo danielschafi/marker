@@ -1155,6 +1155,7 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let mut split_side = false;
     let mut split_stack = false;
     let mut unsplit = false;
+    let mut move_window = false;
     let mut close_menu = false;
     let with_label = if index == app.active {
         let other = (app.active + 1) % app.tabs.len();
@@ -1193,6 +1194,9 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 if split_open && ui.button("Unsplit").clicked() {
                     unsplit = true;
                 }
+                if ui.button("Move to new window").clicked() {
+                    move_window = true;
+                }
                 if !can_split && !split_open {
                     ui.label(RichText::new("Open another tab to split").weak().size(12.0));
                 }
@@ -1212,6 +1216,9 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         close_menu = true;
     } else if unsplit {
         app.unsplit();
+        close_menu = true;
+    } else if move_window {
+        app.move_tab_to_new_window(index);
         close_menu = true;
     } else if outside {
         close_menu = true;

@@ -32,7 +32,10 @@ pub struct BundleImageAttach {
 #[derive(Clone, Debug)]
 pub struct BundleInput {
     pub question: String,
+    /// Display name (usually the PDF basename).
     pub filename: Option<String>,
+    /// Absolute path of the open PDF when known (for Cursor context only; not copied).
+    pub filepath: Option<String>,
     pub text: Option<BundleTextAttach>,
     pub images: Vec<BundleImageAttach>,
 }
@@ -50,9 +53,27 @@ pub fn build_bundle(input: &BundleInput) -> Result<BundlePaths, String> {
     md.push_str("# User question\n\n");
     md.push_str(input.question.trim());
     md.push_str("\n\n");
-    if let Some(name) = &input.filename {
-        md.push_str(&format!("# Document\n\nFilename: `{name}`\n\n"));
+
+    let pages = attachment_pages(input);
+    if input.filename.is_some() || input.filepath.is_some() || !pages.is_empty() {
+        md.push_str("# Document\n\n");
+        if let Some(name) = &input.filename {
+            md.push_str(&format!("- Filename: `{name}`\n"));
+        }
+        if let Some(path) = &input.filepath {
+            md.push_str(&format!("- Path: `{path}`\n"));
+        }
+        if !pages.is_empty() {
+            let list = pages
+                .iter()
+                .map(|p| (p + 1).to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            md.push_str(&format!("- Attachment page(s): {list}\n"));
+        }
+        md.push('\n');
     }
+
     if let Some(text) = &input.text {
         md.push_str(&format!(
             "# Selected text (page {})\n\n",
@@ -68,7 +89,7 @@ pub fn build_bundle(input: &BundleInput) -> Result<BundlePaths, String> {
     }
     if !input.images.is_empty() {
         md.push_str("# Image attachments\n\n");
-        md.push_str("Inspect these PNG files in the workspace (absolute paths below) and use what you see to answer.\n\n");
+        md.push_str("Inspect these PNG files in the workspace (paths relative to the workspace root) and use what you see to answer.\n\n");
         for img in &input.images {
             let rel = format!("attachments/{}", sanitize_filename(&img.filename));
             md.push_str(&format!(
@@ -89,12 +110,15 @@ pub fn build_bundle(input: &BundleInput) -> Result<BundlePaths, String> {
     let mut manifest = serde_json::json!({
         "schema": 1,
         "filename": input.filename,
+        "filepath": input.filepath,
+        "pages": pages.iter().map(|p| p + 1).collect::<Vec<_>>(),
         "attachments": []
     });
     if let Some(text) = &input.text {
         manifest["attachments"].as_array_mut().unwrap().push(serde_json::json!({
             "type": "text",
-            "page": text.page,
+            "page": text.page + 1,
+            "page_index": text.page,
             "chars": text.text.chars().count(),
             "truncated": text.truncated,
         }));
@@ -104,7 +128,8 @@ pub fn build_bundle(input: &BundleInput) -> Result<BundlePaths, String> {
         write_file(&root.join("attachments").join(&name), &img.png)?;
         manifest["attachments"].as_array_mut().unwrap().push(serde_json::json!({
             "type": "image",
-            "page": img.page,
+            "page": img.page + 1,
+            "page_index": img.page,
             "file": format!("attachments/{name}"),
             "width": img.width,
             "height": img.height,
@@ -124,6 +149,31 @@ pub fn build_bundle(input: &BundleInput) -> Result<BundlePaths, String> {
     )?;
 
     Ok(BundlePaths { root })
+}
+
+/// Sorted unique 0-based page indices referenced by attachments.
+fn attachment_pages(input: &BundleInput) -> Vec<usize> {
+    let mut pages = Vec::new();
+    if let Some(text) = &input.text {
+        pages.push(text.page);
+    }
+    for img in &input.images {
+        pages.push(img.page);
+    }
+    pages.sort_unstable();
+    pages.dedup();
+    pages
+}
+
+/// Prefer a canonical absolute path; fall back to an absolute display path.
+pub fn absolute_filepath(path: &Path) -> String {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical.display().to_string();
+    }
+    match std::path::absolute(path) {
+        Ok(abs) => abs.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
 }
 
 pub fn cleanup_bundle(paths: &BundlePaths) {
@@ -213,13 +263,14 @@ mod tests {
         let paths = build_bundle(&BundleInput {
             question: "What color?".into(),
             filename: Some("demo.pdf".into()),
+            filepath: Some("/tmp/docs/demo.pdf".into()),
             text: Some(BundleTextAttach {
                 page: 0,
                 text: "hello".into(),
                 truncated: false,
             }),
             images: vec![BundleImageAttach {
-                page: 0,
+                page: 2,
                 rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
                 png,
                 width: 1,
@@ -232,8 +283,19 @@ mod tests {
         assert!(request.contains("What color?"));
         assert!(request.contains("hello"));
         assert!(request.contains("attachments/crop-0.png"));
+        assert!(request.contains("Filename: `demo.pdf`"));
+        assert!(request.contains("Path: `/tmp/docs/demo.pdf`"));
+        assert!(request.contains("Attachment page(s): 1, 3"));
+        assert!(request.contains("# Selected text (page 1)"));
+        assert!(request.contains("- Page 3:"));
         assert!(paths.root.join("attachments/crop-0.png").is_file());
-        assert!(!request.contains("/home/"));
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(paths.root.join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["filepath"], "/tmp/docs/demo.pdf");
+        assert_eq!(manifest["pages"], serde_json::json!([1, 3]));
+        assert_eq!(manifest["attachments"][0]["page"], 1);
+        assert_eq!(manifest["attachments"][1]["page"], 3);
         cleanup_bundle(&paths);
     }
 }

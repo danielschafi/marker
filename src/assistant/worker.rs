@@ -24,6 +24,9 @@ pub struct AssistantRequest {
     pub gen: u64,
     pub seq: u64,
     pub chat_id: Option<String>,
+    /// When true, spawn without `--mode ask` so Cursor runs full agent (tools/writes).
+    /// Default ask mode stays read-only Q&A. CLI has no `--mode agent` choice.
+    pub agent_mode: bool,
     pub bundle: BundleInput,
 }
 
@@ -217,7 +220,7 @@ fn run_turn(
     );
 
     let cancel = Arc::new(AtomicBool::new(false));
-    let mut child = match spawn_agent(&cap.path, &bundle.root, &chat_id) {
+    let mut child = match spawn_agent(&cap.path, &bundle.root, &chat_id, request.agent_mode) {
         Ok(child) => child,
         Err(message) => {
             cleanup_bundle(&bundle);
@@ -431,12 +434,25 @@ fn assistant_text_from(value: &Value) -> Option<String> {
     }
 }
 
-fn spawn_agent(agent: &Path, workspace: &Path, chat_id: &str) -> Result<Child, String> {
+fn spawn_agent(
+    agent: &Path,
+    workspace: &Path,
+    chat_id: &str,
+    agent_mode: bool,
+) -> Result<Child, String> {
     let mut cmd = Command::new(agent);
-    cmd.arg("--print")
-        .arg("--mode")
-        .arg("ask")
-        .arg("--output-format")
+    cmd.arg("--print");
+    // Cursor CLI choices are only plan|ask. Full agent (tools/writes) is the default
+    // when --mode is omitted; ask stays the Marker default for learning Q&A.
+    if !agent_mode {
+        cmd.arg("--mode").arg("ask");
+    }
+    let prompt = if agent_mode {
+        "Read request.md and help with the user's request. You may use tools when needed."
+    } else {
+        "Read request.md and answer the user's question."
+    };
+    cmd.arg("--output-format")
         .arg("stream-json")
         .arg("--stream-partial-output")
         .arg("--sandbox")
@@ -446,7 +462,7 @@ fn spawn_agent(agent: &Path, workspace: &Path, chat_id: &str) -> Result<Child, S
         .arg(workspace)
         .arg("--resume")
         .arg(chat_id)
-        .arg("Read request.md and answer the user's question.")
+        .arg(prompt)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .stdin(Stdio::null());

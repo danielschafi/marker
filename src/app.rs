@@ -9,9 +9,9 @@ use egui::{DragValue, Key, ViewportCommand};
 
 use crate::annot::{AnnotKind, Annotation, Glyph, Handle, Session, ShapeKind};
 use crate::assistant::{
-    AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole, AssistantTurn,
-    AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode, PendingCrop,
-    TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
+    absolute_filepath, AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole,
+    AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
+    PendingCrop, TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
 };
 use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
@@ -2635,6 +2635,8 @@ impl MarkerApp {
             .file_name()
             .and_then(|n| n.to_str())
             .map(str::to_string);
+        let filepath = Some(absolute_filepath(&tab.doc.path));
+        let agent_mode = tab.assistant.agent_mode;
         let mut text = None;
         let mut images = Vec::new();
         for attach in &tab.assistant.attachments {
@@ -2674,7 +2676,11 @@ impl MarkerApp {
         let chat_id = tab.assistant.chat_id.clone();
         tab.assistant.streaming = true;
         tab.assistant.error = None;
-        tab.assistant.status_line = Some("Talking to Cursor…".into());
+        tab.assistant.status_line = Some(if agent_mode {
+            "Talking to Cursor (agent mode)…".into()
+        } else {
+            "Talking to Cursor…".into()
+        });
         tab.assistant.turns.push(AssistantTurn {
             role: AssistantRole::User,
             text: question.clone(),
@@ -2692,9 +2698,11 @@ impl MarkerApp {
             gen,
             seq,
             chat_id,
+            agent_mode,
             bundle: BundleInput {
                 question,
                 filename,
+                filepath,
                 text,
                 images,
             },

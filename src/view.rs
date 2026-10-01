@@ -8,7 +8,7 @@ use egui::{
 use crate::annot::{glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind};
 use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
 use crate::assistant::{CaptureMode, LearningSelection};
-use crate::geom::{zoom_bucket, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
+use crate::geom::{tile_render_scale, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
 use crate::theme;
 
@@ -71,14 +71,9 @@ impl DocState {
         self.last_zoom = Instant::now();
     }
 
-    /// MuPDF device pixels per PDF point for tiles (logical zoom × display ppp).
+    /// MuPDF device pixels per PDF point for tiles (bucketed zoom × display ppp).
     pub(crate) fn render_scale(&self, pixels_per_point: f32) -> f32 {
-        let logical = if self.last_zoom.elapsed().as_millis() < 140 {
-            zoom_bucket(self.scale)
-        } else {
-            self.scale
-        };
-        logical * pixels_per_point.max(0.5)
+        tile_render_scale(self.scale, pixels_per_point)
     }
 
     fn page_origin(&self, page: usize, view: Rect) -> Pos2 {
@@ -1635,10 +1630,19 @@ fn paint_tiles(
     pixels_per_point: f32,
 ) {
     let target_bits = render_scale.to_bits();
-    let mut tiles: Vec<_> = doc
+    let page_tiles: Vec<_> = doc
         .tiles
         .iter()
         .filter(|(key, _)| key.page == page)
+        .collect();
+    // Prefer the current zoom bucket; only fall back to other scales while
+    // waiting for matching tiles (avoids lasting mixed font appearance).
+    let has_target = page_tiles
+        .iter()
+        .any(|(key, _)| key.scale_bits == target_bits);
+    let mut tiles: Vec<_> = page_tiles
+        .into_iter()
+        .filter(|(key, _)| !has_target || key.scale_bits == target_bits)
         .collect();
     tiles.sort_by_key(|(key, _)| (key.scale_bits == target_bits, key.scale_bits));
     for (_key, tile) in tiles {

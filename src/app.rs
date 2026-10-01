@@ -1541,7 +1541,7 @@ impl MarkerApp {
                         texture,
                     },
                 );
-                trim_tiles(&mut tab.doc);
+                trim_tiles(&mut tab.doc, ctx.pixels_per_point());
             }
             PdfReply::TileMiss {
                 gen,
@@ -3292,9 +3292,16 @@ fn tile_key(tile: &crate::pdf::TileImage) -> TileKey {
     }
 }
 
-fn trim_tiles(doc: &mut DocState) {
+fn trim_tiles(doc: &mut DocState, pixels_per_point: f32) {
+    let keep = doc.render_scale(pixels_per_point).to_bits();
     while doc.tiles.len() > 180 {
-        let Some(key) = doc.tiles.keys().next().copied() else {
+        // Prefer dropping other zoom buckets so the current scale stays coherent.
+        let stale = doc
+            .tiles
+            .keys()
+            .find(|key| key.scale_bits != keep)
+            .copied();
+        let Some(key) = stale.or_else(|| doc.tiles.keys().next().copied()) else {
             break;
         };
         doc.tiles.remove(&key);

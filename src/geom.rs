@@ -153,10 +153,18 @@ pub fn zoom_percent(scale: f32) -> u32 {
     (scale / ZOOM_100 * 100.0).round() as u32
 }
 
-/// Quantize a pixels-per-point scale so nearby zooms share a tile cache.
+/// Quantize a logical zoom so nearby zooms share a tile cache.
 pub fn zoom_bucket(scale: f32) -> f32 {
     let stepped = (scale.log2() * 4.0).round() / 4.0;
     2f32.powf(stepped).clamp(MIN_SCALE, MAX_SCALE)
+}
+
+/// MuPDF device pixels per PDF point for tile rasterization.
+///
+/// Always buckets logical zoom so every page at a given zoom uses the same
+/// render scale (no live-zoom bucket vs post-settle exact mismatch).
+pub fn tile_render_scale(logical_zoom: f32, pixels_per_point: f32) -> f32 {
+    zoom_bucket(logical_zoom) * pixels_per_point.max(0.5)
 }
 
 /// Keep the document point under `cursor_offset` fixed while the scale changes.
@@ -231,6 +239,21 @@ mod tests {
         let a = zoom_bucket(1.30);
         let b = zoom_bucket(1.32);
         assert_eq!(a, b);
+    }
+
+    /// Regression for #35: zoomed-on-screen pages and pages loaded while
+    /// scrolling must share one tile scale at a fixed zoom (never bucket
+    /// during zoom and exact scale after settle).
+    #[test]
+    fn tile_scale_consistent_after_zoom_and_scroll() {
+        let ppp = 2.0;
+        let zoom = 1.37;
+        let during_zoom = tile_render_scale(zoom, ppp);
+        let after_scroll = tile_render_scale(zoom, ppp);
+        assert_eq!(during_zoom.to_bits(), after_scroll.to_bits());
+        // Off-bucket zooms must not silently fall through to exact scale.
+        assert_ne!(during_zoom.to_bits(), (zoom * ppp).to_bits());
+        assert_eq!(during_zoom, zoom_bucket(zoom) * ppp);
     }
 
     #[test]

@@ -38,13 +38,15 @@ impl AssistantAttachment {
     pub fn label(&self) -> String {
         match self {
             Self::Text {
-                text, truncated, ..
+                page,
+                text,
+                truncated,
             } => {
                 let n = text.chars().count();
                 if *truncated {
-                    format!("Text · {n} characters (truncated)")
+                    format!("Text · page {} · {n} characters (truncated)", page + 1)
                 } else {
-                    format!("Text · {n} characters")
+                    format!("Text · page {} · {n} characters", page + 1)
                 }
             }
             Self::Image { page, .. } => format!("Image · page {}", page + 1),
@@ -86,6 +88,8 @@ pub struct TabAssistant {
     pub error: Option<String>,
     /// User acknowledged first-send Cursor disclosure for this tab.
     pub disclosed: bool,
+    /// Opt-in Cursor agent mode (tools / writes). Default is ask (read-only Q&A).
+    pub agent_mode: bool,
     pub status_line: Option<String>,
     pub pending_crop: Option<PendingCrop>,
     crop_seq: u64,

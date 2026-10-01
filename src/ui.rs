@@ -946,6 +946,22 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                         "I understand prompts and attachments go through my Cursor account",
                     );
                 }
+                ui.checkbox(
+                    &mut tab.assistant.agent_mode,
+                    "Agent mode (tools / writes)",
+                )
+                .on_hover_text(
+                    "Off (default): Cursor Ask — read-only Q&A.\n\
+                     On: full Cursor Agent — may use tools and write files in the session workspace. Opt-in only.",
+                );
+                if tab.assistant.agent_mode {
+                    ui.label(
+                        RichText::new("Agent mode can run tools and write files.")
+                            .weak()
+                            .size(11.0)
+                            .color(Color32::from_rgb(180, 120, 40)),
+                    );
+                }
                 let response = ui.add(
                     TextEdit::multiline(&mut tab.assistant.draft)
                         .id_salt("assistant-draft")

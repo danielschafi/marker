@@ -7,7 +7,9 @@ mod text;
 mod types;
 mod worker;
 
-pub use bundle::{BundleImageAttach, BundleInput, BundleTextAttach, MAX_TEXT_CHARS};
+pub use bundle::{
+    absolute_filepath, BundleImageAttach, BundleInput, BundleTextAttach, MAX_TEXT_CHARS,
+};
 pub use crop::{clamp_crop_rect, crop_scale, CROP_DPI, CROP_MAX_PNG_BYTES};
 pub use text::{glyphs_intersecting_rects, reconstruct_text, truncate_text};
 pub use types::{

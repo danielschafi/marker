@@ -162,9 +162,6 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     if dirty {
         width += 12.0;
     }
-    if tab_count > 1 {
-        width += 22.0;
-    }
     let max_w = (row.width() * 0.38).clamp(120.0, 420.0);
     width = width.min(max_w);
 
@@ -172,7 +169,7 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     let response = ui.interact(title_rect, Id::new("marker-current-tab"), Sense::click());
     let fill = if list_open {
         colors.chrome_raised
-    } else if response.hovered() {
+    } else if response.hovered() && tab_count > 1 {
         Color32::from_white_alpha(14)
     } else {
         Color32::TRANSPARENT
@@ -186,9 +183,6 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     if dirty {
         cursor_x -= 6.0;
     }
-    if tab_count > 1 {
-        cursor_x -= 10.0;
-    }
     let text_pos = Pos2::new(cursor_x, title_rect.center().y - galley.size().y * 0.5);
     let text_right = text_pos.x + galley.size().x;
     ui.painter().galley(text_pos, galley, title_color);
@@ -199,22 +193,8 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
             colors.dirty,
         );
     }
-    if tab_count > 1 {
-        let badge_x = if dirty {
-            text_right + 18.0
-        } else {
-            text_right + 8.0
-        };
-        ui.painter().text(
-            Pos2::new(badge_x, title_rect.center().y),
-            Align2::LEFT_CENTER,
-            format!("▾{tab_count}"),
-            FontId::new(11.0, FontFamily::Proportional),
-            colors.text_dim,
-        );
-    }
 
-    if response.clicked() {
+    if tab_count > 1 && response.clicked() {
         app.toggle_tab_list();
     }
     let tip = if tab_count > 1 {
@@ -239,7 +219,6 @@ struct TabAction {
     menu: bool,
     drag: bool,
     pointer: Option<Pos2>,
-    hovered: bool,
 }
 
 fn tab_list_row(
@@ -323,7 +302,6 @@ fn tab_list_row(
         menu: response.secondary_clicked(),
         drag: response.drag_started() && !close_clicked,
         pointer: response.interact_pointer_pos(),
-        hovered: response.hovered(),
     }
 }
 
@@ -352,18 +330,15 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
     let mut select = None;
     let mut tab_menu = None;
     let mut drag_tab = None;
-    let mut keep_alive = false;
-    let split = app.split;
     let names: Vec<(usize, String, bool, bool)> = app
         .tabs
         .iter()
         .enumerate()
         .map(|(index, tab)| {
-            let in_split = split.is_some_and(|s| s.contains(index));
             (
                 index,
                 tab_file_name(tab).to_owned(),
-                index == app.active || in_split,
+                index == app.active,
                 tab.doc.session.is_dirty(),
             )
         })
@@ -410,9 +385,6 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                     for (index, name, selected, dirty) in &names {
                         let action =
                             tab_list_row(ui, name, *selected, *dirty, *index, row_width);
-                        if action.hovered {
-                            keep_alive = true;
-                        }
                         if action.select {
                             select = Some(*index);
                         }
@@ -439,7 +411,8 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                 });
         });
 
-    if keep_alive {
+    // Hovering the overlay counts as activity and resets the auto-hide timer.
+    if area.response.contains_pointer() {
         if let Some(TabListState::Ephemeral { .. }) = app.tab_list {
             app.tab_list = Some(TabListState::Ephemeral {
                 until: now + std::time::Duration::from_millis(2500),
@@ -464,14 +437,14 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
     }
 
     let pinned = matches!(app.tab_list, Some(TabListState::Pinned));
-    // Title toggle already ran this frame; ignore that primary click for dismiss.
-    let title_clicked = ctx
-        .read_response(Id::new("marker-current-tab"))
-        .is_some_and(|r| r.clicked());
+    // Title / indicator toggles already ran this frame; ignore those clicks for dismiss.
+    let chrome_toggle = ["marker-current-tab", "marker-tabs-indicator"].iter().any(|id| {
+        ctx.read_response(Id::new(*id)).is_some_and(|r| r.clicked())
+    });
     let outside = pinned
         && ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
         && !area.response.contains_pointer()
-        && !title_clicked;
+        && !chrome_toggle;
     if outside {
         app.dismiss_tab_list();
     }
@@ -598,6 +571,10 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let mut jump = None;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
         ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        // Rightmost: compact open-tabs affordance (list anchors top-right).
+        if app.tabs.len() >= 2 {
+            tabs_indicator_button(app, ui);
+        }
         if app.doc().is_some() {
             control_cluster(ui, |ui| {
                 if cluster_button(ui, "Fit", Vec2::new(36.0, CONTROL_H))
@@ -685,6 +662,43 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
 }
 
 const CONTROL_H: f32 = 20.0;
+
+fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
+    let colors = p(ui.ctx());
+    let list_open = app.tab_list.is_some();
+    let label = format!("{} ▾", app.tabs.len());
+    let text_w = ui_measure_text(ui.ctx(), &label, 11.5);
+    let width = (text_w + 14.0).clamp(36.0, 56.0);
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(width, CONTROL_H), Sense::hover());
+    // Stable id so outside-click dismiss can ignore this toggle.
+    let response = ui.interact(rect, Id::new("marker-tabs-indicator"), Sense::click());
+    let fill = if list_open {
+        accent_fill(ui.ctx(), 42)
+    } else if response.is_pointer_button_down_on() {
+        Color32::from_white_alpha(28)
+    } else if response.hovered() {
+        Color32::from_white_alpha(16)
+    } else {
+        colors.chrome_raised
+    };
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(5), fill);
+    ui.painter().text(
+        rect.center(),
+        Align2::CENTER_CENTER,
+        label,
+        FontId::new(11.5, FontFamily::Proportional),
+        if list_open {
+            colors.accent
+        } else {
+            colors.text
+        },
+    );
+    if response.clicked() {
+        app.toggle_tab_list();
+    }
+    response.on_hover_text("Open tabs · Ctrl+Tab to cycle");
+}
 
 fn control_cluster(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
     let colors = p(ui.ctx());

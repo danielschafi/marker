@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use egui::{
-    Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke,
+    Button, Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke,
     TextEdit, Vec2,
 };
 
@@ -9,8 +9,10 @@ use crate::annot::{
     click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind,
     HIGHLIGHT_OPACITY,
 };
-use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
-use crate::assistant::{CaptureMode, LearningSelection};
+use crate::app::{
+    clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool,
+};
+use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
 use crate::pdf::{PageInfo, TILE_PX};
 use crate::theme;
@@ -2493,18 +2495,23 @@ fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
     let Some((page, point, hit)) = located else {
         return;
     };
+    let can_paste = clipboard_has_image();
     if let Some(tab) = app.tab_mut() {
         tab.style_bar = None;
         if let Some(id) = hit {
+            // Right-click on an annotation: target that object (keep multi if already in it).
             if !tab.is_selected(id) {
                 tab.select_only(id);
             }
         }
+        // Empty-page / text clicks keep any existing selection for keyboard shortcuts,
+        // but the menu itself only offers actions for the click target.
         tab.menu = Some(ContextMenu {
             pos,
             page,
             point,
             hit,
+            can_paste,
         });
     }
 }
@@ -2608,42 +2615,70 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let Some(menu) = app.tab().and_then(|tab| tab.menu.clone()) else {
         return;
     };
-    let has_learning = app
-        .tab()
-        .is_some_and(|tab| tab.assistant.learning.is_some());
-    let has_text_sel = app.tab().is_some_and(|tab| tab.text_sel.is_some());
-    let copy_text = app
-        .copyable_selection_text()
-        .or_else(|| {
-            if menu.hit.is_some() {
-                None
-            } else {
-                app.word_at_point(menu.page, menu.point)
-            }
-        });
+
+    let on_annot = menu.hit.is_some();
+    let selected_len = app.tab().map(|tab| tab.selected.len()).unwrap_or(0);
+    let multi = menu.hit.is_some_and(|id| {
+        selected_len > 1 && app.tab().is_some_and(|tab| tab.is_selected(id))
+    });
     let hit_kind = menu.hit.and_then(|id| {
         app.tab()
             .and_then(|tab| tab.doc.session.get(id))
             .map(|annot| annot.kind.clone())
     });
-    let multi = app
-        .tab()
-        .is_some_and(|tab| tab.selected.len() > 1);
-    let can_style = hit_kind.as_ref().is_some_and(|kind| {
-        !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
-    }) || app.tab().is_some_and(|tab| {
-        tab.selected.iter().any(|id| {
-            tab.doc.session.get(*id).is_some_and(|annot| {
-                !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+
+    // Object actions follow the click target only — leftover selection on empty
+    // page must not surface Delete/Style for a prior multi-select.
+    let can_style = if multi {
+        app.tab().is_some_and(|tab| {
+            tab.selected.iter().any(|id| {
+                tab.doc.session.get(*id).is_some_and(|annot| {
+                    !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                })
             })
         })
-    });
-    let can_edit = matches!(
-        hit_kind,
-        Some(AnnotKind::Text { .. } | AnnotKind::Note { .. } | AnnotKind::Math { .. })
-    ) && !multi;
-    let can_delete = menu.hit.is_some()
-        || app.tab().is_some_and(|tab| !tab.selected.is_empty());
+    } else {
+        hit_kind.as_ref().is_some_and(|kind| {
+            !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+        })
+    };
+    let can_edit = !multi
+        && matches!(
+            hit_kind,
+            Some(AnnotKind::Text { .. } | AnnotKind::Note { .. } | AnnotKind::Math { .. })
+        );
+    let can_delete = on_annot;
+    let delete_count = if multi { selected_len } else { 1 };
+
+    let has_learning = app
+        .tab()
+        .is_some_and(|tab| tab.assistant.learning.is_some());
+    let has_text_sel = app.tab().is_some_and(|tab| tab.text_sel.is_some());
+    let copy_text = if on_annot {
+        // Annotation under the pointer (now selected) — highlight / text / note body.
+        app.copyable_selection_text()
+    } else {
+        app.copyable_selection_text()
+            .or_else(|| app.word_at_point(menu.page, menu.point))
+    };
+    // Assistant only when there is page/highlight text to work with — not for
+    // every annotation that happens to have a copyable body (text/note).
+    let on_highlight = matches!(hit_kind, Some(AnnotKind::Highlight { .. }));
+    let show_assistant_actions = has_learning
+        || has_text_sel
+        || on_highlight
+        || (!on_annot && copy_text.is_some());
+    let show_assistant_invite = !on_annot && !show_assistant_actions;
+    let show_assistant = show_assistant_actions || show_assistant_invite;
+    let can_attach_shot = has_learning || has_text_sel || on_highlight || (!on_annot && copy_text.is_some());
+
+    let header = menu_context_header(
+        hit_kind.as_ref(),
+        multi,
+        selected_len,
+        !on_annot && copy_text.is_some() && !has_text_sel && !has_learning,
+        copy_text.as_deref(),
+    );
 
     let mut action = MenuAction::None;
     let area = egui::Area::new(Id::new("marker-context"))
@@ -2652,75 +2687,79 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
-                ui.set_min_width(168.0);
-                if let Some(kind) = &hit_kind {
-                    ui.label(
-                        egui::RichText::new(annot_menu_label(kind, multi))
-                            .small()
-                            .weak(),
-                    );
+                ui.set_min_width(180.0);
+
+                if let Some(header) = &header {
+                    ui.label(egui::RichText::new(header).small().weak());
                     ui.add_space(2.0);
                 }
+
+                let mut wrote = false;
                 if can_edit {
-                    if ui.button("Edit").clicked() {
+                    if menu_item(ui, edit_menu_label(&hit_kind), None) {
                         action = MenuAction::Edit;
                     }
+                    wrote = true;
                 }
                 if can_style {
-                    if ui
-                        .button(if multi {
-                            "Style selected…"
-                        } else {
-                            "Style…"
-                        })
-                        .clicked()
-                    {
+                    if menu_item(ui, "Color & size…", None) {
                         action = MenuAction::Style;
                     }
+                    wrote = true;
                 }
-                if let Some(text) = &copy_text {
-                    let label = if text.chars().count() > 24 {
-                        "Copy text"
-                    } else {
-                        "Copy"
-                    };
-                    if ui.button(label).clicked() {
+                if copy_text.is_some() {
+                    if menu_item(ui, "Copy text", Some("Ctrl+C")) {
                         action = MenuAction::Copy;
                     }
+                    wrote = true;
                 }
                 if can_delete {
-                    if ui.button("Delete").clicked() {
+                    let label = if delete_count > 1 {
+                        format!("Delete {delete_count} annotations")
+                    } else {
+                        "Delete".into()
+                    };
+                    if menu_item(ui, &label, Some("Del")) {
                         action = MenuAction::Delete;
                     }
+                    wrote = true;
                 }
-                if hit_kind.is_some() || can_delete || copy_text.is_some() || can_style || can_edit
-                {
-                    ui.separator();
+
+                if menu.can_paste {
+                    if wrote {
+                        ui.separator();
+                    }
+                    if menu_item(ui, "Paste image", Some("Ctrl+Shift+V")) {
+                        action = MenuAction::Paste;
+                    }
+                    wrote = true;
                 }
-                if ui.button("Paste image").clicked() {
-                    action = MenuAction::Paste;
-                }
-                ui.separator();
-                ui.label(egui::RichText::new("Assistant").small().weak());
-                if has_learning || has_text_sel {
-                    if ui.button("Attach selected text").clicked() {
+
+                if show_assistant {
+                    if wrote {
+                        ui.separator();
+                    }
+                    ui.label(egui::RichText::new("Assistant").small().weak());
+                    if show_assistant_actions {
+                        if menu_item(ui, "Attach text", Some("Ctrl+Shift+A")) {
+                            action = MenuAction::AttachText;
+                        }
+                        if can_attach_shot && menu_item(ui, "Attach screenshot", None) {
+                            action = MenuAction::AttachShot;
+                        }
+                        if menu_item(ui, "Explain with Cursor", None) {
+                            action = MenuAction::Explain;
+                        }
+                        if menu_item(ui, "Look up in browser", None) {
+                            action = MenuAction::Lookup;
+                        }
+                    } else if menu_item(ui, "Select text for Assistant", Some("Ctrl+Shift+A")) {
                         action = MenuAction::AttachText;
                     }
-                    if has_learning && ui.button("Attach screenshot of selection").clicked() {
-                        action = MenuAction::AttachShot;
-                    }
-                    if (has_learning || has_text_sel) && ui.button("Explain with Cursor").clicked()
-                    {
-                        action = MenuAction::Explain;
-                    }
-                    if (has_learning || has_text_sel) && ui.button("Look up in browser").clicked() {
-                        action = MenuAction::Lookup;
-                    }
-                } else if ui.button("Select text for Assistant").clicked() {
-                    action = MenuAction::AttachText;
                 }
             });
         });
+
     // Dismiss only on primary click outside. The opening right-click is a
     // secondary `any_click` on the same frame the Area first appears (hovered
     // is still false), which would otherwise flash the menu for one frame.
@@ -2783,17 +2822,8 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             app.delete_selected();
         }
         MenuAction::AttachText => {
+            ensure_learning_from_menu(app, &menu);
             if let Some(tab) = app.tab_mut() {
-                // Prefer Select-tool text for assistant attach when present.
-                if tab.assistant.learning.is_none() {
-                    if let Some(sel) = tab.text_sel.clone() {
-                        tab.assistant.learning = Some(LearningSelection {
-                            page: sel.page,
-                            glyph_lo: sel.glyph_lo,
-                            glyph_hi: sel.glyph_hi,
-                        });
-                    }
-                }
                 tab.menu = None;
             }
             if app
@@ -2806,41 +2836,121 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             }
         }
         MenuAction::AttachShot => {
+            ensure_learning_from_menu(app, &menu);
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
             app.attach_learning_screenshot();
         }
         MenuAction::Explain => {
-            // Promote text_sel into learning selection when needed.
+            ensure_learning_from_menu(app, &menu);
             if let Some(tab) = app.tab_mut() {
-                if tab.assistant.learning.is_none() {
-                    if let Some(sel) = tab.text_sel.clone() {
-                        tab.assistant.learning = Some(LearningSelection {
-                            page: sel.page,
-                            glyph_lo: sel.glyph_lo,
-                            glyph_hi: sel.glyph_hi,
-                        });
-                    }
-                }
                 tab.menu = None;
             }
             app.explain_selection();
         }
         MenuAction::Lookup => {
+            ensure_learning_from_menu(app, &menu);
             if let Some(tab) = app.tab_mut() {
-                if tab.assistant.learning.is_none() {
-                    if let Some(sel) = tab.text_sel.clone() {
-                        tab.assistant.learning = Some(LearningSelection {
-                            page: sel.page,
-                            glyph_lo: sel.glyph_lo,
-                            glyph_hi: sel.glyph_hi,
-                        });
-                    }
-                }
                 tab.menu = None;
             }
             app.lookup_selection_in_browser();
+        }
+    }
+}
+
+fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: Option<&str>) -> bool {
+    let mut button = Button::new(label);
+    if let Some(shortcut) = shortcut {
+        button = button.shortcut_text(shortcut);
+    }
+    ui.add(button).clicked()
+}
+
+fn menu_context_header(
+    kind: Option<&AnnotKind>,
+    multi: bool,
+    selected_len: usize,
+    word_under_cursor: bool,
+    copy_text: Option<&str>,
+) -> Option<String> {
+    if multi {
+        return Some(format!("{selected_len} annotations"));
+    }
+    if let Some(kind) = kind {
+        return Some(annot_menu_label(kind).into());
+    }
+    if word_under_cursor {
+        if let Some(text) = copy_text {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let preview: String = trimmed.chars().take(28).collect();
+                let ellipsis = if trimmed.chars().count() > 28 { "…" } else { "" };
+                return Some(format!("“{preview}{ellipsis}”"));
+            }
+        }
+        return Some("Page text".into());
+    }
+    None
+}
+
+fn edit_menu_label(kind: &Option<AnnotKind>) -> &'static str {
+    match kind {
+        Some(AnnotKind::Text { .. }) => "Edit text",
+        Some(AnnotKind::Note { .. }) => "Edit note",
+        Some(AnnotKind::Math { .. }) => "Edit equation",
+        _ => "Edit",
+    }
+}
+
+/// Promote click-target text into a learning selection so Assistant actions
+/// work from highlights, Select-tool ranges, or a word under the cursor.
+fn ensure_learning_from_menu(app: &mut MarkerApp, menu: &ContextMenu) {
+    let Some(tab) = app.tab_mut() else {
+        return;
+    };
+    if tab.assistant.learning.is_some() {
+        return;
+    }
+    if let Some(sel) = tab.text_sel.clone() {
+        tab.assistant.learning = Some(LearningSelection {
+            page: sel.page,
+            glyph_lo: sel.glyph_lo,
+            glyph_hi: sel.glyph_hi,
+        });
+        return;
+    }
+    if let Some(id) = menu.hit {
+        let page = tab.doc.session.get(id).map(|annot| annot.page);
+        let quads = tab.doc.session.get(id).and_then(|annot| match &annot.kind {
+            AnnotKind::Highlight { quads, .. } => Some(quads.clone()),
+            _ => None,
+        });
+        if let (Some(page), Some(quads)) = (page, quads) {
+            if let Some(glyphs) = tab.doc.glyphs.get(&page) {
+                let indices = glyphs_intersecting_rects(glyphs, &quads);
+                if let (Some(&lo), Some(&hi)) = (indices.first(), indices.last()) {
+                    tab.assistant.learning = Some(LearningSelection {
+                        page,
+                        glyph_lo: lo,
+                        glyph_hi: hi,
+                    });
+                    return;
+                }
+            }
+        }
+    }
+    if menu.hit.is_none() {
+        if let Some(glyphs) = tab.doc.glyphs.get(&menu.page) {
+            if let Some(index) = glyph_at(glyphs, menu.point) {
+                if let Some((lo, hi)) = word_range(glyphs, index) {
+                    tab.assistant.learning = Some(LearningSelection {
+                        page: menu.page,
+                        glyph_lo: lo,
+                        glyph_hi: hi,
+                    });
+                }
+            }
         }
     }
 }
@@ -2859,10 +2969,7 @@ enum MenuAction {
     Lookup,
 }
 
-fn annot_menu_label(kind: &AnnotKind, multi: bool) -> &'static str {
-    if multi {
-        return "Selected annotations";
-    }
+fn annot_menu_label(kind: &AnnotKind) -> &'static str {
     match kind {
         AnnotKind::Highlight { .. } => "Highlight",
         AnnotKind::Text { .. } => "Text",

@@ -65,7 +65,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 
 | Key | Tool |
 | --- | --- |
-| `S` | Select text or objects, move, and resize |
+| `S` | Select text or objects (drag empty space to marquee-select by center), move, and resize |
 | `H` | Highlight |
 | `T` | Text |
 | `R` | Rectangle |

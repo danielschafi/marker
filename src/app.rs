@@ -292,7 +292,7 @@ impl Tool {
 
     pub(crate) fn hint(self) -> &'static str {
         match self {
-            Tool::Select => "Select, move, and copy",
+            Tool::Select => "Select text or objects, marquee, move, copy",
             Tool::Highlight => "Mark text",
             Tool::Text => "Write on the page",
             Tool::Rect => "Rectangle",
@@ -301,6 +301,14 @@ impl Tool {
             Tool::Math => "Equation",
         }
     }
+}
+
+/// Which selected annotation kinds a color pick should update.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ColorTarget {
+    Highlights,
+    /// Text / note / math fill and shape stroke (images ignored).
+    Ink,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2380,8 +2388,37 @@ impl MarkerApp {
     }
 
     pub(crate) fn color_controls(&mut self, ui: &mut egui::Ui) {
-        let colors = palette_for(self.tool);
-        let current = self.active_color();
+        let has_sel = self.tab().is_some_and(|tab| !tab.selected.is_empty());
+        let (show_hl, show_ink, _, _) = self.selection_style_flags();
+        // Select tool: palette follows the selection (highlight vs ink); images alone hide it.
+        let (colors, target) = if self.tool == Tool::Select && has_sel {
+            if show_hl && !show_ink {
+                (
+                    &crate::geom::HIGHLIGHT_COLORS[..],
+                    ColorTarget::Highlights,
+                )
+            } else if show_ink {
+                // Mixed or ink-only: toolbar shows ink / text color.
+                (&crate::geom::INK_COLORS[..], ColorTarget::Ink)
+            } else {
+                return;
+            }
+        } else if self.tool == Tool::Highlight {
+            (
+                palette_for(self.tool),
+                ColorTarget::Highlights,
+            )
+        } else {
+            (palette_for(self.tool), ColorTarget::Ink)
+        };
+        let current = match target {
+            ColorTarget::Highlights => self
+                .selected_highlight_color()
+                .unwrap_or(self.settings.highlight_color),
+            ColorTarget::Ink => self
+                .selected_ink_color()
+                .unwrap_or(self.active_color()),
+        };
         let mut picked = None;
         for color in colors {
             if color_dot(ui, *color, *color == current) {
@@ -2390,7 +2427,7 @@ impl MarkerApp {
         }
         if let Some(color) = picked {
             self.seal_then_arm();
-            self.apply_color(color);
+            self.apply_color_to(color, target);
             self.seal_undo();
         }
     }
@@ -2887,53 +2924,34 @@ impl MarkerApp {
 
     /// Compact icon row for the floating annotation style strip. Returns true if Delete was chosen.
     pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui) -> bool {
-        let flags = self.selection_style_flags();
-        let (highlight_palette, show_color, show_size, show_stroke) = flags;
-        let colors: &[Rgb] = if highlight_palette {
-            &crate::geom::HIGHLIGHT_COLORS
-        } else {
-            &crate::geom::INK_COLORS
-        };
-        let current = self.active_color();
+        let (show_hl, show_ink, show_size, show_stroke) = self.selection_style_flags();
 
         ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
-        if show_color {
-            // Left / Right cycles the palette while the style strip is open.
-            let cycle = ui.ctx().input(|input| {
-                if input.key_pressed(Key::ArrowRight) {
-                    Some(1isize)
-                } else if input.key_pressed(Key::ArrowLeft) {
-                    Some(-1isize)
-                } else {
-                    None
-                }
-            });
-            if let Some(delta) = cycle {
-                if let Some(idx) = colors.iter().position(|c| *c == current) {
-                    let next =
-                        (idx as isize + delta).rem_euclid(colors.len() as isize) as usize;
-                    let color = colors[next];
-                    self.seal_then_arm();
-                    self.apply_color(color);
-                    self.seal_undo();
-                } else if let Some(color) = colors.first() {
-                    self.seal_then_arm();
-                    self.apply_color(*color);
-                    self.seal_undo();
-                }
-            }
-            let current = self.active_color();
-            let mut picked = None;
-            for color in colors {
-                if color_dot(ui, *color, *color == current) {
-                    picked = Some(*color);
-                }
-            }
-            if let Some(color) = picked {
-                self.seal_then_arm();
-                self.apply_color(color);
-                self.seal_undo();
-            }
+        // Shared multi-select options: highlight color and/or text/ink color (#28).
+        // Arrow keys cycle only when a single palette is showing.
+        let cycle_ok = show_hl ^ show_ink;
+        if show_hl {
+            self.style_palette_row(
+                ui,
+                &crate::geom::HIGHLIGHT_COLORS,
+                ColorTarget::Highlights,
+                self.selected_highlight_color()
+                    .unwrap_or(self.settings.highlight_color),
+                cycle_ok,
+            );
+        }
+        if show_hl && show_ink {
+            ui.separator();
+        }
+        if show_ink {
+            self.style_palette_row(
+                ui,
+                &crate::geom::INK_COLORS,
+                ColorTarget::Ink,
+                self.selected_ink_color()
+                    .unwrap_or(self.settings.text_color),
+                cycle_ok,
+            );
         }
         if show_size {
             let mut size = self.active_text_size();
@@ -2979,6 +2997,61 @@ impl MarkerApp {
         style_step(ui, "×", "Delete annotation").clicked()
     }
 
+    fn style_palette_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        colors: &[Rgb],
+        target: ColorTarget,
+        current: Rgb,
+        allow_cycle: bool,
+    ) {
+        // Left / Right cycles the focused palette while the style strip is open.
+        let cycle = allow_cycle.then(|| {
+            ui.ctx().input(|input| {
+                if input.key_pressed(Key::ArrowRight) {
+                    Some(1isize)
+                } else if input.key_pressed(Key::ArrowLeft) {
+                    Some(-1isize)
+                } else {
+                    None
+                }
+            })
+        })
+        .flatten();
+        if let Some(delta) = cycle {
+            if let Some(idx) = colors.iter().position(|c| *c == current) {
+                let next = (idx as isize + delta).rem_euclid(colors.len() as isize) as usize;
+                let color = colors[next];
+                self.seal_then_arm();
+                self.apply_color_to(color, target);
+                self.seal_undo();
+            } else if let Some(color) = colors.first() {
+                self.seal_then_arm();
+                self.apply_color_to(*color, target);
+                self.seal_undo();
+            }
+        }
+        let current = match target {
+            ColorTarget::Highlights => self
+                .selected_highlight_color()
+                .unwrap_or(self.settings.highlight_color),
+            ColorTarget::Ink => self
+                .selected_ink_color()
+                .unwrap_or(self.settings.text_color),
+        };
+        let mut picked = None;
+        for color in colors {
+            if color_dot(ui, *color, *color == current) {
+                picked = Some(*color);
+            }
+        }
+        if let Some(color) = picked {
+            self.seal_then_arm();
+            self.apply_color_to(color, target);
+            self.seal_undo();
+        }
+    }
+
     fn active_color(&self) -> Rgb {
         if let Some(color) = self.selected_color() {
             return color;
@@ -2991,16 +3064,36 @@ impl MarkerApp {
     }
 
     fn selected_color(&self) -> Option<Rgb> {
+        self.selected_ink_color()
+            .or_else(|| self.selected_highlight_color())
+    }
+
+    fn selected_highlight_color(&self) -> Option<Rgb> {
         let tab = self.tab()?;
-        let annot = tab.doc.session.get(tab.primary_selected()?)?;
-        Some(match &annot.kind {
-            AnnotKind::Highlight { color, .. }
-            | AnnotKind::Text { color, .. }
-            | AnnotKind::Note { color, .. }
-            | AnnotKind::Math { color, .. } => *color,
-            AnnotKind::Shape { stroke, .. } => *stroke,
-            AnnotKind::Image { .. } | AnnotKind::Future(_) => return None,
-        })
+        for id in &tab.selected {
+            if let Some(AnnotKind::Highlight { color, .. }) =
+                tab.doc.session.get(*id).map(|a| &a.kind)
+            {
+                return Some(*color);
+            }
+        }
+        None
+    }
+
+    fn selected_ink_color(&self) -> Option<Rgb> {
+        let tab = self.tab()?;
+        for id in &tab.selected {
+            match tab.doc.session.get(*id).map(|a| &a.kind) {
+                Some(
+                    AnnotKind::Text { color, .. }
+                    | AnnotKind::Note { color, .. }
+                    | AnnotKind::Math { color, .. },
+                ) => return Some(*color),
+                Some(AnnotKind::Shape { stroke, .. }) => return Some(*stroke),
+                _ => {}
+            }
+        }
+        None
     }
 
     fn active_text_size(&self) -> f32 {
@@ -3054,7 +3147,7 @@ impl MarkerApp {
         })
     }
 
-    /// (highlight_palette, show_color, show_size, show_stroke) for the current selection.
+    /// (show_highlight_color, show_ink/text_color, show_size, show_stroke) for the selection.
     fn selection_style_flags(&self) -> (bool, bool, bool, bool) {
         let Some(tab) = self.tab() else {
             return (false, false, false, false);
@@ -3079,12 +3172,10 @@ impl MarkerApp {
                 Some(AnnotKind::Image { .. } | AnnotKind::Future(_)) | None => {}
             }
         }
-        // Prefer highlight swatches when any highlight is selected.
-        let show_color = highlight || ink;
-        (highlight, show_color, size, stroke)
+        (highlight, ink, size, stroke)
     }
 
-    fn apply_color(&mut self, color: Rgb) {
+    fn apply_color_to(&mut self, color: Rgb, target: ColorTarget) {
         let mut kind_bucket = None;
         let mut math_ids = Vec::new();
         let ids = self
@@ -3095,25 +3186,28 @@ impl MarkerApp {
             for id in ids {
                 let mut touched = None;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
-                    match &mut annot.kind {
-                        AnnotKind::Highlight { color: slot, .. } => {
+                    match (&mut annot.kind, target) {
+                        (AnnotKind::Highlight { color: slot, .. }, ColorTarget::Highlights) => {
                             *slot = color;
                             touched = Some(0);
                         }
-                        AnnotKind::Text { color: slot, .. }
-                        | AnnotKind::Note { color: slot, .. }
-                        | AnnotKind::Math { color: slot, .. } => {
+                        (
+                            AnnotKind::Text { color: slot, .. }
+                            | AnnotKind::Note { color: slot, .. }
+                            | AnnotKind::Math { color: slot, .. },
+                            ColorTarget::Ink,
+                        ) => {
                             *slot = color;
                             touched = Some(1);
                             if matches!(annot.kind, AnnotKind::Math { .. }) {
                                 math_ids.push(id);
                             }
                         }
-                        AnnotKind::Shape { stroke, .. } => {
+                        (AnnotKind::Shape { stroke, .. }, ColorTarget::Ink) => {
                             *stroke = color;
                             touched = Some(2);
                         }
-                        AnnotKind::Image { .. } | AnnotKind::Future(_) => {}
+                        _ => {}
                     }
                 }
                 if let Some(bucket) = touched {
@@ -3130,10 +3224,12 @@ impl MarkerApp {
         for id in math_ids {
             self.queue_math(id);
         }
-        match kind_bucket.unwrap_or(match self.tool {
-            Tool::Highlight => 0,
-            Tool::Rect | Tool::Ellipse | Tool::Line => 2,
-            _ => 1,
+        match kind_bucket.unwrap_or(match target {
+            ColorTarget::Highlights => 0,
+            ColorTarget::Ink => match self.tool {
+                Tool::Rect | Tool::Ellipse | Tool::Line => 2,
+                _ => 1,
+            },
         }) {
             0 => self.settings.highlight_color = color,
             2 => self.settings.shape_color = color,

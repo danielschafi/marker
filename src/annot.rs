@@ -270,6 +270,18 @@ impl Session {
             .map(|a| a.id)
     }
 
+    /// Select-tool marquee: ids on `page` whose bounds center lies inside `rect`.
+    pub fn ids_centered_in(&self, page: usize, rect: PdfRect) -> Vec<u64> {
+        self.annotations
+            .iter()
+            .filter(|annot| annot.page == page)
+            .filter_map(|annot| {
+                let bounds = annot.bounds()?;
+                rect.contains(bounds.center()).then_some(annot.id)
+            })
+            .collect()
+    }
+
     pub fn is_dirty(&self) -> bool {
         !self.pending_deletes.is_empty() || self.annotations.iter().any(|a| a.dirty)
     }
@@ -526,6 +538,68 @@ mod tests {
         let restored = restore_session(&session, before);
         assert!(restored.annotations.is_empty());
         assert_eq!(restored.pending_deletes, vec![(0, 9)]);
+    }
+
+    #[test]
+    fn marquee_selects_by_center_point() {
+        let mut session = Session::new();
+        // Center (25, 25) — inside marquee.
+        let inside = session.insert(
+            0,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 50.0, 50.0),
+                content: "in".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        // Overlaps marquee but center (75, 25) is outside.
+        let _overlap = session.insert(
+            0,
+            AnnotKind::Shape {
+                kind: ShapeKind::Rect,
+                rect: PdfRect::new(50.0, 0.0, 100.0, 50.0),
+                start: PdfPoint::new(50.0, 0.0),
+                end: PdfPoint::new(100.0, 50.0),
+                stroke: Rgb::new(0, 0, 0),
+                fill: None,
+                width: 1.0,
+            },
+        );
+        // Far away.
+        let _out = session.insert(
+            0,
+            AnnotKind::Text {
+                rect: PdfRect::new(200.0, 200.0, 220.0, 220.0),
+                content: "out".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        // Image whose center is inside — selectable for move/delete.
+        let image = session.insert(
+            0,
+            AnnotKind::Image {
+                rect: PdfRect::new(10.0, 10.0, 30.0, 30.0),
+                rgba: std::sync::Arc::from([0u8; 4].as_slice()),
+                width: 1,
+                height: 1,
+            },
+        );
+        // Same geometry, other page — ignored.
+        let _other_page = session.insert(
+            1,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 50.0, 50.0),
+                content: "page1".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+
+        let marquee = PdfRect::new(0.0, 0.0, 60.0, 60.0);
+        assert_eq!(session.ids_centered_in(0, marquee), vec![inside, image]);
+        assert!(session.ids_centered_in(0, PdfRect::new(90.0, 90.0, 95.0, 95.0)).is_empty());
     }
 
     #[test]

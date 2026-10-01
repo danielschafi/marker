@@ -928,7 +928,7 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool)
             Drag::Highlight {
                 anchor: Some(_), ..
             }
-            |             Drag::LearningSelect {
+            | Drag::LearningSelect {
                 anchor: Some(_), ..
             }
             | Drag::TextSelect {
@@ -1193,24 +1193,20 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 let Some(tab) = app.tab_mut() else {
                     return;
                 };
-                let mut ids = Vec::new();
-                for annot in &tab.doc.session.annotations {
-                    if annot.page != page {
-                        continue;
-                    }
-                    if let Some(bounds) = annot.bounds() {
-                        if rect.contains(bounds.center()) {
-                            ids.push(annot.id);
-                        }
-                    }
-                }
+                let ids = tab.doc.session.ids_centered_in(page, rect);
                 tab.text_sel = None;
                 tab.select_many(ids);
-                tab.primary_selected().filter(|&id| {
-                    tab.doc.session.get(id).is_some_and(|annot| {
-                        !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                // Prefer anchoring the style strip on a colorable item; images still
+                // get a delete-only strip when they are the whole selection.
+                tab.selected
+                    .iter()
+                    .copied()
+                    .find(|&id| {
+                        tab.doc.session.get(id).is_some_and(|annot| {
+                            !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                        })
                     })
-                })
+                    .or_else(|| tab.primary_selected())
             };
             if let Some(id) = style_id {
                 app.open_style_bar(id, false);
@@ -2387,7 +2383,8 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
 
     // Prefer just below the mark; flip above if that would leave the view.
     let mut pos = Pos2::new(mark.center().x, mark.bottom() + 6.0);
-    let estimated = Vec2::new(168.0, 28.0);
+    // Dual palettes (highlight + ink) need a bit more width when both show.
+    let estimated = Vec2::new(260.0, 28.0);
     if pos.y + estimated.y > view.bottom() - 4.0 {
         pos.y = mark.top() - estimated.y - 6.0;
     }

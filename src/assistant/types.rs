@@ -76,8 +76,14 @@ pub struct PendingCrop {
     pub rect: PdfRect,
 }
 
+/// Per-tab Cursor assistant state.
+///
+/// `chat_id` is the resumable session handle (#27). Hiding the panel must not
+/// clear it; only [`Self::new_chat`], dropping the tab, or process exit ends
+/// the local session. See `assistant::session`.
 #[derive(Default)]
 pub struct TabAssistant {
+    /// Cursor chat id from `agent create-chat`; reused with `--resume` on later turns.
     pub chat_id: Option<String>,
     pub turns: Vec<AssistantTurn>,
     pub draft: String,
@@ -96,6 +102,7 @@ pub struct TabAssistant {
 }
 
 impl TabAssistant {
+    /// End the local session. Does not delete Cursor-side chat history.
     pub fn new_chat(&mut self) {
         self.chat_id = None;
         self.turns.clear();
@@ -106,6 +113,14 @@ impl TabAssistant {
         self.error = None;
         self.status_line = None;
         self.pending_crop = None;
+    }
+
+    /// Chat id to pass into the next worker turn (`None` → `create-chat`).
+    pub fn resume_chat_id(&self) -> Option<String> {
+        self.chat_id
+            .as_ref()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
     }
 
     pub fn bump_seq(&mut self) -> u64 {

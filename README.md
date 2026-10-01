@@ -99,6 +99,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | Right-click title or tab in list | Split side-by-side / stacked / with…, unsplit, or move to a new window |
 | `Ctrl+\` / `Ctrl+Shift+\` | Toggle side-by-side / stacked split with next tab |
 | `Ctrl+Alt+\` | Focus the other split pane |
+| `Ctrl+Alt+I` | Toggle Cursor assistant (hiding keeps the chat session) |
 | `Ctrl+=` / `Ctrl+-` | Zoom in / out |
 | `Ctrl+0` | Fit width, then fit height |
 | `Ctrl+G` | Jump to a page |

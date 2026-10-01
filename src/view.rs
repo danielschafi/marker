@@ -2158,7 +2158,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                     ui.horizontal(|ui| {
                         ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
                         ui.label(
-                            egui::RichText::new("Shift+Tab cycles templates · math mode")
+                            egui::RichText::new("Tab / Shift+Tab cycle templates · math mode")
                                 .weak()
                                 .size(10.0),
                         );
@@ -2168,27 +2168,31 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                             .font(FontId::new(13.0, FontFamily::Monospace))
                             .desired_width(screen.width().max(280.0))
                             .desired_rows(3)
-                            .hint_text(r"\frac{1}{2}  or  Shift+Tab for templates"),
+                            .hint_text(r"\frac{1}{2}  or  Tab for templates"),
                     );
                     if focus {
                         response.request_focus();
                     }
                     changed = response.changed();
                     if response.has_focus() {
-                        // Tab keeps normal focus traversal; Shift+Tab cycles presets.
-                        let tabbed = ui.input_mut(|input| {
-                            if input.key_pressed(egui::Key::Tab)
-                                && input.modifiers.shift
-                                && !input.modifiers.command
-                            {
-                                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
-                                true
-                            } else {
-                                false
+                        // While editing math, Tab / Shift+Tab cycle presets (not focus).
+                        // Ctrl+Tab is left alone for document-tab switching. Focus is
+                        // reclaimed below after egui's default Tab traversal runs.
+                        let cycle = ui.input_mut(|input| {
+                            if !input.key_pressed(egui::Key::Tab) || input.modifiers.command {
+                                return None;
                             }
+                            let backward = input.modifiers.shift;
+                            if backward {
+                                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                            } else {
+                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                            }
+                            Some(if backward { -1 } else { 1 })
                         });
-                        if tabbed {
-                            *source = crate::math::cycle_math_template(source).to_string();
+                        if let Some(delta) = cycle {
+                            *source =
+                                crate::math::cycle_math_template_by(source, delta).to_string();
                             changed = true;
                             cycled = true;
                         }
@@ -2216,7 +2220,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 app.queue_math(id);
             }
             if cycled {
-                // Keep focus after replacing the source via Shift+Tab.
+                // Keep focus after replacing the source via Tab / Shift+Tab.
                 if let Some(tab) = app.tab_mut() {
                     tab.focus_edit = true;
                     tab.editing = Some(id);

@@ -9,7 +9,7 @@ Marker is a desktop PDF annotator written in Rust with
 ## Features
 
 - Highlight text; add text, rectangles, ellipses, and lines.
-- Typeset math annotations with Typst.
+- Typeset math annotations from LaTeX via Typst (see [Math / LaTeX](#math--latex)).
 - Paste images directly from the system clipboard.
 - Work across tabs with document outlines, search, and recent files.
 - Navigate with the mouse, trackpad, page keys, or Vim-style motions.
@@ -84,6 +84,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `N` / `Shift+N` | Next / previous search result |
 | `Ctrl+W` | Close the current tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Switch tabs |
+| `Tab` / `Shift+Tab` | Cycle math templates (while editing a math annotation) |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Shift+B` | Show or hide the tools strip |
@@ -100,6 +101,29 @@ Vim-style navigation uses `J`/`K` to pan vertically and `L`/`Shift+L` to pan
 horizontally (`H` is Highlight), plus `Ctrl+U`/`Ctrl+D` for half-page movement,
 `gg` for the first page, and `G` for the last. Numeric counts work with these
 motions.
+
+### Math / LaTeX
+
+Math annotations accept a LaTeX math subset (converted with
+[MiTeX](https://github.com/mitex-rs/mitex), rendered with Typst). Wrappers like
+`$...$`, `$$...$$`, `\(...\)`, and `\[...\]` are stripped automatically.
+
+While the math editor is focused, **Tab** / **Shift+Tab** cycle starter
+templates (fraction, quadratic formula, `aligned`, `bmatrix`, …). Click away or
+press Escape to leave the field; **Ctrl+Tab** still switches document tabs.
+
+**Supported (common constructs):**
+
+- Fractions: `\frac{a}{b}`
+- Roots: `\sqrt{x}`, `\sqrt[n]{x}`
+- Greek letters, superscripts/subscripts, `\pm`, `\dots`, `\vdots`, `\ddots`
+- Matrices: `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`
+- Alignment: `aligned`, `align`, `gathered`, `gather`, `split` (and `*at` variants)
+- Styling helpers: `\mathbf{...}`, `\operatorname{...}`, `\overbrace{...}`, `\underbrace{...}`
+
+**Known gaps:** full LaTeX packages, custom macros, and MiTeX helpers without a
+native Typst rewrite may fail to compile. Prefer the templates or the commands
+above for reliable results.
 
 ## Configuration
 

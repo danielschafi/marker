@@ -10,3 +10,8 @@ Categories=Office;Viewer;
 MimeType=application/pdf;
 Keywords=pdf;annotate;markup;
 StartupNotify=true
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=Open in New Window
+Exec=marker --new-window %F

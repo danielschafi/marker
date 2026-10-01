@@ -1,5 +1,12 @@
 use crate::geom::{dist_to_segment, PdfPoint, PdfRect, Rgb};
 
+/// Marker-tint opacity for highlights (~0.45).
+///
+/// On-screen fills underpaint page tiles at this alpha; saved PDF Highlight
+/// annotations use the same CA and MuPDF's Multiply appearance so ink stays
+/// readable in both places.
+pub const HIGHLIGHT_OPACITY: f32 = 0.45;
+
 /// One selectable glyph. Highlights snap to these instead of whole words.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {

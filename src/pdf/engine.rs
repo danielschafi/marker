@@ -13,7 +13,7 @@ use mupdf::{
     Pixmap, Point, Quad, Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
 };
 
-use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind};
+use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind, HIGHLIGHT_OPACITY};
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 
 pub const TILE_PX: i32 = 1024;
@@ -951,7 +951,7 @@ fn apply_existing(
             }
             annot.set_quad_points(pdf_quads)?;
             annot.set_color(rgb_color(*color))?;
-            annot.set_opacity(0.45)?;
+            annot.set_opacity(HIGHLIGHT_OPACITY)?;
             if let Some(bounds) = source.kind.bounds() {
                 annot.set_rect(to_rect(bounds))?;
             }
@@ -1098,7 +1098,7 @@ fn create_annot(
             }
             let mut annot = page.add_highlight_annotation(pdf_quads).map_err(show)?;
             annot.set_color(rgb_color(*color)).map_err(show)?;
-            annot.set_opacity(0.45).map_err(show)?;
+            annot.set_opacity(HIGHLIGHT_OPACITY).map_err(show)?;
             write_marker(
                 doc,
                 &annot,
@@ -1641,5 +1641,73 @@ mod tests {
     #[test]
     fn knock_out_paper_chromatic_midtone_stays_opaque() {
         assert_eq!(knock_out_paper(100, 150, 180), (100, 150, 180, 255));
+    }
+
+    /// Simulates on-screen underpaint: marker tint on white, then knocked-out ink on top.
+    fn underpaint_composite(paper_rgb: (u8, u8, u8), marker: Rgb) -> (u8, u8, u8) {
+        let (ink_r, ink_g, ink_b, ink_a) = knock_out_paper(paper_rgb.0, paper_rgb.1, paper_rgb.2);
+        let ma = HIGHLIGHT_OPACITY.clamp(0.0, 1.0);
+        // Marker over white paper.
+        let base_r = marker.r as f32 * ma + 255.0 * (1.0 - ma);
+        let base_g = marker.g as f32 * ma + 255.0 * (1.0 - ma);
+        let base_b = marker.b as f32 * ma + 255.0 * (1.0 - ma);
+        let ia = ink_a as f32 / 255.0;
+        let out_r = ink_r as f32 * ia + base_r * (1.0 - ia);
+        let out_g = ink_g as f32 * ia + base_g * (1.0 - ia);
+        let out_b = ink_b as f32 * ia + base_b * (1.0 - ia);
+        (out_r.round() as u8, out_g.round() as u8, out_b.round() as u8)
+    }
+
+    #[test]
+    fn underpaint_keeps_black_ink_dark_and_marker_visible() {
+        let yellow = Rgb::new(255, 214, 0);
+        let on_ink = underpaint_composite((0, 0, 0), yellow);
+        let luminance =
+            0.2126 * on_ink.0 as f32 + 0.7152 * on_ink.1 as f32 + 0.0722 * on_ink.2 as f32;
+        assert!(
+            luminance < 40.0,
+            "black ink over marker should stay dark, got {on_ink:?} lum={luminance}"
+        );
+
+        let on_paper = underpaint_composite((255, 255, 255), yellow);
+        assert!(
+            on_paper.0 > 220 && on_paper.1 > 200 && on_paper.2 < on_paper.1,
+            "paper underpaint should read as yellow marker tint, got {on_paper:?}"
+        );
+    }
+
+    #[test]
+    fn saved_highlight_appearance_uses_multiply_blend() {
+        let dir = std::env::temp_dir().join(format!("marker-hl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("highlight.pdf");
+        sample_pdf(&path);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let glyphs = engine.glyphs(0).unwrap();
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Highlight {
+                quads: glyphs.iter().map(|g| g.bounds).collect(),
+                color: Rgb::new(255, 214, 0),
+            },
+        );
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+            })
+            .unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("/Multiply") || text.contains("/BM/Multiply"),
+            "saved Highlight appearance should use Multiply blend mode"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

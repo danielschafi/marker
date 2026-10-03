@@ -153,7 +153,7 @@ pub(crate) struct Tab {
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
     pub(crate) menu: Option<ContextMenu>,
-    /// Compact color/size strip next to an annotation (right-click or just after create).
+    /// Compact color/size strip next to an annotation (e.g. just after create).
     pub(crate) style_bar: Option<StyleBar>,
     pending_undo: Option<Session>,
     undo_edit: Option<u64>,
@@ -3288,8 +3288,8 @@ impl MarkerApp {
         }
     }
 
-    /// Compact icon row for the floating annotation style strip. Returns true if Delete was chosen.
-    pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Compact icon row for annotation color/size. Returns true if Delete was chosen.
+    pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui, show_delete: bool) -> bool {
         let (show_hl, show_ink, show_size, show_stroke) = self.selection_style_flags();
 
         ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
@@ -3359,8 +3359,12 @@ impl MarkerApp {
                 self.seal_undo();
             }
         }
-        ui.add_space(4.0);
-        style_step(ui, "×", "Delete annotation").clicked()
+        if show_delete {
+            ui.add_space(4.0);
+            style_step(ui, "×", "Delete annotation").clicked()
+        } else {
+            false
+        }
     }
 
     fn style_palette_row(

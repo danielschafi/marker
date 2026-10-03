@@ -1268,7 +1268,9 @@ fn select_glyphs_at_point(
                 .doc
                 .session
                 .insert(page, AnnotKind::Highlight { quads, color });
-            tab.select_only(id);
+            // Leave the new mark unselected so the user can keep highlighting.
+            tab.selected.clear();
+            tab.text_sel = None;
             if let Some(w) = word {
                 // Remember single-glyph marks so a quick second click can upgrade to the word.
                 let remembered = (!whole_word).then_some(id);
@@ -1280,7 +1282,6 @@ fn select_glyphs_at_point(
                 };
             }
             app.seal_undo();
-            app.open_style_bar(id, true);
             true
         }
     }
@@ -1418,7 +1419,9 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 .doc
                 .session
                 .insert(page, AnnotKind::Highlight { quads, color });
-            tab.select_only(id);
+            // Leave the new mark unselected so the user can keep highlighting.
+            tab.selected.clear();
+            tab.text_sel = None;
             if let Some(glyphs) = tab.doc.glyphs.get(&page) {
                 if let Some(index) = anchor.or(current) {
                     if let Some(glyph) = glyphs.get(index) {
@@ -1433,7 +1436,6 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 };
             }
             app.seal_undo();
-            app.open_style_bar(id, true);
         }
         Drag::Shape {
             page,
@@ -2904,7 +2906,7 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 .inner_margin(egui::Margin::symmetric(6, 4))
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        delete = app.style_bar_contents(ui);
+                        delete = app.style_bar_contents(ui, true);
                     });
                 });
         });
@@ -3043,9 +3045,13 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                     wrote = true;
                 }
                 if can_style {
-                    if menu_item(ui, "Color & size…", None) {
-                        action = MenuAction::Style;
+                    if wrote {
+                        ui.separator();
                     }
+                    ui.label(egui::RichText::new("Format").small().weak());
+                    ui.horizontal(|ui| {
+                        let _ = app.style_bar_contents(ui, false);
+                    });
                     wrote = true;
                 }
                 if copy_text.is_some() {
@@ -3127,15 +3133,6 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             }
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
-            }
-        }
-        MenuAction::Style => {
-            let id = menu.hit.or_else(|| app.tab().and_then(|tab| tab.primary_selected()));
-            if let Some(tab) = app.tab_mut() {
-                tab.menu = None;
-            }
-            if let Some(id) = id {
-                app.open_style_bar(id, false);
             }
         }
         MenuAction::Edit => {
@@ -3301,7 +3298,6 @@ enum MenuAction {
     None,
     Paste,
     Copy,
-    Style,
     Edit,
     Delete,
     AttachText,

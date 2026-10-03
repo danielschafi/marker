@@ -1849,8 +1849,14 @@ fn outline_node(
     jump: &mut Option<(usize, Option<f32>)>,
 ) {
     if node.children.is_empty() {
+        let available = ui.available_width();
         if ui
-            .add(Button::new(&node.title).frame(false).wrap())
+            .add(
+                Button::new(&node.title)
+                    .frame(false)
+                    .wrap()
+                    .min_size(Vec2::new(available, 0.0)),
+            )
             .clicked()
         {
             if let Some(page) = node.page {
@@ -1859,18 +1865,39 @@ fn outline_node(
         }
         return;
     }
-    let header = egui::CollapsingHeader::new(&node.title)
-        .default_open(depth < 1)
-        .show(ui, |ui| {
-            for child in &node.children {
-                outline_node(ui, child, depth + 1, jump);
-            }
-        });
-    if header.header_response.clicked() {
+
+    let id = ui.make_persistent_id((
+        "outline-node",
+        depth,
+        node.page,
+        node.y.map(f32::to_bits),
+        &node.title,
+    ));
+    let mut state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, depth < 1);
+    let header = ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let toggle =
+            state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+        let title = ui.add(
+            Button::new(&node.title)
+                .frame(false)
+                .wrap()
+                .min_size(Vec2::new(ui.available_width(), 0.0)),
+        );
+        (toggle, title)
+    });
+    if header.inner.1.clicked() {
+        state.toggle(ui);
         if let Some(page) = node.page {
             *jump = Some((page, node.y));
         }
     }
+    state.show_body_indented(&header.response, ui, |ui| {
+        for child in &node.children {
+            outline_node(ui, child, depth + 1, jump);
+        }
+    });
 }
 
 fn chrome_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {

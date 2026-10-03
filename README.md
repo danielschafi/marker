@@ -46,6 +46,22 @@ cargo build --release
 ./target/release/marker document.pdf
 ```
 
+### Linux: install as default PDF app
+
+Build a release binary, install it under `~/.local`, register the desktop entry,
+and set Marker as the default handler for `application/pdf`:
+
+```sh
+./packaging/install-local.sh
+```
+
+Re-run the same command after pulling changes to rebuild and update the
+installed binary. To install a binary you already built, pass its path:
+
+```sh
+./packaging/install-local.sh ./target/release/marker
+```
+
 ### Linux dependencies
 
 The current MuPDF configuration links its codec and font libraries through

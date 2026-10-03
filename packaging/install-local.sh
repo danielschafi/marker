@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
-# Install Marker into the user prefix for the Omarchy/desktop app picker.
+# Build Marker (release) and install it as the user-local default PDF app.
+#
+# Usage:
+#   ./packaging/install-local.sh              # cargo build --release, then install
+#   ./packaging/install-local.sh /path/to/bin # install a specific binary (skip build)
+#
+# Installs into ${PREFIX:-$HOME/.local}: binary, .desktop entry, icon, and
+# sets application/pdf → marker.desktop via xdg-mime.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -10,13 +17,12 @@ icon_dir="$prefix/share/icons/hicolor/scalable/apps"
 
 binary="${1:-}"
 if [[ -z "$binary" ]]; then
-  if [[ -x "$root/target/release/marker" ]]; then
-    binary="$root/target/release/marker"
-  else
-    echo "usage: $0 [path-to-marker-binary]" >&2
-    echo "or build first: cargo build --release" >&2
-    exit 1
-  fi
+  echo "Building release binary..."
+  cargo build --release --manifest-path "$root/Cargo.toml"
+  binary="$root/target/release/marker"
+elif [[ ! -x "$binary" ]]; then
+  echo "error: not an executable: $binary" >&2
+  exit 1
 fi
 
 install -d "$bin_dir" "$app_dir" "$icon_dir"

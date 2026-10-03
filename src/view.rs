@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use egui::text::CCursor;
+use egui::text_selection::CCursorRange;
 use egui::{
     Button, Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke,
     TextEdit, Vec2,
@@ -14,6 +16,7 @@ use crate::app::{
 };
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
+use crate::math_spans::{self, LaidRun};
 use crate::pdf::{PageInfo, TILE_PX};
 use crate::theme;
 
@@ -1867,14 +1870,27 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                 if !editing {
                     let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
                     let text_painter = painter.with_clip_rect(screen);
-                    paint_wrapped(
-                        &text_painter,
-                        painter.ctx(),
-                        screen,
-                        content,
-                        *size * tab.doc.scale,
-                        color.to_color32(),
-                    );
+                    if math_spans::has_math(content) {
+                        paint_rich_text(
+                            &text_painter,
+                            painter.ctx(),
+                            tab,
+                            annot.id,
+                            screen,
+                            content,
+                            *size,
+                            color.to_color32(),
+                        );
+                    } else {
+                        paint_wrapped(
+                            &text_painter,
+                            painter.ctx(),
+                            screen,
+                            content,
+                            *size * tab.doc.scale,
+                            color.to_color32(),
+                        );
+                    }
                 }
             }
             AnnotKind::Note { rect, color, .. } => {
@@ -2192,6 +2208,428 @@ fn paint_wrapped(
     painter.galley(rect.min, galley, color);
 }
 
+fn paint_rich_text(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    tab: &Tab,
+    annot_id: u64,
+    screen: Rect,
+    content: &str,
+    size_pt: f32,
+    color: Color32,
+) {
+    let scale = tab.doc.scale;
+    let font_px = (size_pt * scale).max(8.0);
+    let line_height = font_px * 1.25;
+    let max_w = screen.width().max(8.0);
+    let measure_prose = |text: &str| {
+        if text.is_empty() {
+            return (0.0, line_height);
+        }
+        ctx.fonts_mut(|fonts| {
+            let galley = fonts.layout_no_wrap(
+                text.to_owned(),
+                FontId::new(font_px, FontFamily::Proportional),
+                color,
+            );
+            (galley.size().x, galley.size().y.max(line_height))
+        })
+    };
+    let measure_math = |inner: &str, display: bool| {
+        let key = math_spans::span_key(inner, display);
+        if let Some(preview) = tab.inline_previews.get(&(annot_id, key)) {
+            if preview.width_pt > 1.0 && preview.height_pt > 1.0 {
+                return (preview.width_pt * scale, preview.height_pt * scale);
+            }
+        }
+        let w = (inner.len() as f32 * font_px * 0.45)
+            .max(font_px)
+            .min(max_w);
+        let h = if display {
+            font_px * 1.8
+        } else {
+            font_px * 1.2
+        };
+        (w, h)
+    };
+    let (runs, _) = math_spans::layout_runs(
+        content,
+        max_w,
+        line_height,
+        &measure_prose,
+        &measure_math,
+    );
+    for run in runs {
+        match run {
+            LaidRun::Prose { text, x, y, .. } => {
+                if text.is_empty() {
+                    continue;
+                }
+                let galley = ctx.fonts_mut(|fonts| {
+                    fonts.layout_no_wrap(
+                        text,
+                        FontId::new(font_px, FontFamily::Proportional),
+                        color,
+                    )
+                });
+                painter.galley(
+                    Pos2::new(screen.min.x + x, screen.min.y + y),
+                    galley,
+                    color,
+                );
+            }
+            LaidRun::Math {
+                inner,
+                display,
+                key,
+                x,
+                y,
+                w,
+                h,
+            } => {
+                let dest = Rect::from_min_size(
+                    Pos2::new(screen.min.x + x, screen.min.y + y),
+                    Vec2::new(w, h),
+                );
+                if let Some(preview) = tab.inline_previews.get(&(annot_id, key)) {
+                    if let Some(texture) = preview.texture.as_ref() {
+                        let fitted = fit_math(dest, preview.width_pt, preview.height_pt, scale);
+                        painter.image(
+                            texture.id(),
+                            fitted,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            Color32::WHITE,
+                        );
+                        continue;
+                    }
+                }
+                let fallback = if display {
+                    format!("$${inner}$$")
+                } else {
+                    format!("${inner}$")
+                };
+                paint_wrapped(painter, ctx, dest, &fallback, font_px * 0.85, color);
+            }
+        }
+    }
+}
+
+fn edit_text_annot(
+    app: &mut MarkerApp,
+    ctx: &egui::Context,
+    view: Rect,
+    id: u64,
+    page: usize,
+    gen: u64,
+    scale: f32,
+    focus: bool,
+    rect: PdfRect,
+    size: f32,
+    color: crate::geom::Rgb,
+) {
+    let screen = {
+        let Some(tab) = app.tab() else {
+            return;
+        };
+        pdf_rect_screen(&tab.doc, page, rect, view)
+    };
+    let area_id = Id::new(("marker-text-area", gen, id));
+    let text_edit_id = Id::new(("marker-text", gen, id));
+    let mut changed = false;
+    let mut height = screen.height();
+    let mut caret: Option<usize> = None;
+    let mut exit_math = false;
+    let mut queue_keys: Vec<u64> = Vec::new();
+
+    // Apply pending caret from a previous Tab exit before showing the editor.
+    if let Some(tab) = app.tab_mut() {
+        if let Some(byte) = tab.pending_text_caret.take() {
+            if let Some(AnnotKind::Text { content, .. }) =
+                tab.doc.session.get(id).map(|annot| &annot.kind)
+            {
+                let index = byte_to_char_index(content, byte);
+                let mut state = TextEdit::load_state(ctx, text_edit_id).unwrap_or_default();
+                state
+                    .cursor
+                    .set_char_range(Some(CCursorRange::one(CCursor::new(index))));
+                state.store(ctx, text_edit_id);
+                tab.inline_math_edit = None;
+            }
+        }
+    }
+
+    egui::Area::new(area_id)
+        .order(egui::Order::Foreground)
+        .fixed_pos(screen.min)
+        .constrain(false)
+        .show(ctx, |ui| {
+            ui.set_max_width(screen.width().max(24.0));
+            let Some(tab) = app.tab_mut() else {
+                return;
+            };
+            let Some(AnnotKind::Text { content, .. }) =
+                tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
+            else {
+                return;
+            };
+            let output = TextEdit::multiline(content)
+                .font(FontId::new(
+                    (size * scale).max(8.0),
+                    FontFamily::Proportional,
+                ))
+                .text_color(color.to_color32())
+                .desired_width(screen.width().max(24.0))
+                .desired_rows(1)
+                .frame(false)
+                .margin(egui::Margin::ZERO)
+                .id(text_edit_id)
+                .show(ui);
+            if focus {
+                output.response.request_focus();
+            }
+            changed = output.response.changed();
+            height = output.response.rect.height().max(size * scale);
+            if let Some(range) = output.cursor_range {
+                let cc = range.primary.index;
+                caret = Some(char_index_to_byte(content, cc));
+            }
+        });
+
+    // Resolve which math span is active (live caret or sticky overlay edit).
+    let active_span = {
+        let tab = app.tab();
+        tab.and_then(|tab| {
+            let AnnotKind::Text { content, .. } = &tab.doc.session.get(id)?.kind else {
+                return None;
+            };
+            if let Some(byte) = caret {
+                if let Some(span) = math_spans::math_span_at(content, byte) {
+                    return Some(span);
+                }
+            }
+            if let Some((edit_id, start)) = tab.inline_math_edit {
+                if edit_id == id {
+                    return math_spans::math_span_at(content, start)
+                        .filter(|span| span.start == start);
+                }
+            }
+            None
+        })
+    };
+
+    if let Some(span) = active_span.as_ref() {
+        if let Some(tab) = app.tab_mut() {
+            tab.inline_math_edit = Some((id, span.start));
+        }
+    } else if let Some(tab) = app.tab_mut() {
+        if tab.inline_math_edit.is_some_and(|(edit_id, _)| edit_id == id) {
+            tab.inline_math_edit = None;
+        }
+    }
+
+    let mut math_changed = false;
+    let mut active_key: Option<u64> = None;
+    if let Some(span) = active_span {
+        let (mut inner, key, display, span_start) = {
+            let Some(tab) = app.tab() else {
+                return;
+            };
+            let Some(AnnotKind::Text { content, .. }) =
+                tab.doc.session.get(id).map(|annot| &annot.kind)
+            else {
+                return;
+            };
+            let inner = content[span.inner_start..span.inner_end].to_string();
+            let key = math_spans::span_key(&inner, span.display);
+            (inner, key, span.display, span.start)
+        };
+        active_key = Some(key);
+        let (overlay_error, preview_tex) = {
+            let Some(tab) = app.tab() else {
+                return;
+            };
+            let preview = tab.inline_previews.get(&(id, key));
+            (
+                preview.and_then(|p| p.error.clone()),
+                preview.and_then(|p| {
+                    p.texture
+                        .clone()
+                        .map(|texture| (texture, p.width_pt, p.height_pt))
+                }),
+            )
+        };
+        egui::Area::new(Id::new(("marker-inline-math", gen, id, span_start)))
+            .order(egui::Order::Foreground)
+            .fixed_pos(Pos2::new(screen.min.x, screen.max.y + 4.0))
+            .constrain(false)
+            .show(ctx, |ui| {
+                ui.set_max_width(screen.width().max(220.0).max(280.0));
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
+                    ui.label(
+                        egui::RichText::new(if display {
+                            "$$…$$ · Tab to continue"
+                        } else {
+                            "$…$ · Tab to continue"
+                        })
+                        .weak()
+                        .size(10.0),
+                    );
+                });
+                if let Some((texture, w_pt, h_pt)) = preview_tex.as_ref() {
+                    let size = fit_math(
+                        Rect::from_min_size(Pos2::ZERO, Vec2::new(240.0, 72.0)),
+                        *w_pt,
+                        *h_pt,
+                        1.0,
+                    )
+                    .size();
+                    ui.image((texture.id(), size));
+                }
+                let response = ui.add(
+                    TextEdit::multiline(&mut inner)
+                        .font(FontId::new(13.0, FontFamily::Monospace))
+                        .desired_width(screen.width().max(280.0))
+                        .desired_rows(2)
+                        .hint_text(r"\langle x, y\rangle"),
+                );
+                response.request_focus();
+                if response.changed() {
+                    if let Some(tab) = app.tab_mut() {
+                        if let Some(AnnotKind::Text { content, .. }) =
+                            tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
+                        {
+                            if let Some(span) = math_spans::math_span_at(content, span_start) {
+                                *content =
+                                    math_spans::replace_math_inner(content, &span, &inner);
+                                math_changed = true;
+                                let key = math_spans::span_key(&inner, span.display);
+                                queue_keys.push(key);
+                                tab.inline_math_edit = Some((id, span.start));
+                            }
+                        }
+                    }
+                }
+                if response.has_focus()
+                    && ui.input(|input| {
+                        input.key_pressed(egui::Key::Tab) && !input.modifiers.command
+                    })
+                {
+                    let shift = ui.input(|input| input.modifiers.shift);
+                    ui.input_mut(|input| {
+                        if shift {
+                            input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
+                        } else {
+                            input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
+                        }
+                    });
+                    if !shift {
+                        exit_math = true;
+                    }
+                }
+                if let Some(error) = &overlay_error {
+                    ui.label(
+                        egui::RichText::new(error)
+                            .color(Color32::from_rgb(220, 110, 100))
+                            .size(11.0),
+                    );
+                }
+            });
+    }
+
+    if exit_math {
+        if let Some(tab) = app.tab_mut() {
+            if let Some(AnnotKind::Text { content, .. }) =
+                tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
+            {
+                let byte = tab
+                    .inline_math_edit
+                    .filter(|(edit_id, _)| *edit_id == id)
+                    .map(|(_, start)| start)
+                    .or(caret)
+                    .unwrap_or(content.len());
+                if let Some(span) = math_spans::math_span_at(content, byte) {
+                    let (next, after) = math_spans::exit_math_span(content, &span);
+                    *content = next;
+                    tab.pending_text_caret = Some(after);
+                    tab.inline_math_edit = None;
+                    changed = true;
+                    tab.focus_edit = true;
+                }
+            }
+        }
+    }
+
+    if changed || math_changed {
+        if let Some(tab) = app.tab() {
+            if let Some(AnnotKind::Text { content, .. }) =
+                tab.doc.session.get(id).map(|annot| &annot.kind)
+            {
+                for span in math_spans::closed_math_spans(content) {
+                    let inner = &content[span.inner_start..span.inner_end];
+                    if !inner.trim().is_empty() {
+                        queue_keys.push(math_spans::span_key(inner, span.display));
+                    }
+                }
+            }
+        }
+    } else if let Some(key) = active_key {
+        // Only debounce-queue when this island still needs a render.
+        let needs = app.tab().is_some_and(|tab| {
+            !tab.inline_previews.get(&(id, key)).is_some_and(|preview| {
+                !preview.pending && (preview.texture.is_some() || preview.error.is_some())
+            })
+        });
+        if needs {
+            queue_keys.push(key);
+        }
+    }
+
+    if let Some(tab) = app.tab_mut() {
+        if !exit_math {
+            tab.focus_edit = false;
+        }
+        if let Some(AnnotKind::Text { rect, size, .. }) =
+            tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
+        {
+            let min_h = (height / scale).max(*size * 1.35);
+            if rect.height() + 0.5 < min_h {
+                rect.y1 = rect.y0 + min_h;
+                changed = true;
+            }
+        }
+        if changed || math_changed {
+            tab.doc.session.mark_dirty(id);
+            if !matches!(tab.save, crate::app::SaveState::Saving) {
+                tab.save = crate::app::SaveState::Dirty {
+                    since: Instant::now(),
+                };
+            }
+        }
+    }
+    queue_keys.sort_unstable();
+    queue_keys.dedup();
+    for key in queue_keys {
+        app.queue_inline_math(id, key);
+    }
+}
+
+fn byte_to_char_index(text: &str, byte: usize) -> usize {
+    text.char_indices()
+        .map(|(i, _)| i)
+        .chain(std::iter::once(text.len()))
+        .take_while(|&i| i <= byte.min(text.len()))
+        .count()
+        .saturating_sub(1)
+}
+
+fn char_index_to_byte(text: &str, char_index: usize) -> usize {
+    text.char_indices()
+        .nth(char_index)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len())
+}
+
 fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     let snapshot = {
         let Some(tab) = app.tab() else {
@@ -2220,66 +2658,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
         AnnotKind::Text {
             rect, size, color, ..
         } => {
-            let screen = {
-                let Some(tab) = app.tab() else {
-                    return;
-                };
-                pdf_rect_screen(&tab.doc, page, rect, view)
-            };
-            let mut changed = false;
-            let mut height = screen.height();
-            egui::Area::new(Id::new(("marker-text", gen, id)))
-                .order(egui::Order::Foreground)
-                .fixed_pos(screen.min)
-                .constrain(false)
-                .show(ctx, |ui| {
-                    ui.set_max_width(screen.width().max(24.0));
-                    let Some(tab) = app.tab_mut() else {
-                        return;
-                    };
-                    let Some(AnnotKind::Text { content, .. }) =
-                        tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
-                    else {
-                        return;
-                    };
-                    let response = ui.add(
-                        TextEdit::multiline(content)
-                            .font(FontId::new(
-                                (size * scale).max(8.0),
-                                FontFamily::Proportional,
-                            ))
-                            .text_color(color.to_color32())
-                            .desired_width(screen.width().max(24.0))
-                            .desired_rows(1)
-                            .frame(false)
-                            .margin(egui::Margin::ZERO),
-                    );
-                    if focus {
-                        response.request_focus();
-                    }
-                    changed = response.changed();
-                    height = response.rect.height().max(size * scale);
-                });
-            if let Some(tab) = app.tab_mut() {
-                tab.focus_edit = false;
-                if let Some(AnnotKind::Text { rect, size, .. }) =
-                    tab.doc.session.get_mut(id).map(|annot| &mut annot.kind)
-                {
-                    let min_h = (height / scale).max(*size * 1.35);
-                    if rect.height() + 0.5 < min_h {
-                        rect.y1 = rect.y0 + min_h;
-                        changed = true;
-                    }
-                }
-                if changed {
-                    tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, crate::app::SaveState::Saving) {
-                        tab.save = crate::app::SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
-                }
-            }
+            edit_text_annot(app, ctx, view, id, page, gen, scale, focus, rect, size, color);
         }
         AnnotKind::Math { rect, .. } => {
             let screen = {
@@ -2289,7 +2668,6 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 pdf_rect_screen(&tab.doc, page, rect, view)
             };
             let mut changed = false;
-            let mut cycled = false;
             egui::Area::new(Id::new(("marker-math", gen, id)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(Pos2::new(screen.min.x, screen.max.y + 4.0))
@@ -2304,48 +2682,18 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                     else {
                         return;
                     };
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
-                        ui.label(
-                            egui::RichText::new("Tab / Shift+Tab cycle templates · math mode")
-                                .weak()
-                                .size(10.0),
-                        );
-                    });
+                    ui.label(egui::RichText::new("LaTeX").weak().size(11.0));
                     let response = ui.add(
                         TextEdit::multiline(source)
                             .font(FontId::new(13.0, FontFamily::Monospace))
                             .desired_width(screen.width().max(280.0))
                             .desired_rows(3)
-                            .hint_text(r"\frac{1}{2}  or  Tab for templates"),
+                            .hint_text(r"\frac{1}{2}"),
                     );
                     if focus {
                         response.request_focus();
                     }
                     changed = response.changed();
-                    if response.has_focus() {
-                        // While editing math, Tab / Shift+Tab cycle presets (not focus).
-                        // Ctrl+Tab is left alone for document-tab switching. Focus is
-                        // reclaimed below after egui's default Tab traversal runs.
-                        let cycle = ui.input_mut(|input| {
-                            if !input.key_pressed(egui::Key::Tab) || input.modifiers.command {
-                                return None;
-                            }
-                            let backward = input.modifiers.shift;
-                            if backward {
-                                input.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab);
-                            } else {
-                                input.consume_key(egui::Modifiers::NONE, egui::Key::Tab);
-                            }
-                            Some(if backward { -1 } else { 1 })
-                        });
-                        if let Some(delta) = cycle {
-                            *source =
-                                crate::math::cycle_math_template_by(source, delta).to_string();
-                            changed = true;
-                            cycled = true;
-                        }
-                    }
                     if let Some(error) = &error {
                         ui.label(
                             egui::RichText::new(error)
@@ -2367,13 +2715,6 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
             }
             if changed {
                 app.queue_math(id);
-            }
-            if cycled {
-                // Keep focus after replacing the source via Tab / Shift+Tab.
-                if let Some(tab) = app.tab_mut() {
-                    tab.focus_edit = true;
-                    tab.editing = Some(id);
-                }
             }
         }
         AnnotKind::Note { rect, .. } => {

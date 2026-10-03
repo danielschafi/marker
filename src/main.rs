@@ -4,6 +4,7 @@ mod assistant;
 mod geom;
 mod instance;
 mod math;
+mod math_spans;
 mod pdf;
 mod settings;
 mod theme;

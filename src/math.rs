@@ -15,43 +15,6 @@ const TEMPLATE: &str = r#"
 #eval(str(inputs.wrapped), mode: "markup")
 "#;
 
-/// Cycle-able LaTeX starters for the math editor (Tab / Shift+Tab).
-pub const MATH_TEMPLATES: &[&str] = &[
-    "",
-    r"\frac{a}{b}",
-    r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
-    r"\begin{aligned}
-a &= b \\
-c &= d
-\end{aligned}",
-    r"\begin{bmatrix}
-a & b \\
-c & d
-\end{bmatrix}",
-    r"\nabla^2 f = \begin{bmatrix}
-f_{11} & f_{12} & \dots & f_{1n} \\
-\vdots & \vdots & \ddots & \vdots \\
-f_{n1} & f_{n2} & \dots & f_{nn}
-\end{bmatrix}",
-];
-
-pub fn cycle_math_template(current: &str) -> &'static str {
-    cycle_math_template_by(current, 1)
-}
-
-/// Cycle math presets. Positive `delta` moves forward (Tab); negative moves
-/// backward (Shift+Tab).
-pub fn cycle_math_template_by(current: &str, delta: isize) -> &'static str {
-    let trimmed = current.trim();
-    let idx = MATH_TEMPLATES
-        .iter()
-        .position(|t| t.trim() == trimmed)
-        .unwrap_or(0);
-    let len = MATH_TEMPLATES.len() as isize;
-    let next = (idx as isize + delta).rem_euclid(len) as usize;
-    MATH_TEMPLATES[next]
-}
-
 pub fn wants_display_math(latex: &str) -> bool {
     let s = latex.trim();
     s.contains(r"\begin{")
@@ -70,6 +33,8 @@ pub struct RgbaImage {
 pub struct MathRender {
     pub gen: u64,
     pub id: u64,
+    /// When set, this render belongs to an inline `$...$` island inside a Text annot.
+    pub span_key: Option<u64>,
     pub req: u64,
     pub preview: Option<RgbaImage>,
     pub pdf: Option<Vec<u8>>,
@@ -82,6 +47,7 @@ enum Job {
     Render {
         gen: u64,
         id: u64,
+        span_key: Option<u64>,
         req: u64,
         source: String,
         size: f32,
@@ -110,9 +76,23 @@ impl MathWorker {
     }
 
     pub fn request(&self, gen: u64, id: u64, req: u64, source: String, size: f32, color: Rgb) {
+        self.request_span(gen, id, None, req, source, size, color);
+    }
+
+    pub fn request_span(
+        &self,
+        gen: u64,
+        id: u64,
+        span_key: Option<u64>,
+        req: u64,
+        source: String,
+        size: f32,
+        color: Rgb,
+    ) {
         let _ = self.jobs.send(Job::Render {
             gen,
             id,
+            span_key,
             req,
             source,
             size,
@@ -148,28 +128,31 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
             Job::Render {
                 gen,
                 id,
+                span_key,
                 req,
                 source,
                 size,
                 color,
             } => {
-                let mut current = (gen, source, size, color, req);
+                let mut current = (gen, span_key, source, size, color, req);
                 while let Ok(next) = jobs.try_recv() {
                     match next {
                         Job::Shutdown => return,
                         Job::Render {
                             gen,
                             id: next_id,
+                            span_key: next_span,
                             req,
                             source,
                             size,
                             color,
-                        } if next_id == id => {
-                            current = (gen, source, size, color, req);
+                        } if next_id == id && next_span == span_key => {
+                            current = (gen, next_span, source, size, color, req);
                         }
                         Job::Render {
                             gen,
                             id,
+                            span_key,
                             req,
                             source,
                             size,
@@ -181,27 +164,42 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
                                 size,
                                 color,
                             );
-                            reply(&ctx, &replies, to_reply(gen, id, req, rendered));
+                            reply(
+                                &ctx,
+                                &replies,
+                                to_reply(gen, id, span_key, req, rendered),
+                            );
                         }
                     }
                 }
-                let (gen, source, size, color, req) = current;
+                let (gen, span_key, source, size, color, req) = current;
                 let rendered = render_equation(
                     engine.get_or_insert_with(build_engine),
                     &source,
                     size,
                     color,
                 );
-                reply(&ctx, &replies, to_reply(gen, id, req, rendered));
+                reply(
+                    &ctx,
+                    &replies,
+                    to_reply(gen, id, span_key, req, rendered),
+                );
             }
         }
     }
 }
 
-fn to_reply(gen: u64, id: u64, req: u64, rendered: Rendered) -> MathRender {
+fn to_reply(
+    gen: u64,
+    id: u64,
+    span_key: Option<u64>,
+    req: u64,
+    rendered: Rendered,
+) -> MathRender {
     MathRender {
         gen,
         id,
+        span_key,
         req,
         preview: rendered.preview,
         pdf: rendered.pdf,
@@ -331,17 +329,48 @@ fn render_equation(
 }
 
 /// MiTeX emits helpers (`mitexsqrt`, `bmatrix`, `zws`, `aligned`, …) that only
-/// exist in the MiTeX Typst package. Rewrite them to native Typst math so we
-/// stay offline.
+/// exist in the MiTeX Typst package, plus occasional raw LaTeX escapes (`\,`).
+/// Rewrite them to native Typst math so we stay offline.
 fn mitex_to_typst(expr: &str) -> String {
     let mut s = expr.to_string();
+    // MiTeX often turns a literal comma into LaTeX thin-space `\,`, which Typst
+    // rejects ("unknown symbol modifier"). Restore a comma; other TeX spaces map
+    // to Typst math spacers.
+    s = s.replace(r"\,", ",");
+    s = s.replace(r"\;", " thick ");
+    s = s.replace(r"\:", " med ");
+    s = s.replace(r"\>", " med ");
+    s = s.replace(r"\!", "");
+    s = s.replace(r"\ ", " ");
+    s = s.replace(r"\quad", " quad ");
+    s = s.replace(r"\qquad", " wide ");
+    s = s.replace("negthinspace", "");
     s = s.replace(" zws ", " ");
     s = s.replace("zws", "");
     s = s.replace("dots.h.c", "dots.c");
     s = s.replace("dots.h", "dots");
+    // `angle` is a Typst unit type (90deg), so MiTeX's `angle.l` / `angle.r`
+    // resolve to that type and fail with "unknown symbol modifier". Use glyphs.
+    s = s.replace("angle.l", "⟨");
+    s = s.replace("angle.r", "⟩");
+    // MiTeX's `diff` is not always in scope; Typst's partial symbol is.
+    s = replace_ident(&s, "diff", "partial");
+    // Delimiters if raw TeX escapes leak through.
+    s = s.replace(r"\langle", "⟨");
+    s = s.replace(r"\rangle", "⟩");
+    s = s.replace(r"\lvert", "|");
+    s = s.replace(r"\rvert", "|");
+    s = s.replace(r"\lVert", "||");
+    s = s.replace(r"\rVert", "||");
+    s = s.replace(r"\lfloor", "⌊");
+    s = s.replace(r"\rfloor", "⌋");
+    s = s.replace(r"\lceil", "⌈");
+    s = s.replace(r"\rceil", "⌉");
     // Roots: `\sqrt{x}` → mitexsqrt(x); `\sqrt[n]{x}` → mitexsqrt(\[n\], x).
     s = rewrite_call(&s, "mitexsqrt", rewrite_mitexsqrt);
     s = rewrite_call(&s, "mitexmathbf", |args| format!("bold(upright({args}))"));
+    s = rewrite_call(&s, "mitexdisplaystyle", |args| args);
+    s = rewrite_call(&s, "mitexdisplay", |args| args);
     s = rewrite_call(&s, "mitexoverbrace", |args| format!("overbrace({args})"));
     s = rewrite_call(&s, "mitexunderbrace", |args| format!("underbrace({args})"));
     s = rewrite_call(&s, "operatorname", |args| {
@@ -362,7 +391,68 @@ fn mitex_to_typst(expr: &str) -> String {
     s = rewrite_call(&s, "gather", |args| args);
     s = rewrite_call(&s, "gathered", |args| args);
     s = rewrite_call(&s, "split", |args| args);
+    // Strip leftover TeX command escapes that would poison Typst parsing.
+    s = strip_tex_backslashes(&s);
     collapse_ws(&s)
+}
+
+/// Replace a bare identifier, not a prefix of a longer name.
+fn replace_ident(input: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(at) = rest.find(from) {
+        let before = &rest[..at];
+        let after = &rest[at + from.len()..];
+        let left_ok = before
+            .chars()
+            .last()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+        let right_ok = after
+            .chars()
+            .next()
+            .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
+        out.push_str(before);
+        if left_ok && right_ok {
+            out.push_str(to);
+        } else {
+            out.push_str(from);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Drop a leading `\` before ASCII letters / punctuation that is still TeX-shaped.
+/// Keeps Typst escapes like `\"` inside strings alone by only touching `\X` forms
+/// that remain after MiTeX (e.g. `\]`, `\{`).
+fn strip_tex_backslashes(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.peek().copied() {
+                Some(next) if next == '"' || next == '\\' => {
+                    // Typst string escape — keep.
+                    out.push(ch);
+                }
+                Some(next) if next.is_ascii_alphabetic() => {
+                    // Unknown TeX command residue: drop the slash, keep the name
+                    // (often already invalid; better than "unknown symbol modifier").
+                    continue;
+                }
+                Some(next) if matches!(next, '{' | '}' | '[' | ']' | '|' | ',' | ';' | ':' | '!' | ' ') =>
+                {
+                    // `\{` → `{`, `\,` already handled above; keep the following char.
+                    continue;
+                }
+                _ => out.push(ch),
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
 }
 
 fn rewrite_mitexsqrt(args: String) -> String {
@@ -394,20 +484,23 @@ fn strip_first_arg(args: String) -> String {
 
 fn rewrite_call(input: &str, name: &str, map: impl Fn(String) -> String) -> String {
     let mut out = String::with_capacity(input.len());
-    let bytes = input.as_bytes();
     let mut i = 0;
-    let name_bytes = name.as_bytes();
-    while i < bytes.len() {
-        if bytes[i..].starts_with(name_bytes) {
-            let after = i + name_bytes.len();
-            let boundary_ok = after >= bytes.len()
-                || !bytes[after].is_ascii_alphanumeric() && bytes[after] != b'_';
+    while i < input.len() {
+        if input[i..].starts_with(name) {
+            let after = i + name.len();
+            let boundary_ok = input[after..]
+                .chars()
+                .next()
+                .is_none_or(|ch| !ch.is_ascii_alphanumeric() && ch != '_');
             if boundary_ok {
                 let mut j = after;
-                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                    j += 1;
+                while let Some(ch) = input[j..].chars().next() {
+                    if !ch.is_ascii_whitespace() {
+                        break;
+                    }
+                    j += ch.len_utf8();
                 }
-                if j < bytes.len() && bytes[j] == b'(' {
+                if input[j..].starts_with('(') {
                     if let Some((args, end)) = take_parens(input, j) {
                         out.push_str(&map(args));
                         i = end;
@@ -416,8 +509,9 @@ fn rewrite_call(input: &str, name: &str, map: impl Fn(String) -> String) -> Stri
                 }
             }
         }
-        out.push(bytes[i] as char);
-        i += 1;
+        let ch = input[i..].chars().next().expect("i in range");
+        out.push(ch);
+        i += ch.len_utf8();
     }
     out
 }
@@ -653,11 +747,66 @@ mod tests {
     }
 
     #[test]
-    fn template_cycle_wraps() {
-        assert_eq!(cycle_math_template(""), MATH_TEMPLATES[1]);
-        let last = MATH_TEMPLATES.last().unwrap();
-        assert_eq!(cycle_math_template(last), MATH_TEMPLATES[0]);
-        assert_eq!(cycle_math_template_by(MATH_TEMPLATES[1], -1), MATH_TEMPLATES[0]);
-        assert_eq!(cycle_math_template_by("", -1), *last);
+    fn renders_common_latex_math() {
+        let cases = [
+            r"\langle x \rangle",
+            r"\langle x, y \rangle",
+            r"\left\langle x \right\rangle",
+            r"x \cdot y",
+            r"a \times b",
+            r"\mathrm{d}x",
+            r"\vec{v}",
+            r"\hat{x}",
+            r"\overline{x}",
+            r"\sum_{i=1}^{n} i",
+            r"\int_0^1 x\,dx",
+            r"\partial",
+            r"\infty",
+            r"\neq",
+            r"\leq",
+            r"\geq",
+            r"\in",
+            r"\subset",
+            r"\rightarrow",
+            r"\Rightarrow",
+            r"\forall",
+            r"\exists",
+            r"\alpha + \beta",
+            r"\sin x + \cos y",
+            r"\lvert x \rvert",
+            r"\lfloor x \rfloor",
+            r"\lceil x \rceil",
+            r"\mathbb{R}",
+            r"\mathcal{L}",
+            r"\|v\|",
+            r"\nabla",
+            r"\pm",
+        ];
+        for latex in cases {
+            let rendered = render_equation_blocking(latex, 14.0, Rgb::new(0, 0, 0));
+            assert!(
+                rendered.error.is_none(),
+                "{latex}: mitex={:?} typst={:?} err={:?}",
+                mitex::convert_math(latex, None),
+                mitex::convert_math(latex, None)
+                    .ok()
+                    .map(|expr| mitex_to_typst(&expr)),
+                rendered.error
+            );
+        }
+    }
+
+    #[test]
+
+    fn mitex_rewrite_maps_langle_to_glyphs() {
+        let expr = r"angle.l  x \, y  angle.r";
+        assert_eq!(mitex_to_typst(expr), "⟨ x , y ⟩");
+    }
+
+    #[test]
+    fn rewrite_call_preserves_unicode_delimiters() {
+        let out = mitex_to_typst("⌊ x ⌋");
+        assert_eq!(out, "⌊ x ⌋");
+        assert!(!out.contains('Ã'));
     }
 }

@@ -69,6 +69,22 @@ pub struct SaveSnapshot {
     pub upserts: Vec<Annotation>,
     pub deletes: Vec<(usize, i32)>,
     pub math_pdfs: HashMap<u64, Vec<u8>>,
+    /// Inline math stamps exploded from rich Text annotations.
+    pub inline_math: Vec<InlineMathSave>,
+    /// Text annot ids whose previous InlineMath children should be removed.
+    pub rich_text_parents: Vec<(usize, u64)>,
+}
+
+#[derive(Clone, Debug)]
+pub struct InlineMathSave {
+    pub parent_id: u64,
+    pub page: usize,
+    pub index: u32,
+    pub rect: PdfRect,
+    pub source: String,
+    pub size: f32,
+    pub color: Rgb,
+    pub pdf: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -360,6 +376,10 @@ impl DocumentEngine {
             let mut pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
             delete_xref(&mut pdf_page, xref).map_err(show)?;
         }
+        for &(page, parent_id) in &snapshot.rich_text_parents {
+            let mut pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
+            delete_inline_math_children(&mut pdf_page, parent_id).map_err(show)?;
+        }
         let mut saved = Vec::new();
         for annot in &snapshot.upserts {
             if !annot.dirty {
@@ -373,6 +393,10 @@ impl DocumentEngine {
                 page: annot.page,
                 xref,
             });
+        }
+        for inline in &snapshot.inline_math {
+            let mut pdf_page = self.doc.load_pdf_page(inline.page as i32).map_err(show)?;
+            create_inline_math(&mut self.doc, &mut pdf_page, inline).map_err(show)?;
         }
         Ok(saved)
     }
@@ -621,6 +645,7 @@ fn convert_outline_node(node: Outline) -> OutlineNode {
 struct MarkerMeta {
     kind: Option<String>,
     id: Option<u64>,
+    parent_id: Option<u64>,
     text_size: Option<f32>,
     text_color: Option<Rgb>,
     source: Option<String>,
@@ -632,6 +657,7 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         return MarkerMeta {
             kind: None,
             id: None,
+            parent_id: None,
             text_size: None,
             text_color: None,
             source: None,
@@ -646,6 +672,12 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         .and_then(|bytes| String::from_utf8(bytes).ok());
     let id = marker
         .get_dict("Id")
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_int().ok())
+        .map(|value| value as u64);
+    let parent_id = marker
+        .get_dict("ParentId")
         .ok()
         .flatten()
         .and_then(|value| value.as_int().ok())
@@ -682,6 +714,7 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
     MarkerMeta {
         kind,
         id,
+        parent_id,
         text_size,
         text_color,
         source,
@@ -703,9 +736,25 @@ fn write_marker(
     text_color: Option<Rgb>,
     source: Option<&str>,
 ) -> Result<(), mupdf::Error> {
+    write_marker_full(doc, annot, kind, id, None, text_size, text_color, source)
+}
+
+fn write_marker_full(
+    doc: &PdfDocument,
+    annot: &PdfAnnotation,
+    kind: &str,
+    id: u64,
+    parent_id: Option<u64>,
+    text_size: Option<f32>,
+    text_color: Option<Rgb>,
+    source: Option<&str>,
+) -> Result<(), mupdf::Error> {
     let mut marker = doc.new_dict()?;
     marker.dict_put("Kind", doc.new_name(kind)?)?;
     marker.dict_put("Id", doc.new_int(id as i32)?)?;
+    if let Some(parent_id) = parent_id {
+        marker.dict_put("ParentId", doc.new_int(parent_id as i32)?)?;
+    }
     if let Some(size) = text_size {
         marker.dict_put("TextSize", doc.new_real(size)?)?;
     }
@@ -747,6 +796,10 @@ fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error
                 continue;
             }
             let marker = read_marker(&annot.object());
+            // Inline math stamps are reconstituted from the parent Text Source.
+            if marker.kind.as_deref() == Some("InlineMath") {
+                continue;
+            }
             if kind_name == PdfAnnotationType::Stamp
                 && !matches!(marker.kind.as_deref(), Some("Math" | "Image"))
             {
@@ -814,7 +867,13 @@ fn import_kind(
         }
         PdfAnnotationType::FreeText => {
             let rect = from_rect(annot.rect()?);
-            let content = annot.contents()?.unwrap_or("").to_string();
+            let contents = annot.contents()?.unwrap_or("").to_string();
+            // Rich text stores the full `$...$` source in Marker.Source.
+            let content = marker
+                .source
+                .clone()
+                .filter(|source| crate::math_spans::has_math(source))
+                .unwrap_or(contents);
             let appearance: Option<AnnotationDefaultAppearance> = annot.default_appearance()?;
             let size = marker
                 .text_size
@@ -967,8 +1026,14 @@ fn apply_existing(
             if annot.r#type()? != PdfAnnotationType::FreeText {
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
+            let rich = crate::math_spans::has_math(content);
+            let visible = if rich {
+                crate::math_spans::prose_only(content)
+            } else {
+                content.clone()
+            };
             annot.set_rect(to_rect(*rect))?;
-            annot.set_contents(content)?;
+            annot.set_contents(&visible)?;
             annot.set_default_appearance("Helv", *size, Some(rgb_color(*color)))?;
             annot.set_quadding(AnnotationTextAlign::Left)?;
             write_marker(
@@ -978,7 +1043,7 @@ fn apply_existing(
                 source.id,
                 Some(*size),
                 Some(*color),
-                None,
+                rich.then_some(content.as_str()),
             )?;
             annot.update()?;
         }
@@ -1117,8 +1182,14 @@ fn create_annot(
             size,
             color,
         } => {
+            let rich = crate::math_spans::has_math(content);
+            let visible = if rich {
+                crate::math_spans::prose_only(content)
+            } else {
+                content.clone()
+            };
             let mut annot = page
-                .add_free_text_annotation(to_rect(*rect), content)
+                .add_free_text_annotation(to_rect(*rect), &visible)
                 .map_err(show)?;
             annot
                 .set_default_appearance("Helv", *size, Some(rgb_color(*color)))
@@ -1133,7 +1204,7 @@ fn create_annot(
                 source.id,
                 Some(*size),
                 Some(*color),
-                None,
+                rich.then_some(content.as_str()),
             )
             .map_err(show)?;
             annot
@@ -1224,6 +1295,55 @@ fn create_annot(
     annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
     annot.update().map_err(show)?;
     annot.xref().map_err(show)
+}
+
+fn delete_inline_math_children(page: &mut PdfPage, parent_id: u64) -> Result<(), mupdf::Error> {
+    let doomed: Vec<i32> = page
+        .annotations()
+        .filter_map(|annot| {
+            let marker = read_marker(&annot.object());
+            if marker.kind.as_deref() == Some("InlineMath") && marker.parent_id == Some(parent_id)
+            {
+                annot.xref().ok()
+            } else {
+                None
+            }
+        })
+        .collect();
+    for xref in doomed {
+        delete_xref(page, xref)?;
+    }
+    Ok(())
+}
+
+fn create_inline_math(
+    doc: &mut PdfDocument,
+    page: &mut PdfPage,
+    inline: &InlineMathSave,
+) -> Result<(), mupdf::Error> {
+    // Synthetic id: keep ParentId for reload skip; Id just needs to be unique-ish.
+    let synth_id = inline
+        .parent_id
+        .saturating_mul(1_000_003)
+        .wrapping_add(u64::from(inline.index) + 1);
+    let mut annot = page.create_annotation(PdfAnnotationType::Stamp)?;
+    annot.set_rect(to_rect(inline.rect))?;
+    annot.set_contents(&inline.source)?;
+    write_marker_full(
+        doc,
+        &annot,
+        "InlineMath",
+        synth_id,
+        Some(inline.parent_id),
+        Some(inline.size),
+        Some(inline.color),
+        Some(&inline.source),
+    )?;
+    if let Some(bytes) = inline.pdf.as_deref() {
+        install_math_appearance(doc, &mut annot, bytes)?;
+    }
+    annot.set_flags(AnnotationFlags::IS_PRINT)?;
+    Ok(())
 }
 
 fn install_math_appearance(
@@ -1494,6 +1614,8 @@ mod tests {
             upserts: session.annotations.clone(),
             deletes: Vec::new(),
             math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
         };
         engine.save(&snapshot).unwrap();
 
@@ -1581,6 +1703,8 @@ mod tests {
             upserts: session.annotations.clone(),
             deletes: Vec::new(),
             math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
         };
         let xrefs = engine.save(&snapshot).unwrap();
         assert_eq!(xrefs.len(), 1, "expected one saved xref: {xrefs:?}");
@@ -1699,6 +1823,8 @@ mod tests {
                 upserts: session.annotations.clone(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
             })
             .unwrap();
 

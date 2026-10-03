@@ -17,7 +17,10 @@ use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::instance::{self, IpcInbox};
 use crate::math::{MathRender, MathWorker, RgbaImage};
-use crate::pdf::{OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
+use crate::math_spans;
+use crate::pdf::{
+    InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot,
+};
 use crate::settings::Settings;
 use crate::ui::{self, color_dot, palette_for};
 use crate::view::{self, viewport};
@@ -59,7 +62,8 @@ pub(crate) struct MarkerApp {
     math: MathWorker,
     assistant: AssistantWorker,
     math_seq: u64,
-    math_deadline: Option<(u64, u64, Instant)>,
+    /// Debounced math request: (doc gen, annot id, optional inline span key).
+    math_deadline: Option<(u64, u64, Option<u64>, Instant)>,
     next_gen: u64,
     dialog_tx: Sender<Option<PathBuf>>,
     dialog_rx: Receiver<Option<PathBuf>>,
@@ -128,7 +132,13 @@ pub(crate) struct Tab {
     pub(crate) inflight: HashSet<TileKey>,
     pub(crate) glyphs_waiting: HashSet<usize>,
     pub(crate) previews: HashMap<u64, MathPreview>,
+    /// Inline `$...$` previews keyed by `(text_annot_id, span_key)`.
+    pub(crate) inline_previews: HashMap<(u64, u64), MathPreview>,
     pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
+    /// After Tab exits a math island, place the TextEdit caret here (bytes).
+    pub(crate) pending_text_caret: Option<usize>,
+    /// Sticky inline-math edit: `(text_annot_id, span_start_byte)` while TeX overlay is open.
+    pub(crate) inline_math_edit: Option<(u64, usize)>,
     pub(crate) save: SaveState,
     pub(crate) save_epoch: u64,
     pub(crate) save_deletes: Vec<(usize, i32)>,
@@ -249,7 +259,7 @@ pub(crate) struct MathPreview {
     size: f32,
     color: Rgb,
     req: u64,
-    pending: bool,
+    pub(crate) pending: bool,
     pub(crate) texture: Option<egui::TextureHandle>,
     pub(crate) width_pt: f32,
     pub(crate) height_pt: f32,
@@ -498,8 +508,23 @@ impl MarkerApp {
 
     pub(crate) fn queue_math(&mut self, id: u64) {
         if let Some(tab) = self.tab() {
-            self.math_deadline =
-                Some((tab.doc.gen, id, Instant::now() + Duration::from_millis(160)));
+            self.math_deadline = Some((
+                tab.doc.gen,
+                id,
+                None,
+                Instant::now() + Duration::from_millis(160),
+            ));
+        }
+    }
+
+    pub(crate) fn queue_inline_math(&mut self, id: u64, span_key: u64) {
+        if let Some(tab) = self.tab() {
+            self.math_deadline = Some((
+                tab.doc.gen,
+                id,
+                Some(span_key),
+                Instant::now() + Duration::from_millis(160),
+            ));
         }
     }
 
@@ -1188,6 +1213,7 @@ impl MarkerApp {
             for id in &ids {
                 tab.doc.session.remove(*id);
                 tab.previews.remove(id);
+                tab.inline_previews.retain(|(annot_id, _), _| annot_id != id);
                 tab.image_textures.remove(id);
             }
             tab.selected.clear();
@@ -1372,6 +1398,8 @@ impl MarkerApp {
             }
             if tab.editing.take().is_some() {
                 tab.focus_edit = false;
+                tab.inline_math_edit = None;
+                tab.pending_text_caret = None;
                 seal = true;
             } else if tab.assistant.learning.take().is_some()
                 || !tab.selected.is_empty()
@@ -1506,7 +1534,7 @@ impl eframe::App for MarkerApp {
             let focused = ctx.input(|input| input.focused);
             let wait = if focused { 16 } else { 33 };
             ctx.request_repaint_after(Duration::from_millis(wait));
-        } else if let Some((_, _, when)) = self.math_deadline {
+        } else if let Some((_, _, _, when)) = self.math_deadline {
             ctx.request_repaint_after(when.saturating_duration_since(Instant::now()));
         } else if pending {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -1588,7 +1616,10 @@ impl MarkerApp {
                         inflight: HashSet::new(),
                         glyphs_waiting: HashSet::new(),
                         previews: HashMap::new(),
+                        inline_previews: HashMap::new(),
                         image_textures: HashMap::new(),
+                        pending_text_caret: None,
+                        inline_math_edit: None,
                         save: SaveState::Clean,
                         save_epoch: 0,
                         save_deletes: Vec::new(),
@@ -1893,6 +1924,10 @@ impl MarkerApp {
     }
 
     fn on_math(&mut self, ctx: &egui::Context, render: MathRender) {
+        if let Some(span_key) = render.span_key {
+            self.on_inline_math(ctx, render, span_key);
+            return;
+        }
         let snapshot = self
             .tabs
             .iter()
@@ -1980,24 +2015,96 @@ impl MarkerApp {
         }
     }
 
+    fn on_inline_math(&mut self, ctx: &egui::Context, render: MathRender, span_key: u64) {
+        let key = (render.id, span_key);
+        let snapshot = self
+            .tabs
+            .iter()
+            .find(|tab| tab.doc.gen == render.gen)
+            .and_then(|tab| {
+                let annot = tab.doc.session.get(render.id)?;
+                let AnnotKind::Text { size, color, .. } = &annot.kind else {
+                    return None;
+                };
+                Some((*size, *color))
+            });
+        let Some((size, color)) = snapshot else {
+            if let Some(tab) = self.tab_by_gen_mut(render.gen) {
+                tab.inline_previews.remove(&key);
+            }
+            return;
+        };
+        {
+            let Some(tab) = self.tab_by_gen_mut(render.gen) else {
+                return;
+            };
+            if tab
+                .inline_previews
+                .get(&key)
+                .is_some_and(|preview| preview.req != render.req)
+            {
+                return;
+            }
+            let texture = render.preview.as_ref().map(|image| {
+                upload_preview(ctx, render.gen, render.id ^ span_key, render.req, image)
+            });
+            let previous = tab
+                .inline_previews
+                .get(&key)
+                .and_then(|preview| preview.texture.clone());
+            let source = tab
+                .inline_previews
+                .get(&key)
+                .map(|preview| preview.source.clone())
+                .unwrap_or_default();
+            tab.inline_previews.insert(
+                key,
+                MathPreview {
+                    source,
+                    size,
+                    color,
+                    req: render.req,
+                    pending: false,
+                    texture: texture.or(previous),
+                    width_pt: render.width_pt,
+                    height_pt: render.height_pt,
+                    pdf: render.pdf,
+                    error: render.error,
+                },
+            );
+        }
+        let should_save = self
+            .tabs
+            .iter()
+            .find(|tab| tab.doc.gen == render.gen)
+            .is_some_and(|tab| tab.save_when_math_ready && math_ready(tab));
+        if should_save {
+            self.start_save_gen(render.gen);
+        }
+    }
+
     fn flush_math(&mut self) {
-        let Some((gen, id, when)) = self.math_deadline else {
+        let Some((gen, id, span_key, when)) = self.math_deadline else {
             return;
         };
         if when > Instant::now() {
             return;
         }
         self.math_deadline = None;
-        self.request_math(gen, id);
+        if let Some(span_key) = span_key {
+            self.request_inline_math(gen, id, span_key);
+        } else {
+            self.request_math(gen, id);
+        }
     }
 
     fn prepare_visible_math(&mut self) {
-        let (gen, ids) = {
+        let (gen, math_ids, inline_jobs) = {
             let Some(tab) = self.tab() else {
                 return;
             };
             let gen = tab.doc.gen;
-            let ids: Vec<u64> = tab
+            let math_ids: Vec<u64> = tab
                 .doc
                 .session
                 .annotations
@@ -2008,10 +2115,36 @@ impl MarkerApp {
                 })
                 .filter(|id| needs_math(tab, *id))
                 .collect();
-            (gen, ids)
+            let mut inline_jobs = Vec::new();
+            for annot in &tab.doc.session.annotations {
+                let AnnotKind::Text {
+                    content,
+                    size,
+                    color,
+                    ..
+                } = &annot.kind
+                else {
+                    continue;
+                };
+                for span in math_spans::closed_math_spans(content) {
+                    let inner = &content[span.inner_start..span.inner_end];
+                    if inner.trim().is_empty() {
+                        continue;
+                    }
+                    let key = math_spans::span_key(inner, span.display);
+                    let source = math_spans::source_for_render(inner, span.display);
+                    if needs_inline_math(tab, annot.id, key, &source, *size, *color) {
+                        inline_jobs.push((annot.id, key, source, *size, *color));
+                    }
+                }
+            }
+            (gen, math_ids, inline_jobs)
         };
-        for id in ids {
+        for id in math_ids {
             self.request_math(gen, id);
+        }
+        for (id, key, source, size, color) in inline_jobs {
+            self.request_inline_math_with(gen, id, key, source, size, color);
         }
     }
 
@@ -2081,6 +2214,111 @@ impl MarkerApp {
             );
         }
         self.math.request(gen, id, req, source, size, color);
+    }
+
+    fn request_inline_math(&mut self, gen: u64, id: u64, span_key: u64) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
+            return;
+        };
+        let Some(annot) = tab.doc.session.get(id) else {
+            return;
+        };
+        let AnnotKind::Text {
+            content,
+            size,
+            color,
+            ..
+        } = &annot.kind
+        else {
+            return;
+        };
+        let Some(span) = math_spans::closed_math_spans(content)
+            .into_iter()
+            .find(|span| {
+                let inner = &content[span.inner_start..span.inner_end];
+                math_spans::span_key(inner, span.display) == span_key
+            })
+        else {
+            return;
+        };
+        let inner = &content[span.inner_start..span.inner_end];
+        if inner.trim().is_empty() {
+            return;
+        }
+        let source = math_spans::source_for_render(inner, span.display);
+        let size = *size;
+        let color = *color;
+        self.request_inline_math_with(gen, id, span_key, source, size, color);
+    }
+
+    fn request_inline_math_with(
+        &mut self,
+        gen: u64,
+        id: u64,
+        span_key: u64,
+        source: String,
+        size: f32,
+        color: Rgb,
+    ) {
+        let key = (id, span_key);
+        let (texture, width_pt, height_pt) = {
+            let Some(tab) = self.tab_by_gen_mut(gen) else {
+                return;
+            };
+            if let Some(preview) = tab.inline_previews.get(&key) {
+                if preview.pending
+                    && preview.source == source
+                    && (preview.size - size).abs() < 0.05
+                    && preview.color == color
+                {
+                    return;
+                }
+                if !preview.pending
+                    && preview.source == source
+                    && (preview.size - size).abs() < 0.05
+                    && preview.color == color
+                    && (preview.texture.is_some() || preview.error.is_some())
+                {
+                    return;
+                }
+            }
+            let texture = tab
+                .inline_previews
+                .get(&key)
+                .and_then(|preview| preview.texture.clone());
+            let width_pt = tab
+                .inline_previews
+                .get(&key)
+                .map(|p| p.width_pt)
+                .unwrap_or(0.0);
+            let height_pt = tab
+                .inline_previews
+                .get(&key)
+                .map(|p| p.height_pt)
+                .unwrap_or(0.0);
+            (texture, width_pt, height_pt)
+        };
+        self.math_seq += 1;
+        let req = self.math_seq;
+        if let Some(tab) = self.tab_by_gen_mut(gen) {
+            tab.inline_previews.insert(
+                key,
+                MathPreview {
+                    source: source.clone(),
+                    size,
+                    color,
+                    req,
+                    pending: true,
+                    texture,
+                    width_pt,
+                    height_pt,
+                    pdf: None,
+                    error: None,
+                },
+            );
+        }
+        self.math
+            .request_span(gen, id, Some(span_key), req, source, size, color);
     }
 
     pub(crate) fn dispatch_tiles(&mut self, pixels_per_point: f32) {
@@ -2465,6 +2703,8 @@ impl MarkerApp {
                         }
                     }
                 }
+                let (inline_math, rich_text_parents) =
+                    collect_inline_math_saves(tab, &upserts, &self.egui_ctx);
                 tab.save_epoch = epoch;
                 tab.save_deletes = deletes.clone();
                 tab.save = SaveState::Saving;
@@ -2475,6 +2715,8 @@ impl MarkerApp {
                         upserts,
                         deletes,
                         math_pdfs,
+                        inline_math,
+                        rich_text_parents,
                     }),
                     false,
                     false,
@@ -3459,19 +3701,38 @@ fn math_ready(tab: &Tab) -> bool {
         if !annot.dirty {
             return true;
         }
-        let AnnotKind::Math { source, .. } = &annot.kind else {
-            return true;
-        };
-        if crate::geom::normalize_latex(source).is_empty() {
-            return true;
-        }
-        match tab.previews.get(&annot.id) {
-            Some(preview)
-                if !preview.pending && (preview.pdf.is_some() || preview.error.is_some()) =>
-            {
+        match &annot.kind {
+            AnnotKind::Math { source, .. } => {
+                if crate::geom::normalize_latex(source).is_empty() {
+                    return true;
+                }
+                match tab.previews.get(&annot.id) {
+                    Some(preview)
+                        if !preview.pending
+                            && (preview.pdf.is_some() || preview.error.is_some()) =>
+                    {
+                        true
+                    }
+                    _ => false,
+                }
+            }
+            AnnotKind::Text { content, .. } if math_spans::has_math(content) => {
+                for span in math_spans::closed_math_spans(content) {
+                    let inner = &content[span.inner_start..span.inner_end];
+                    if inner.trim().is_empty() {
+                        continue;
+                    }
+                    let key = (annot.id, math_spans::span_key(inner, span.display));
+                    match tab.inline_previews.get(&key) {
+                        Some(preview)
+                            if !preview.pending
+                                && (preview.pdf.is_some() || preview.error.is_some()) => {}
+                        _ => return false,
+                    }
+                }
                 true
             }
-            _ => false,
+            _ => true,
         }
     })
 }
@@ -3501,6 +3762,117 @@ fn needs_math(tab: &Tab, id: u64) -> bool {
         }
         None => true,
     }
+}
+
+fn needs_inline_math(
+    tab: &Tab,
+    id: u64,
+    span_key: u64,
+    source: &str,
+    size: f32,
+    color: Rgb,
+) -> bool {
+    match tab.inline_previews.get(&(id, span_key)) {
+        Some(preview) => {
+            preview.pending
+                || preview.source != source
+                || (preview.size - size).abs() > 0.05
+                || preview.color != color
+        }
+        None => true,
+    }
+}
+
+fn collect_inline_math_saves(
+    tab: &Tab,
+    upserts: &[Annotation],
+    ctx: &egui::Context,
+) -> (Vec<InlineMathSave>, Vec<(usize, u64)>) {
+    let mut inline_math = Vec::new();
+    let mut rich_text_parents = Vec::new();
+    for annot in upserts {
+        let AnnotKind::Text {
+            rect,
+            content,
+            size,
+            color,
+        } = &annot.kind
+        else {
+            continue;
+        };
+        if !math_spans::has_math(content) {
+            continue;
+        }
+        rich_text_parents.push((annot.page, annot.id));
+        let font_size = (*size).max(6.0);
+        let line_height = font_size * 1.25;
+        let measure_prose = |text: &str| {
+            if text.is_empty() {
+                return (0.0, line_height);
+            }
+            ctx.fonts_mut(|fonts| {
+                let galley = fonts.layout_no_wrap(
+                    text.to_owned(),
+                    egui::FontId::new(font_size, egui::FontFamily::Proportional),
+                    egui::Color32::WHITE,
+                );
+                (galley.size().x, galley.size().y.max(line_height))
+            })
+        };
+        let measure_math = |inner: &str, display: bool| {
+            let key = math_spans::span_key(inner, display);
+            if let Some(preview) = tab.inline_previews.get(&(annot.id, key)) {
+                if preview.width_pt > 1.0 && preview.height_pt > 1.0 {
+                    return (preview.width_pt, preview.height_pt);
+                }
+            }
+            let w = (inner.len() as f32 * font_size * 0.45).max(font_size).min(rect.width());
+            let h = if display {
+                font_size * 1.8
+            } else {
+                font_size * 1.2
+            };
+            (w, h)
+        };
+        let (runs, _) = math_spans::layout_runs(
+            content,
+            rect.width(),
+            line_height,
+            &measure_prose,
+            &measure_math,
+        );
+        let mut index = 0u32;
+        for run in runs {
+            let math_spans::LaidRun::Math {
+                inner,
+                display,
+                key,
+                x,
+                y,
+                w,
+                h,
+            } = run
+            else {
+                continue;
+            };
+            let pdf = tab
+                .inline_previews
+                .get(&(annot.id, key))
+                .and_then(|preview| preview.pdf.clone());
+            inline_math.push(InlineMathSave {
+                parent_id: annot.id,
+                page: annot.page,
+                index,
+                rect: PdfRect::new(rect.x0 + x, rect.y0 + y, rect.x0 + x + w, rect.y0 + y + h),
+                source: math_spans::source_for_render(&inner, display),
+                size: *size,
+                color: *color,
+                pdf,
+            });
+            index += 1;
+        }
+    }
+    (inline_math, rich_text_parents)
 }
 
 fn tile_key(tile: &crate::pdf::TileImage) -> TileKey {

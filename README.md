@@ -89,7 +89,7 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `N` / `Shift+N` | Next / previous search result |
 | `Ctrl+W` | Close the current tab |
 | `Ctrl+Tab` / `Ctrl+Shift+Tab` | Switch tabs |
-| `Tab` / `Shift+Tab` | Cycle math templates (while editing a math annotation) |
+| `Tab` | Exit `$…$` / `$$…$$` math in a text box and continue typing |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Y` or `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Shift+B` | Show or hide the tools strip |
@@ -114,26 +114,31 @@ motions.
 
 ### Math / LaTeX
 
-Math annotations accept a LaTeX math subset (converted with
-[MiTeX](https://github.com/mitex-rs/mitex), rendered with Typst). Wrappers like
-`$...$`, `$$...$$`, `\(...\)`, and `\[...\]` are stripped automatically.
+Text annotations accept inline math with `$...$` and display math with
+`$$...$$` (literal dollars: `\$`). When the caret is inside a math island, a
+LaTeX editor opens with a live preview; **Tab** closes the island (if needed)
+and continues with normal text after it. On save, Marker keeps the full source
+on the text annotation and writes each equation as a separate math stamp for
+other PDF readers.
 
-While the math editor is focused, **Tab** / **Shift+Tab** cycle starter
-templates (fraction, quadratic formula, `aligned`, `bmatrix`, …). Click away or
-press Escape to leave the field; **Ctrl+Tab** still switches document tabs.
+Standalone math annotations (`M`) still accept a LaTeX math subset (converted
+with [MiTeX](https://github.com/mitex-rs/mitex), rendered with Typst). Wrappers
+like `$...$`, `$$...$$`, `\(...\)`, and `\[...\]` are stripped automatically.
+Click away or press Escape to leave the field; **Ctrl+Tab** still switches
+document tabs.
 
 **Supported (common constructs):**
 
 - Fractions: `\frac{a}{b}`
 - Roots: `\sqrt{x}`, `\sqrt[n]{x}`
 - Greek letters, superscripts/subscripts, `\pm`, `\dots`, `\vdots`, `\ddots`
+- Delimiters such as `\langle`, `\rangle`, `\left`, `\right`
 - Matrices: `matrix`, `pmatrix`, `bmatrix`, `Bmatrix`, `vmatrix`, `Vmatrix`
 - Alignment: `aligned`, `align`, `gathered`, `gather`, `split` (and `*at` variants)
 - Styling helpers: `\mathbf{...}`, `\operatorname{...}`, `\overbrace{...}`, `\underbrace{...}`
 
 **Known gaps:** full LaTeX packages, custom macros, and MiTeX helpers without a
-native Typst rewrite may fail to compile. Prefer the templates or the commands
-above for reliable results.
+native Typst rewrite may fail to compile.
 
 ## Configuration
 

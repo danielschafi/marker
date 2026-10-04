@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use egui::text::CCursor;
 use egui::text_selection::CCursorRange;
 use egui::{
-    Button, Color32, CursorIcon, FontFamily, FontId, Id, ImeEvent, PointerButton, Pos2, Rect, Sense,
-    Stroke, TextEdit, Vec2,
+    Button, Color32, CursorIcon, Event, FontFamily, FontId, Frame, Id, ImeEvent, Key, Modifiers,
+    PointerButton, Pos2, Rect, Sense, Stroke, TextEdit, Vec2,
 };
 
 #[path = "math_input.rs"]
@@ -242,6 +242,7 @@ pub(crate) fn viewport_tab(
     paint_document(app, &painter, response.rect, ui.ctx().pixels_per_point());
     paint_scrollbar(app, ui, response.rect);
     if focused {
+        reclaim_edit_after_completion_escape(app, ui.ctx());
         inline_editors(app, ui.ctx(), response.rect);
         paint_menu(app, ui.ctx());
         paint_style_bar(app, ui.ctx(), response.rect);
@@ -2714,6 +2715,7 @@ fn edit_text_annot(
             ui.set_max_width(screen.width().max(24.0));
             let font_px = (size * scale).max(8.0);
             let style = math_edit_style(color.to_color32(), font_px);
+            let autosnippets = app.settings.math_autosnippets;
             let bubble = {
                 let Some((cache, tab)) = app.math_cache_and_tab_mut() else {
                     return;
@@ -2724,7 +2726,9 @@ fn edit_text_annot(
                     else {
                         return;
                     };
-                    if let Some(text_changed) = apply_math_input(ctx, ui, text_edit_id, content) {
+                    if let Some(text_changed) =
+                        apply_math_input(ctx, ui, text_edit_id, content, autosnippets, id)
+                    {
                         changed |= text_changed;
                     }
                     let render = |inner: &str, display: bool| {
@@ -2745,6 +2749,7 @@ fn edit_text_annot(
                     height = output.response.rect.height().max(size * scale);
                     paint_concealed_math(ui, cache, &output, size, color);
                     paint_math_errors(ui, &output, style.error);
+                    paint_math_completion(ctx, ui, text_edit_id, id, content, &output);
                     let plan = bubble_plan(ctx, content, &output, cache, size, color, changed);
                     let live_start = output.caret.and_then(|(index, _)| {
                         let byte = char_index_to_byte(content, index);
@@ -2900,23 +2905,53 @@ fn ready_texture(
     }
 }
 
-/// Autopair / tab-out pre-filter (R7 / R8). Runs before `conceal_editor` so
-/// `TextEdit` never sees a handled event. Skips while IME is composing.
+/// Autopair / tab-out / completion pre-filter (R7–R9). Runs before
+/// `conceal_editor` so `TextEdit` never sees a handled event. Skips while IME
+/// is composing. When the completion popup is open, Tab/Enter accept and
+/// arrows move the highlight; Esc is handled via `reclaim_edit_after_completion_escape`.
 fn apply_math_input(
     ctx: &egui::Context,
     ui: &mut egui::Ui,
     id: Id,
     content: &mut String,
+    autosnippets: bool,
+    annot_id: u64,
 ) -> Option<bool> {
     if ime_composing(ui) {
         return None;
     }
     let mut state = TextEdit::load_state(ctx, id)?;
     let range = state.cursor.char_range()?;
+    let caret = range.primary.index;
+
+    if let Some(result) = apply_completion_keys(ctx, ui, id, content, range, annot_id) {
+        let text_changed = result.0 != *content;
+        *content = result.0;
+        state.cursor.set_char_range(Some(result.1));
+        state.store(ctx, id);
+        return Some(text_changed);
+    }
+
+    // While a completion list is visible, Tab/Enter are reserved for accept
+    // (handled above). Skip the tab-out path so they don't fall through.
+    let popup_open = completion_popup_open(ctx, id, content, caret);
+
     let mut hit: Option<(usize, (String, CCursorRange))> = None;
     ui.input(|input| {
         for (index, event) in input.events.iter().enumerate() {
-            if let Some(result) = math_input::apply(content, range, event) {
+            if popup_open
+                && matches!(
+                    event,
+                    Event::Key {
+                        key: Key::Tab | Key::Enter | Key::ArrowUp | Key::ArrowDown | Key::Escape,
+                        pressed: true,
+                        ..
+                    }
+                )
+            {
+                continue;
+            }
+            if let Some(result) = math_input::apply(content, range, event, autosnippets) {
                 hit = Some((index, result));
                 break;
             }
@@ -2933,6 +2968,305 @@ fn apply_math_input(
     state.cursor.set_char_range(Some(new_range));
     state.store(ctx, id);
     Some(text_changed)
+}
+
+fn completion_dismissed_id(text_edit_id: Id) -> Id {
+    text_edit_id.with("math-completion-dismissed")
+}
+
+fn completion_selected_id(text_edit_id: Id) -> Id {
+    text_edit_id.with("math-completion-selected")
+}
+
+#[derive(Clone)]
+struct CompletionSelection {
+    prefix: String,
+    index: usize,
+}
+
+fn completion_session_id() -> Id {
+    Id::new("marker-math-completion-session")
+}
+
+#[derive(Clone)]
+struct CompletionSession {
+    annot_id: u64,
+    text_edit_id: Id,
+    query: String,
+}
+
+fn completion_hits(content: &str, caret: usize) -> Option<(math_input::CompletionQuery, Vec<&'static math_input::LatexCommand>)> {
+    let query = math_input::completion_query(content, caret)?;
+    let hits = math_input::rank_completions(&query.prefix);
+    if hits.is_empty() {
+        None
+    } else {
+        Some((query, hits))
+    }
+}
+
+fn completion_popup_open(ctx: &egui::Context, text_edit_id: Id, content: &str, caret: usize) -> bool {
+    let Some((query, _)) = completion_hits(content, caret) else {
+        return false;
+    };
+    let dismissed = ctx.data(|data| {
+        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
+    });
+    dismissed.as_ref() != Some(&query.prefix)
+}
+
+fn apply_completion_keys(
+    ctx: &egui::Context,
+    ui: &mut egui::Ui,
+    text_edit_id: Id,
+    content: &str,
+    range: CCursorRange,
+    annot_id: u64,
+) -> Option<(String, CCursorRange)> {
+    if !range.is_empty() {
+        return None;
+    }
+    let caret = range.primary.index;
+    let (query, hits) = completion_hits(content, caret)?;
+    let dismissed = ctx.data(|data| {
+        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
+    });
+    if dismissed.as_ref() == Some(&query.prefix) {
+        return None;
+    }
+
+    // Clear a stale dismiss when the query changes.
+    if dismissed.is_some() {
+        ctx.data_mut(|data| {
+            data.remove::<String>(completion_dismissed_id(text_edit_id));
+        });
+    }
+
+    let mut selected = ctx
+        .data(|data| data.get_temp::<CompletionSelection>(completion_selected_id(text_edit_id)))
+        .map(|sel| {
+            if sel.prefix == query.prefix {
+                sel.index
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0);
+    if selected >= hits.len() {
+        selected = 0;
+    }
+
+    let mut accept = false;
+    let mut handled_index: Option<usize> = None;
+    let mut navigated = false;
+    ui.input(|input| {
+        for (index, event) in input.events.iter().enumerate() {
+            let Event::Key {
+                key,
+                pressed: true,
+                modifiers,
+                ..
+            } = event
+            else {
+                continue;
+            };
+            if !modifiers.is_none() {
+                continue;
+            }
+            match *key {
+                Key::ArrowDown => {
+                    selected = (selected + 1) % hits.len();
+                    handled_index = Some(index);
+                    navigated = true;
+                    break;
+                }
+                Key::ArrowUp => {
+                    selected = (selected + hits.len() - 1) % hits.len();
+                    handled_index = Some(index);
+                    navigated = true;
+                    break;
+                }
+                Key::Tab | Key::Enter => {
+                    accept = true;
+                    handled_index = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    });
+
+    if let Some(index) = handled_index {
+        ui.input_mut(|input| {
+            if index < input.events.len() {
+                input.events.remove(index);
+            }
+            if accept {
+                input.consume_key(Modifiers::NONE, Key::Tab);
+                input.consume_key(Modifiers::NONE, Key::Enter);
+            } else if navigated {
+                input.consume_key(Modifiers::NONE, Key::ArrowUp);
+                input.consume_key(Modifiers::NONE, Key::ArrowDown);
+            }
+        });
+    }
+
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            completion_selected_id(text_edit_id),
+            CompletionSelection {
+                prefix: query.prefix.clone(),
+                index: selected,
+            },
+        );
+        data.insert_temp(
+            completion_session_id(),
+            CompletionSession {
+                annot_id,
+                text_edit_id,
+                query: query.prefix.clone(),
+            },
+        );
+    });
+
+    if accept {
+        let cmd = hits[selected];
+        ctx.data_mut(|data| {
+            data.remove::<CompletionSelection>(completion_selected_id(text_edit_id));
+            data.remove::<CompletionSession>(completion_session_id());
+            data.remove::<String>(completion_dismissed_id(text_edit_id));
+        });
+        return Some(math_input::accept_completion(content, &query, cmd));
+    }
+
+    None
+}
+
+/// `handle_keys` runs before the editor and clears `editing` on Escape. When a
+/// completion popup was open, put the annotation back into edit mode and treat
+/// Escape as "dismiss the list" only.
+fn reclaim_edit_after_completion_escape(app: &mut MarkerApp, ctx: &egui::Context) {
+    if !ctx.input(|input| input.key_pressed(Key::Escape)) {
+        return;
+    }
+    let Some(session) = ctx.data(|data| data.get_temp::<CompletionSession>(completion_session_id()))
+    else {
+        return;
+    };
+    let Some(tab) = app.tab_mut() else {
+        return;
+    };
+    if tab.editing.is_some() {
+        return;
+    }
+    tab.editing = Some(session.annot_id);
+    tab.focus_edit = true;
+    let text_edit_id = session.text_edit_id;
+    let query = session.query.clone();
+    let annot_id = session.annot_id;
+    ctx.data_mut(|data| {
+        data.insert_temp(completion_dismissed_id(text_edit_id), query);
+        data.remove::<CompletionSession>(completion_session_id());
+        data.remove::<CompletionSelection>(completion_selected_id(text_edit_id));
+    });
+    ctx.input_mut(|input| {
+        input.consume_key(Modifiers::NONE, Key::Escape);
+    });
+    app.begin_edit_undo(annot_id);
+}
+
+fn paint_math_completion(
+    ctx: &egui::Context,
+    ui: &egui::Ui,
+    text_edit_id: Id,
+    annot_id: u64,
+    content: &str,
+    output: &EditorOutput,
+) {
+    let Some((index, _)) = output.caret else {
+        ctx.data_mut(|data| data.remove::<CompletionSession>(completion_session_id()));
+        return;
+    };
+    let Some((query, hits)) = completion_hits(content, index) else {
+        ctx.data_mut(|data| {
+            data.remove::<CompletionSession>(completion_session_id());
+            data.remove::<CompletionSelection>(completion_selected_id(text_edit_id));
+        });
+        return;
+    };
+    let dismissed = ctx.data(|data| {
+        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
+    });
+    if dismissed.as_ref() == Some(&query.prefix) {
+        ctx.data_mut(|data| data.remove::<CompletionSession>(completion_session_id()));
+        return;
+    }
+    if dismissed.is_some() {
+        ctx.data_mut(|data| {
+            data.remove::<String>(completion_dismissed_id(text_edit_id));
+        });
+    }
+
+    let selected = ctx
+        .data(|data| data.get_temp::<CompletionSelection>(completion_selected_id(text_edit_id)))
+        .map(|sel| {
+            if sel.prefix == query.prefix {
+                sel.index.min(hits.len().saturating_sub(1))
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0);
+
+    ctx.data_mut(|data| {
+        data.insert_temp(
+            completion_session_id(),
+            CompletionSession {
+                annot_id,
+                text_edit_id,
+                query: query.prefix.clone(),
+            },
+        );
+    });
+
+    let caret_rect = output.galley.pos_from_cursor(CCursor {
+        index,
+        prefer_next_row: true,
+    });
+    let anchor = Pos2::new(
+        output.galley_pos.x + caret_rect.min.x,
+        output.galley_pos.y + caret_rect.max.y + 2.0,
+    );
+
+    let visible = hits.len().min(8);
+    egui::Area::new(text_edit_id.with("math-completion-popup"))
+        .order(egui::Order::Tooltip)
+        .fixed_pos(anchor)
+        .interactable(false)
+        .show(ctx, |ui| {
+            Frame::popup(ui.style())
+                .inner_margin(egui::Margin::symmetric(6, 4))
+                .show(ui, |ui| {
+                    ui.set_min_width(120.0);
+                    ui.spacing_mut().item_spacing.y = 1.0;
+                    for (i, cmd) in hits.iter().take(visible).enumerate() {
+                        let row = format!("{}  \\{}", cmd.preview, cmd.name);
+                        let rich = if i == selected {
+                            egui::RichText::new(row).strong()
+                        } else {
+                            egui::RichText::new(row)
+                        };
+                        ui.label(rich);
+                    }
+                    if hits.len() > visible {
+                        ui.label(
+                            egui::RichText::new(format!("+{} more", hits.len() - visible)).weak(),
+                        );
+                    }
+                });
+        });
+    // Keep the TextEdit focused; the popup must not steal keyboard focus.
+    let _ = ui;
 }
 
 fn ime_composing(ui: &egui::Ui) -> bool {

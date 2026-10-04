@@ -20,6 +20,9 @@ pub struct Settings {
     /// Warm sepia fill behind page tiles instead of white paper.
     #[serde(default)]
     pub sepia: bool,
+    /// Opt-in LaTeX autosnippets inside text boxes (`//` → `\frac`, `mk`, `dm`).
+    #[serde(default)]
+    pub math_autosnippets: bool,
     #[serde(default)]
     pub recent: Vec<PathBuf>,
 }
@@ -38,6 +41,7 @@ impl Default for Settings {
             shape_width: 1.5,
             toolbar_visible: true,
             sepia: false,
+            math_autosnippets: false,
             recent: Vec::new(),
         }
     }
@@ -196,12 +200,31 @@ mod tests {
         let (dir, path) = test_config_path("round-trip");
         let settings = Settings {
             toolbar_visible: false,
+            math_autosnippets: true,
             ..Settings::default()
         };
         settings.save_to(&path);
         let loaded = Settings::load_from(&path);
         assert!(!loaded.toolbar_visible);
+        assert!(loaded.math_autosnippets);
 
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn math_autosnippets_defaults_false() {
+        assert!(!Settings::default().math_autosnippets);
+        let (dir, path) = test_config_path("autosnippets-default");
+        Settings::default().save_to(&path);
+        let text = fs::read_to_string(&path).expect("read");
+        let without: String = text
+            .lines()
+            .filter(|line| !line.contains("math_autosnippets"))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        fs::write(&path, without).expect("write");
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.math_autosnippets);
         cleanup(&dir);
     }
 }

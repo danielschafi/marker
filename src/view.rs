@@ -1675,27 +1675,51 @@ fn resize_target(
     None
 }
 
-fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
-    let Some(tab) = app.tab() else {
+fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
+    let tab_idx = app.active;
+    if app.tabs.get_mut(tab_idx).is_none() {
         return;
+    }
+    if let Some(tab) = app.tabs.get_mut(tab_idx) {
+        tab.ensure_annot_index();
+    }
+    let frame = app.tile_frame;
+    let highlight_color = app.settings.highlight_color;
+    let page_bg = if app.settings.sepia {
+        Color32::from_rgb(244, 236, 216)
+    } else {
+        Color32::WHITE
     };
-    let render_scale = tab.doc.render_scale(pixels_per_point);
-    let (first, last) = visible_pages(&tab.doc, view);
+    let (render_scale, page_range) = {
+        let tab = app.tabs.get(tab_idx).expect("checked");
+        (
+            tab.doc.render_scale(pixels_per_point),
+            visible_pages(&tab.doc, view),
+        )
+    };
+    let (first, last) = page_range;
     for page in first..=last {
-        let rect = tab.doc.page_rect(page, view);
+        let rect = app.tabs.get(tab_idx).expect("checked").doc.page_rect(page, view);
         let shadow = rect.expand(2.0).translate(Vec2::new(0.0, 4.0));
         painter.rect_filled(shadow, 6.0, Color32::from_black_alpha(28));
-        let page_bg = if app.settings.sepia {
-            Color32::from_rgb(244, 236, 216)
-        } else {
-            Color32::WHITE
-        };
         painter.rect_filled(rect, 1.0, page_bg);
         // Highlights underpaint paper so glyphs (opaque tile ink) stay readable.
-        paint_highlight_fills(app, painter, page, view);
-        paint_tiles(&tab.doc, painter, page, view, render_scale, pixels_per_point);
+        let tab = app.tabs.get(tab_idx).expect("checked");
+        paint_highlight_fills(tab, highlight_color, painter, page, view);
+        if let Some(tab) = app.tabs.get_mut(tab_idx) {
+            paint_tiles(
+                &mut tab.doc,
+                painter,
+                page,
+                view,
+                render_scale,
+                pixels_per_point,
+                frame,
+            );
+        }
+        let tab = app.tabs.get(tab_idx).expect("checked");
         paint_search_hits(tab, painter, page, view);
-        paint_annotations(app, painter, page, view);
+        paint_annotations(tab, painter, page, view);
     }
     paint_drag_preview(app, painter, view);
     paint_learning_selection(app, painter, view);
@@ -1708,19 +1732,18 @@ fn highlight_fill(color: crate::geom::Rgb) -> Color32 {
     Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
 }
 
-fn paint_highlight_fills(app: &MarkerApp, painter: &egui::Painter, page: usize, view: Rect) {
-    let Some(tab) = app.tab() else {
-        return;
-    };
+fn paint_highlight_fills(
+    tab: &Tab,
+    highlight_color: crate::geom::Rgb,
+    painter: &egui::Painter,
+    page: usize,
+    view: Rect,
+) {
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
-    for annot in tab
-        .doc
-        .session
-        .annotations
-        .iter()
-        .filter(|annot| annot.page == page)
-    {
+    let indices = tab.annot_by_page.get(page).map(|v| v.as_slice()).unwrap_or(&[]);
+    for &index in indices {
+        let annot = &tab.doc.session.annotations[index];
         if let AnnotKind::Highlight { quads, color } = &annot.kind {
             let fill = highlight_fill(*color);
             for quad in quads {
@@ -1743,7 +1766,7 @@ fn paint_highlight_fills(app: &MarkerApp, painter: &egui::Painter, page: usize, 
         if *drag_page != page {
             return;
         }
-        let fill = highlight_fill(app.settings.highlight_color);
+        let fill = highlight_fill(highlight_color);
         let range = match (anchor, current, word_lo, word_hi) {
             (Some(a), Some(c), Some(wlo), Some(whi)) => {
                 Some(((*a).min(*c).min(*wlo), (*a).max(*c).max(*whi)))
@@ -1762,7 +1785,7 @@ fn paint_highlight_fills(app: &MarkerApp, painter: &egui::Painter, page: usize, 
     }
 }
 
-fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
+pub(crate) fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
     if doc.pages.is_empty() {
         return (0, 0);
     }
@@ -1782,12 +1805,13 @@ fn visible_pages(doc: &DocState, view: Rect) -> (usize, usize) {
 }
 
 fn paint_tiles(
-    doc: &DocState,
+    doc: &mut DocState,
     painter: &egui::Painter,
     page: usize,
     view: Rect,
     render_scale: f32,
     pixels_per_point: f32,
+    frame: u64,
 ) {
     let target_bits = render_scale.to_bits();
     let page_tiles: Vec<_> = doc
@@ -1805,7 +1829,8 @@ fn paint_tiles(
         .filter(|(key, _)| !has_target || key.scale_bits == target_bits)
         .collect();
     tiles.sort_by_key(|(key, _)| (key.scale_bits == target_bits, key.scale_bits));
-    for (_key, tile) in tiles {
+    let mut draws = Vec::new();
+    for (key, tile) in tiles {
         let x0 = tile.x as f32 / tile.scale;
         let y0 = tile.y as f32 / tile.scale;
         let x1 = (tile.x as f32 + tile.w as f32) / tile.scale;
@@ -1814,13 +1839,19 @@ fn paint_tiles(
         let max = doc.page_to_screen(page, PdfPoint::new(x1, y1), view);
         let dest = snap_rect_to_pixels(Rect::from_min_max(min, max), pixels_per_point);
         if dest.intersects(view) {
-            painter.image(
-                tile.texture.id(),
-                dest,
-                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            draws.push((*key, dest, tile.texture.id()));
         }
+    }
+    for (key, dest, texture) in draws {
+        if let Some(tile) = doc.tiles.get_mut(&key) {
+            tile.last_used_frame = frame;
+        }
+        painter.image(
+            texture,
+            dest,
+            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+            Color32::WHITE,
+        );
     }
 }
 
@@ -1855,19 +1886,12 @@ fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
     }
 }
 
-fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view: Rect) {
-    let Some(tab) = app.tab() else {
-        return;
-    };
+fn paint_annotations(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect) {
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
-    for annot in tab
-        .doc
-        .session
-        .annotations
-        .iter()
-        .filter(|annot| annot.page == page)
-    {
+    let indices = tab.annot_by_page.get(page).map(|v| v.as_slice()).unwrap_or(&[]);
+    for &index in indices {
+        let annot = &tab.doc.session.annotations[index];
         let selected = tab.is_selected(annot.id);
         let editing = tab.editing == Some(annot.id);
         match &annot.kind {
@@ -2893,6 +2917,11 @@ fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
     let Some(tab) = app.tab_mut() else {
         return;
     };
+    let epoch = tab.doc.session.epoch;
+    if tab.image_textures_epoch == epoch {
+        return;
+    }
+    tab.image_textures_epoch = epoch;
     let live: Vec<(u64, usize, std::sync::Arc<[u8]>, u32, u32)> = tab
         .doc
         .session

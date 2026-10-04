@@ -83,6 +83,10 @@ pub(crate) struct MarkerApp {
     exit_flush_done: bool,
     /// Tile replies waiting for a capped UI-thread upload batch.
     pending_pdf_tiles: VecDeque<PdfReply>,
+    /// Monotonic frame id for tile LRU (incremented each `update`).
+    pub(crate) tile_frame: u64,
+    /// Keyboard-focused tab; unfocused tabs are trimmed to a smaller tile share.
+    tile_focus_tab: usize,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -172,6 +176,14 @@ pub(crate) struct Tab {
     redo: Vec<UndoEntry>,
     /// In-flight page insert/delete that participates in undo/redo.
     page_op: Option<PendingPageOp>,
+    /// Annotation indices per page; rebuilt when `session.epoch` changes.
+    pub(crate) annot_by_page: Vec<Vec<usize>>,
+    annot_index_epoch: u64,
+    /// Last `session.epoch` when image annotation textures were refreshed.
+    pub(crate) image_textures_epoch: u64,
+    /// Cached `session.is_dirty()` for autosave (keyed on `session.epoch`).
+    autosave_dirty_epoch: u64,
+    autosave_dirty: bool,
 }
 
 /// Page-space glyph range selected with the Select tool (for copy, etc.).
@@ -194,6 +206,21 @@ pub(crate) struct ContextMenu {
 }
 
 impl Tab {
+    pub(crate) fn ensure_annot_index(&mut self) {
+        let epoch = self.doc.session.epoch;
+        if self.annot_index_epoch == epoch {
+            return;
+        }
+        self.annot_index_epoch = epoch;
+        let pages = self.doc.pages.len();
+        self.annot_by_page = vec![Vec::new(); pages.max(1)];
+        for (index, annot) in self.doc.session.annotations.iter().enumerate() {
+            if annot.page < self.annot_by_page.len() {
+                self.annot_by_page[annot.page].push(index);
+            }
+        }
+    }
+
     pub(crate) fn select_only(&mut self, id: u64) {
         self.selected.clear();
         self.selected.push(id);
@@ -254,6 +281,7 @@ pub(crate) struct CachedTile {
     pub(crate) y: i32,
     pub(crate) w: u32,
     pub(crate) h: u32,
+    pub(crate) last_used_frame: u64,
     pub(crate) texture: egui::TextureHandle,
 }
 
@@ -497,6 +525,8 @@ impl MarkerApp {
             title_tab_gen: 0,
             exit_flush_done: false,
             pending_pdf_tiles: VecDeque::new(),
+            tile_frame: 0,
+            tile_focus_tab: 0,
         };
         for path in paths {
             app.open_path(path);
@@ -1506,6 +1536,14 @@ impl eframe::App for MarkerApp {
         if ctx.input(|input| input.viewport().close_requested()) {
             self.flush_on_exit_if_needed();
         }
+        let pixels_per_point = ctx.pixels_per_point();
+        if self.active != self.tile_focus_tab && self.tile_focus_tab < self.tabs.len() {
+            trim_tab_tiles(self, self.tile_focus_tab, UNFOCUSED_TAB_TILE_BYTES, pixels_per_point);
+        }
+        if self.active != self.tile_focus_tab {
+            self.tile_focus_tab = self.active;
+        }
+        self.tile_frame += 1;
         self.poll_ipc(ctx);
         self.poll_dialog();
         self.poll(ctx);
@@ -1704,6 +1742,11 @@ impl MarkerApp {
                         undo: Vec::new(),
                         redo: Vec::new(),
                         page_op: None,
+                        annot_by_page: Vec::new(),
+                        annot_index_epoch: 0,
+                        image_textures_epoch: 0,
+                        autosave_dirty_epoch: 0,
+                        autosave_dirty: false,
                     });
                     self.active = self.tabs.len() - 1;
                     if self.tabs.len() > 1 {
@@ -1717,6 +1760,8 @@ impl MarkerApp {
             },
             PdfReply::Tile { gen, tile } => {
                 let key = tile_key(&tile);
+                let frame = self.tile_frame;
+                let pixels_per_point = ctx.pixels_per_point();
                 let Some(tab) = self.tab_by_gen_mut(gen) else {
                     return;
                 };
@@ -1742,10 +1787,11 @@ impl MarkerApp {
                         y: tile.y,
                         w: tile.width,
                         h: tile.height,
+                        last_used_frame: frame,
                         texture,
                     },
                 );
-                trim_tiles(&mut tab.doc, ctx.pixels_per_point());
+                trim_process_tiles(self, pixels_per_point);
             }
             PdfReply::TileMiss {
                 gen,
@@ -2697,7 +2743,14 @@ impl MarkerApp {
                 let Some(tab) = self.tab_by_gen_mut(gen) else {
                     continue;
                 };
-                let dirty = tab.doc.session.is_dirty();
+                let dirty = if tab.doc.session.epoch == tab.autosave_dirty_epoch {
+                    tab.autosave_dirty
+                } else {
+                    let dirty = tab.doc.session.is_dirty();
+                    tab.autosave_dirty_epoch = tab.doc.session.epoch;
+                    tab.autosave_dirty = dirty;
+                    dirty
+                };
                 if !dirty && !tab.force_save {
                     continue;
                 }
@@ -4059,19 +4112,103 @@ fn tile_key(tile: &crate::pdf::TileImage) -> TileKey {
     }
 }
 
-fn trim_tiles(doc: &mut DocState, pixels_per_point: f32) {
-    let keep = doc.render_scale(pixels_per_point).to_bits();
-    while doc.tiles.len() > 180 {
-        // Prefer dropping other zoom buckets so the current scale stays coherent.
-        let stale = doc
-            .tiles
-            .keys()
-            .find(|key| key.scale_bits != keep)
-            .copied();
-        let Some(key) = stale.or_else(|| doc.tiles.keys().next().copied()) else {
+const PROCESS_TILE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
+const UNFOCUSED_TAB_TILE_BYTES: usize = 32 * 1024 * 1024;
+
+fn tile_byte_size(tile: &CachedTile) -> usize {
+    tile.w as usize * tile.h as usize * 4
+}
+
+fn tab_tile_bytes(tab: &Tab) -> usize {
+    tab.doc.tiles.values().map(tile_byte_size).sum()
+}
+
+fn process_tile_bytes(app: &MarkerApp) -> usize {
+    app.tabs.iter().map(tab_tile_bytes).sum()
+}
+
+/// Lower tier and older `last_used_frame` are evicted first.
+fn tile_eviction_tier(app: &MarkerApp, tab_idx: usize, key: &TileKey, pixels_per_point: f32) -> u8 {
+    let tab = &app.tabs[tab_idx];
+    let on_screen = tab_idx == app.active
+        || app
+            .split
+            .is_some_and(|split| split.other(app.active) == tab_idx);
+    if !on_screen {
+        return 0;
+    }
+    let view = if tab_idx == app.active {
+        app.view_rect
+    } else {
+        app.split_view_rect
+    };
+    let (first, last) = view::visible_pages(&tab.doc, view);
+    let current_bits = tab.doc.render_scale(pixels_per_point).to_bits();
+    if key.page >= first && key.page <= last && key.scale_bits == current_bits {
+        return 3;
+    }
+    if key.page >= first && key.page <= last {
+        return 2;
+    }
+    1
+}
+
+fn tile_evict_rank(tier: u8, last_used: u64, tab_idx: usize, key: &TileKey) -> (u8, u64, usize, usize, u32, i32, i32) {
+    (tier, last_used, tab_idx, key.page, key.scale_bits, key.col, key.row)
+}
+
+fn pick_tile_to_evict(app: &MarkerApp, pixels_per_point: f32) -> Option<(usize, TileKey)> {
+    let mut best: Option<(u8, u64, usize, TileKey)> = None;
+    for (tab_idx, tab) in app.tabs.iter().enumerate() {
+        for (key, tile) in &tab.doc.tiles {
+            let tier = tile_eviction_tier(app, tab_idx, key, pixels_per_point);
+            let candidate = (tier, tile.last_used_frame, tab_idx, *key);
+            let better = match best {
+                None => true,
+                Some(prev) => {
+                    tile_evict_rank(candidate.0, candidate.1, candidate.2, &candidate.3)
+                        < tile_evict_rank(prev.0, prev.1, prev.2, &prev.3)
+                }
+            };
+            if better {
+                best = Some(candidate);
+            }
+        }
+    }
+    best.map(|(_, _, tab_idx, key)| (tab_idx, key))
+}
+
+fn trim_process_tiles(app: &mut MarkerApp, pixels_per_point: f32) {
+    while process_tile_bytes(app) > PROCESS_TILE_BUDGET_BYTES {
+        let Some((tab_idx, key)) = pick_tile_to_evict(app, pixels_per_point) else {
             break;
         };
-        doc.tiles.remove(&key);
+        app.tabs[tab_idx].doc.tiles.remove(&key);
+    }
+}
+
+fn trim_tab_tiles(app: &mut MarkerApp, tab_idx: usize, max_bytes: usize, pixels_per_point: f32) {
+    while tab_idx < app.tabs.len() && tab_tile_bytes(&app.tabs[tab_idx]) > max_bytes {
+        let mut best: Option<(u8, u64, TileKey)> = None;
+        let tab = &app.tabs[tab_idx];
+        for (key, tile) in &tab.doc.tiles {
+            let tier = tile_eviction_tier(app, tab_idx, key, pixels_per_point);
+            let candidate = (tier, tile.last_used_frame, *key);
+            let better = match best {
+                None => true,
+                Some(prev) => {
+                    tile_evict_rank(candidate.0, candidate.1, tab_idx, &candidate.2)
+                        < tile_evict_rank(prev.0, prev.1, tab_idx, &prev.2)
+                }
+            };
+            if better {
+                best = Some(candidate);
+            }
+        }
+        let Some((_, _, key)) = best else {
+            break;
+        };
+        app.tabs[tab_idx].doc.tiles.remove(&key);
     }
 }
 

@@ -434,6 +434,10 @@ pub fn closed_math_spans(content: &str) -> Vec<MathSpanRef> {
 }
 
 /// A laid-out run relative to the top-left of the text box (y down, points).
+///
+/// Paint and save use `rich_text::layout_rich_text`. This stays so existing
+/// callers keep compiling.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Debug)]
 pub enum LaidRun {
     Prose {
@@ -459,6 +463,7 @@ pub enum LaidRun {
 /// Flow prose + math into lines within `max_width`.
 ///
 /// `measure_prose(text) -> (width, height)` and `measure_math(inner, display) -> (w, h)`.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn layout_runs(
     content: &str,
     max_width: f32,
@@ -561,6 +566,7 @@ pub fn layout_runs(
     (runs, height)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn split_prose_tokens(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
@@ -863,6 +869,43 @@ mod tests {
             } => assert_eq!(&content[*inner_start..*inner_end], "x^2"),
             _ => panic!("expected one inline equation"),
         }
+    }
+
+    #[test]
+    fn layout_runs_still_places_inline_math() {
+        let (runs, height) = layout_runs(
+            "ab $x$",
+            200.0,
+            12.0,
+            &|text| (text.chars().count() as f32 * 5.0, 12.0),
+            &|inner, _| ((inner.chars().count() as f32 * 8.0).max(8.0), 14.0),
+        );
+        assert!(height >= 12.0);
+        let mut saw_math = false;
+        for run in &runs {
+            match run {
+                LaidRun::Prose { text, x, y, .. } => {
+                    assert!(!text.is_empty());
+                    assert!(*x >= 0.0 && *y >= 0.0);
+                }
+                LaidRun::Math {
+                    inner,
+                    display,
+                    key,
+                    x,
+                    y,
+                    w,
+                    h,
+                } => {
+                    assert!(!display);
+                    assert_eq!(inner, "x");
+                    assert_eq!(*key, span_key(inner, false));
+                    assert!(*x > 0.0 && *y >= 0.0 && *w > 0.0 && *h > 0.0);
+                    saw_math = true;
+                }
+            }
+        }
+        assert!(saw_math);
     }
 
     #[test]

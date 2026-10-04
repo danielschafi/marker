@@ -16,7 +16,8 @@ use crate::app::{
 };
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
-use crate::math_spans::{self, LaidRun};
+use crate::math::rich_text::{self, LaidRun, MathMetrics, TextMeasure};
+use crate::math_spans;
 use crate::pdf::{PageInfo, TILE_PX};
 use crate::theme;
 
@@ -1719,7 +1720,7 @@ fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixe
         }
         let tab = app.tabs.get(tab_idx).expect("checked");
         paint_search_hits(tab, painter, page, view);
-        paint_annotations(tab, painter, page, view);
+        paint_annotations(tab, &app.math_cache, painter, page, view);
     }
     paint_drag_preview(app, painter, view);
     paint_learning_selection(app, painter, view);
@@ -1886,7 +1887,13 @@ fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
     }
 }
 
-fn paint_annotations(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect) {
+fn paint_annotations(
+    tab: &Tab,
+    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    painter: &egui::Painter,
+    page: usize,
+    view: Rect,
+) {
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
     let indices = tab.annot_by_page.get(page).map(|v| v.as_slice()).unwrap_or(&[]);
@@ -1910,12 +1917,12 @@ fn paint_annotations(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
                         paint_rich_text(
                             &text_painter,
                             painter.ctx(),
-                            tab,
-                            annot.id,
+                            cache,
                             screen,
                             content,
                             *size,
-                            color.to_color32(),
+                            *color,
+                            tab.doc.scale,
                         );
                     } else {
                         paint_wrapped(
@@ -2349,57 +2356,98 @@ fn paint_wrapped(
     painter.galley(rect.min, galley, color);
 }
 
+/// Egui font widths in PDF points. Paint and save share this so a 5 pt
+/// annotation is not measured at 8 px on screen and 6 pt in the file.
+pub(crate) struct EguiMeasure<'a> {
+    pub(crate) ctx: &'a egui::Context,
+}
+
+impl TextMeasure for EguiMeasure<'_> {
+    fn width(&self, text: &str, size_pt: f32) -> f32 {
+        if text.is_empty() {
+            return 0.0;
+        }
+        self.ctx.fonts_mut(|fonts| {
+            fonts
+                .layout_no_wrap(
+                    text.to_owned(),
+                    FontId::new(size_pt.max(0.5), FontFamily::Proportional),
+                    Color32::PLACEHOLDER,
+                )
+                .size()
+                .x
+        })
+    }
+
+    fn line_height(&self, size_pt: f32) -> f32 {
+        self.font_metrics(size_pt).0
+    }
+
+    fn ascent(&self, size_pt: f32) -> f32 {
+        self.font_metrics(size_pt).1
+    }
+}
+
+impl EguiMeasure<'_> {
+    /// `(line_height, ascent)` from one glyph so both callers use the same font.
+    fn font_metrics(&self, size_pt: f32) -> (f32, f32) {
+        self.ctx.fonts_mut(|fonts| {
+            let galley = fonts.layout_no_wrap(
+                "x".to_owned(),
+                FontId::new(size_pt.max(0.5), FontFamily::Proportional),
+                Color32::PLACEHOLDER,
+            );
+            match galley.rows.first().and_then(|row| row.glyphs.first()) {
+                Some(glyph) => (glyph.font_height, glyph.font_ascent),
+                None => (size_pt * 1.25, size_pt * 0.8),
+            }
+        })
+    }
+}
+
+pub(crate) fn cached_math_metrics(
+    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    inner: &str,
+    display: bool,
+    size_pt: f32,
+    color: crate::geom::Rgb,
+) -> Option<MathMetrics> {
+    let key = crate::math::MathKey::new(inner, display, size_pt, color);
+    match cache.get(&key) {
+        Some(crate::math::EntryKind::Ready { value, .. }) if value.w_pt > 1.0 && value.h_pt > 1.0 => {
+            Some(MathMetrics {
+                w_pt: value.w_pt,
+                h_pt: value.h_pt,
+                baseline_pt: value.baseline_pt,
+            })
+        }
+        Some(
+            crate::math::EntryKind::Ready { .. }
+            | crate::math::EntryKind::Pending { .. }
+            | crate::math::EntryKind::Error { .. },
+        )
+        | None => None,
+    }
+}
+
 fn paint_rich_text(
     painter: &egui::Painter,
     ctx: &egui::Context,
-    tab: &Tab,
-    annot_id: u64,
+    cache: &crate::math::MathCache<crate::app::InlineReady>,
     screen: Rect,
     content: &str,
     size_pt: f32,
-    color: Color32,
+    color: crate::geom::Rgb,
+    scale: f32,
 ) {
-    let scale = tab.doc.scale;
-    let font_px = (size_pt * scale).max(8.0);
-    let line_height = font_px * 1.25;
-    let max_w = screen.width().max(8.0);
-    let measure_prose = |text: &str| {
-        if text.is_empty() {
-            return (0.0, line_height);
-        }
-        ctx.fonts_mut(|fonts| {
-            let galley = fonts.layout_no_wrap(
-                text.to_owned(),
-                FontId::new(font_px, FontFamily::Proportional),
-                color,
-            );
-            (galley.size().x, galley.size().y.max(line_height))
-        })
-    };
-    let measure_math = |inner: &str, display: bool| {
-        let key = math_spans::span_key(inner, display);
-        if let Some(preview) = tab.inline_previews.get(&(annot_id, key)) {
-            if preview.width_pt > 1.0 && preview.height_pt > 1.0 {
-                return (preview.width_pt * scale, preview.height_pt * scale);
-            }
-        }
-        let w = (inner.len() as f32 * font_px * 0.45)
-            .max(font_px)
-            .min(max_w);
-        let h = if display {
-            font_px * 1.8
-        } else {
-            font_px * 1.2
-        };
-        (w, h)
-    };
-    let (runs, _) = math_spans::layout_runs(
-        content,
-        max_w,
-        line_height,
-        &measure_prose,
-        &measure_math,
-    );
+    let ink = color.to_color32();
+    let scale = scale.max(1e-3);
+    let font_px = size_pt * scale;
+    let measure = EguiMeasure { ctx };
+    let width_pt = screen.width() / scale;
+    let runs = rich_text::layout_rich_text(content, size_pt, width_pt, &measure, &|inner, display| {
+        cached_math_metrics(cache, inner, display, size_pt, color)
+    });
     for run in runs {
         match run {
             LaidRun::Prose { text, x, y, .. } => {
@@ -2409,32 +2457,33 @@ fn paint_rich_text(
                 let galley = ctx.fonts_mut(|fonts| {
                     fonts.layout_no_wrap(
                         text,
-                        FontId::new(font_px, FontFamily::Proportional),
-                        color,
+                        FontId::new(font_px.max(0.5), FontFamily::Proportional),
+                        ink,
                     )
                 });
                 painter.galley(
-                    Pos2::new(screen.min.x + x, screen.min.y + y),
+                    Pos2::new(screen.min.x + x * scale, screen.min.y + y * scale),
                     galley,
-                    color,
+                    ink,
                 );
             }
             LaidRun::Math {
                 inner,
                 display,
-                key,
                 x,
                 y,
                 w,
                 h,
+                ..
             } => {
                 let dest = Rect::from_min_size(
-                    Pos2::new(screen.min.x + x, screen.min.y + y),
-                    Vec2::new(w, h),
+                    Pos2::new(screen.min.x + x * scale, screen.min.y + y * scale),
+                    Vec2::new(w * scale, h * scale),
                 );
-                if let Some(preview) = tab.inline_previews.get(&(annot_id, key)) {
-                    if let Some(texture) = preview.texture.as_ref() {
-                        let fitted = fit_math(dest, preview.width_pt, preview.height_pt, scale);
+                let ready = cache.get(&crate::math::MathKey::new(&inner, display, size_pt, color));
+                if let Some(crate::math::EntryKind::Ready { value, .. }) = ready {
+                    if let Some(texture) = value.texture.as_ref() {
+                        let fitted = fit_math(dest, value.w_pt, value.h_pt, scale);
                         painter.image(
                             texture.id(),
                             fitted,
@@ -2449,7 +2498,7 @@ fn paint_rich_text(
                 } else {
                     format!("${inner}$")
                 };
-                paint_wrapped(painter, ctx, dest, &fallback, font_px * 0.85, color);
+                paint_wrapped(painter, ctx, dest, &fallback, font_px.max(0.5) * 0.85, ink);
             }
         }
     }
@@ -2585,20 +2634,13 @@ fn edit_text_annot(
             (inner, key, span.display, span.start)
         };
         active_key = Some(key);
-        let (overlay_error, preview_tex) = {
-            let Some(tab) = app.tab() else {
-                return;
-            };
-            let preview = tab.inline_previews.get(&(id, key));
-            (
-                preview.and_then(|p| p.error.clone()),
-                preview.and_then(|p| {
-                    p.texture
-                        .clone()
-                        .map(|texture| (texture, p.width_pt, p.height_pt))
-                }),
-            )
-        };
+        let preview = app.inline_preview(id, key);
+        let overlay_error = preview.as_ref().and_then(|p| p.error.clone());
+        let preview_tex = preview.as_ref().and_then(|p| {
+            p.texture
+                .clone()
+                .map(|texture| (texture, p.width_pt, p.height_pt))
+        });
         egui::Area::new(Id::new(("marker-inline-math", gen, id, span_start)))
             .order(egui::Order::Foreground)
             .fixed_pos(Pos2::new(screen.min.x, screen.max.y + 4.0))
@@ -2716,10 +2758,8 @@ fn edit_text_annot(
         }
     } else if let Some(key) = active_key {
         // Only debounce-queue when this island still needs a render.
-        let needs = app.tab().is_some_and(|tab| {
-            !tab.inline_previews.get(&(id, key)).is_some_and(|preview| {
-                !preview.pending && (preview.texture.is_some() || preview.error.is_some())
-            })
+        let needs = !app.inline_preview(id, key).is_some_and(|preview| {
+            !preview.pending && (preview.texture.is_some() || preview.error.is_some())
         });
         if needs {
             queue_keys.push(key);

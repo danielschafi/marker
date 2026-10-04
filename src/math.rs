@@ -1,5 +1,8 @@
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread;
+use std::time::{Duration, Instant};
 
 use typst::foundations::{Dict, IntoValue};
 use typst_as_lib::typst_kit_options::TypstKitFontOptions;
@@ -7,6 +10,282 @@ use typst_as_lib::{TypstAsLibError, TypstEngine};
 use typst_layout::PagedDocument;
 
 use crate::geom::{normalize_latex, Rgb};
+
+#[path = "rich_text.rs"]
+pub mod rich_text;
+
+/// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
+const LIVE_DEBOUNCE: Duration = Duration::from_millis(40);
+const RASTER_SCALE: f32 = 3.0;
+
+pub const MATH_CACHE_CAP: usize = 256;
+pub const MATH_CACHE_BYTE_CAP: usize = 32 * 1024 * 1024;
+
+/// Cache key for one equation. No annotation id, so identical spans share a render.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MathKey {
+    pub source: String,
+    pub display: bool,
+    size_milli: u32,
+    color: (u8, u8, u8),
+}
+
+impl MathKey {
+    pub fn new(source: &str, display: bool, size_pt: f32, color: Rgb) -> Self {
+        Self {
+            source: normalize_latex(source),
+            display,
+            size_milli: (size_pt.max(0.0) * 1000.0).round() as u32,
+            color: (color.r, color.g, color.b),
+        }
+    }
+}
+
+/// What a save should do with one equation's PDF bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdfPlan {
+    /// Raster or error is enough, and PDF bytes are already stored (or the
+    /// equation failed and will not produce any).
+    Have,
+    /// Preview is ready and the PDF still has to be requested.
+    Request,
+    /// Preview has not finished; wait, do not start a second preview job.
+    Wait,
+}
+
+pub fn pdf_plan(pending: bool, ready: bool, has_pdf: bool, failed: bool) -> PdfPlan {
+    if failed || has_pdf {
+        PdfPlan::Have
+    } else if pending || !ready {
+        PdfPlan::Wait
+    } else {
+        PdfPlan::Request
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MathLane {
+    /// The span currently being edited. A newer job replaces the older one.
+    Live,
+    /// Visible equations. FIFO, and a key already queued does not run twice.
+    Background,
+}
+
+#[derive(Clone, Debug)]
+pub struct ScheduledJob<T> {
+    pub key: MathKey,
+    pub lane: MathLane,
+    pub payload: T,
+}
+
+/// Two lanes in front of the math thread. Tested without Typst.
+pub struct MathScheduler<T> {
+    live: Option<ScheduledJob<T>>,
+    live_ready: Option<Instant>,
+    background: VecDeque<ScheduledJob<T>>,
+    background_keys: HashSet<MathKey>,
+    debounce: Duration,
+}
+
+impl<T> MathScheduler<T> {
+    pub fn new(debounce: Duration) -> Self {
+        Self {
+            live: None,
+            live_ready: None,
+            background: VecDeque::new(),
+            background_keys: HashSet::new(),
+            debounce,
+        }
+    }
+
+    pub fn push(&mut self, job: ScheduledJob<T>, now: Instant) {
+        match job.lane {
+            MathLane::Live => {
+                self.live = Some(job);
+                self.live_ready = Some(now + self.debounce);
+            }
+            MathLane::Background => {
+                if !self.background_keys.insert(job.key.clone()) {
+                    return;
+                }
+                self.background.push_back(job);
+            }
+        }
+    }
+
+    /// Next job that should run at `now`.
+    ///
+    /// A due live job wins. Until then, background jobs keep draining so a
+    /// keystroke cannot cancel equations that are not being edited.
+    pub fn poll(&mut self, now: Instant) -> Option<ScheduledJob<T>> {
+        if self.live_ready.is_some_and(|ready| now >= ready) {
+            self.live_ready = None;
+            return self.live.take();
+        }
+        let job = self.background.pop_front()?;
+        self.background_keys.remove(&job.key);
+        Some(job)
+    }
+
+    pub fn live_deadline(&self) -> Option<Instant> {
+        self.live_ready
+    }
+}
+
+struct Entry<T> {
+    last_used: Cell<u64>,
+    kind: EntryKind<T>,
+}
+
+#[derive(Debug)]
+pub enum EntryKind<T> {
+    Pending { req: u64 },
+    Ready { value: T, bytes: usize },
+    Error { message: String },
+}
+
+/// Bounded render cache. `T` is the ready payload (texture lives in the app).
+pub struct MathCache<T> {
+    entries: HashMap<MathKey, Entry<T>>,
+    clock: Cell<u64>,
+    bytes: usize,
+    revision: u64,
+    cap: usize,
+    byte_cap: usize,
+}
+
+impl<T> MathCache<T> {
+    pub fn new() -> Self {
+        Self::with_limits(MATH_CACHE_CAP, MATH_CACHE_BYTE_CAP)
+    }
+
+    pub fn with_limits(cap: usize, byte_cap: usize) -> Self {
+        Self {
+            entries: HashMap::new(),
+            clock: Cell::new(0),
+            bytes: 0,
+            revision: 0,
+            cap: cap.max(1),
+            byte_cap,
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn bytes(&self) -> usize {
+        self.bytes
+    }
+
+    pub fn get(&self, key: &MathKey) -> Option<&EntryKind<T>> {
+        let entry = self.entries.get(key)?;
+        self.touch(entry);
+        Some(&entry.kind)
+    }
+
+    pub fn insert_pending(&mut self, key: MathKey, req: u64) {
+        self.bump_revision();
+        self.remove_bytes(&key);
+        let entry = Entry {
+            last_used: Cell::new(0),
+            kind: EntryKind::Pending { req },
+        };
+        self.touch(&entry);
+        self.entries.insert(key, entry);
+        self.evict();
+    }
+
+    pub fn insert_ready(&mut self, key: MathKey, value: T, bytes: usize) {
+        self.bump_revision();
+        self.remove_bytes(&key);
+        self.bytes += bytes;
+        let entry = Entry {
+            last_used: Cell::new(0),
+            kind: EntryKind::Ready { value, bytes },
+        };
+        self.touch(&entry);
+        self.entries.insert(key, entry);
+        self.evict();
+    }
+
+    pub fn insert_error(&mut self, key: MathKey, message: String) {
+        self.bump_revision();
+        self.remove_bytes(&key);
+        let entry = Entry {
+            last_used: Cell::new(0),
+            kind: EntryKind::Error { message },
+        };
+        self.touch(&entry);
+        self.entries.insert(key, entry);
+        self.evict();
+    }
+
+    pub fn ready_mut(&mut self, key: &MathKey) -> Option<&mut T> {
+        let entry = self.entries.get_mut(key)?;
+        match &mut entry.kind {
+            EntryKind::Ready { value, .. } => Some(value),
+            EntryKind::Pending { .. } | EntryKind::Error { .. } => None,
+        }
+    }
+
+    fn bump_revision(&mut self) {
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    fn touch(&self, entry: &Entry<T>) {
+        let next = self.clock.get().wrapping_add(1);
+        self.clock.set(next);
+        entry.last_used.set(next);
+    }
+
+    fn remove_bytes(&mut self, key: &MathKey) {
+        let Some(entry) = self.entries.get(key) else {
+            return;
+        };
+        if let EntryKind::Ready { bytes, .. } = &entry.kind {
+            self.bytes = self.bytes.saturating_sub(*bytes);
+        }
+    }
+
+    fn evict(&mut self) {
+        while self.over_cap() {
+            let Some(oldest) = self.oldest_key() else {
+                break;
+            };
+            // A single oversized texture stays; dropping it would render nothing.
+            if self.entries.len() == 1 {
+                break;
+            }
+            self.remove_bytes(&oldest);
+            self.entries.remove(&oldest);
+            self.bump_revision();
+        }
+    }
+
+    fn over_cap(&self) -> bool {
+        self.entries.len() > self.cap || (self.bytes > self.byte_cap && self.entries.len() > 1)
+    }
+
+    fn oldest_key(&self) -> Option<MathKey> {
+        self.entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used.get())
+            .map(|(key, _)| key.clone())
+    }
+}
+
+impl<T> Default for MathCache<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 const TEMPLATE: &str = r#"
 #import sys: inputs
@@ -36,23 +315,34 @@ pub struct MathRender {
     /// When set, this render belongs to an inline `$...$` island inside a Text annot.
     pub span_key: Option<u64>,
     pub req: u64,
+    pub key: MathKey,
     pub preview: Option<RgbaImage>,
+    pub svg: Option<String>,
     pub pdf: Option<Vec<u8>>,
     pub width_pt: f32,
     pub height_pt: f32,
+    /// Distance from the top of the raster to the equation baseline, when Typst set one.
+    pub baseline_pt: Option<f32>,
+    pub raster_scale: f32,
     pub error: Option<String>,
+    pub want_pdf: bool,
+}
+
+struct RenderRequest {
+    gen: u64,
+    id: u64,
+    span_key: Option<u64>,
+    req: u64,
+    source: String,
+    size: f32,
+    color: Rgb,
+    display: bool,
+    lane: MathLane,
+    want_pdf: bool,
 }
 
 enum Job {
-    Render {
-        gen: u64,
-        id: u64,
-        span_key: Option<u64>,
-        req: u64,
-        source: String,
-        size: f32,
-        color: Rgb,
-    },
+    Render(RenderRequest),
     Shutdown,
 }
 
@@ -76,9 +366,24 @@ impl MathWorker {
     }
 
     pub fn request(&self, gen: u64, id: u64, req: u64, source: String, size: f32, color: Rgb) {
-        self.request_span(gen, id, None, req, source, size, color);
+        let display = wants_display_math(&source);
+        self.request_span(
+            gen,
+            id,
+            None,
+            req,
+            source,
+            size,
+            color,
+            display,
+            MathLane::Live,
+            false,
+        );
     }
 
+    /// `lane` selects live vs background scheduling. `want_pdf` skips Typst PDF
+    /// export when false so previews stay cheap until a save asks for bytes.
+    #[allow(clippy::too_many_arguments)]
     pub fn request_span(
         &self,
         gen: u64,
@@ -88,8 +393,11 @@ impl MathWorker {
         source: String,
         size: f32,
         color: Rgb,
+        display: bool,
+        lane: MathLane,
+        want_pdf: bool,
     ) {
-        let _ = self.jobs.send(Job::Render {
+        let _ = self.jobs.send(Job::Render(RenderRequest {
             gen,
             id,
             span_key,
@@ -97,7 +405,10 @@ impl MathWorker {
             source,
             size,
             color,
-        });
+            display,
+            lane,
+            want_pdf,
+        }));
     }
 
     pub fn poll(&self) -> Vec<MathRender> {
@@ -121,100 +432,118 @@ fn reply(ctx: &egui::Context, replies: &Sender<MathRender>, msg: MathRender) {
 }
 
 fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender>) {
-    let mut engine = None;
-    while let Ok(job) = jobs.recv() {
-        match job {
+    // Pay for fonts and the engine before the first equation, not during it.
+    let engine = build_engine();
+    let mut sched: MathScheduler<RenderRequest> = MathScheduler::new(LIVE_DEBOUNCE);
+    loop {
+        if let Some(job) = sched.poll(Instant::now()) {
+            run_job(&ctx, &replies, &engine, job.payload);
+            continue;
+        }
+        let incoming = if let Some(deadline) = sched.live_deadline() {
+            let wait = deadline.saturating_duration_since(Instant::now());
+            match jobs.recv_timeout(wait) {
+                Ok(job) => Some(job),
+                Err(RecvTimeoutError::Timeout) => None,
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        } else {
+            match jobs.recv() {
+                Ok(job) => Some(job),
+                Err(_) => break,
+            }
+        };
+        let Some(incoming) = incoming else {
+            continue;
+        };
+        match incoming {
             Job::Shutdown => break,
-            Job::Render {
-                gen,
-                id,
-                span_key,
-                req,
-                source,
-                size,
-                color,
-            } => {
-                let mut current = (gen, span_key, source, size, color, req);
-                while let Ok(next) = jobs.try_recv() {
-                    match next {
-                        Job::Shutdown => return,
-                        Job::Render {
-                            gen,
-                            id: next_id,
-                            span_key: next_span,
-                            req,
-                            source,
-                            size,
-                            color,
-                        } if next_id == id && next_span == span_key => {
-                            current = (gen, next_span, source, size, color, req);
-                        }
-                        Job::Render {
-                            gen,
-                            id,
-                            span_key,
-                            req,
-                            source,
-                            size,
-                            color,
-                        } => {
-                            let rendered = render_equation(
-                                engine.get_or_insert_with(build_engine),
-                                &source,
-                                size,
-                                color,
-                            );
-                            reply(
-                                &ctx,
-                                &replies,
-                                to_reply(gen, id, span_key, req, rendered),
-                            );
-                        }
-                    }
-                }
-                let (gen, span_key, source, size, color, req) = current;
-                let rendered = render_equation(
-                    engine.get_or_insert_with(build_engine),
-                    &source,
-                    size,
-                    color,
-                );
-                reply(
-                    &ctx,
-                    &replies,
-                    to_reply(gen, id, span_key, req, rendered),
+            Job::Render(request) => {
+                let key = MathKey::new(&request.source, request.display, request.size, request.color);
+                let lane = request.lane;
+                sched.push(
+                    ScheduledJob {
+                        key,
+                        lane,
+                        payload: request,
+                    },
+                    Instant::now(),
                 );
             }
         }
     }
 }
 
-fn to_reply(
-    gen: u64,
-    id: u64,
-    span_key: Option<u64>,
-    req: u64,
-    rendered: Rendered,
-) -> MathRender {
+fn run_job(
+    ctx: &egui::Context,
+    replies: &Sender<MathRender>,
+    engine: &TypstEngine<typst_as_lib::TypstTemplateMainFile>,
+    request: RenderRequest,
+) {
+    let rendered = render_equation(
+        engine,
+        &request.source,
+        request.size,
+        request.color,
+        request.want_pdf,
+    );
+    reply(ctx, replies, to_reply(request, rendered));
+}
+
+fn to_reply(request: RenderRequest, rendered: Rendered) -> MathRender {
+    let key = MathKey::new(
+        &request.source,
+        request.display,
+        request.size,
+        request.color,
+    );
     MathRender {
-        gen,
-        id,
-        span_key,
-        req,
+        gen: request.gen,
+        id: request.id,
+        span_key: request.span_key,
+        req: request.req,
+        key,
         preview: rendered.preview,
+        svg: rendered.svg,
         pdf: rendered.pdf,
         width_pt: rendered.width_pt,
         height_pt: rendered.height_pt,
+        baseline_pt: rendered.baseline_pt,
+        raster_scale: rendered.raster_scale,
         error: rendered.error,
+        want_pdf: request.want_pdf,
     }
 }
 
 struct Rendered {
     preview: Option<RgbaImage>,
+    svg: Option<String>,
     pdf: Option<Vec<u8>>,
     width_pt: f32,
     height_pt: f32,
+    baseline_pt: Option<f32>,
+    raster_scale: f32,
     error: Option<String>,
+}
+
+fn blank_render() -> Rendered {
+    Rendered {
+        preview: None,
+        svg: None,
+        pdf: None,
+        width_pt: 0.0,
+        height_pt: 0.0,
+        baseline_pt: None,
+        raster_scale: 0.0,
+        error: None,
+    }
+}
+
+fn failed_render(error: impl Into<String>) -> Rendered {
+    Rendered {
+        error: Some(error.into()),
+        ..blank_render()
+    }
 }
 
 fn build_engine() -> TypstEngine<typst_as_lib::TypstTemplateMainFile> {
@@ -231,7 +560,7 @@ fn build_engine() -> TypstEngine<typst_as_lib::TypstTemplateMainFile> {
 #[cfg(test)]
 fn render_equation_blocking(source: &str, size: f32, color: Rgb) -> Rendered {
     let engine = build_engine();
-    render_equation(&engine, source, size, color)
+    render_equation(&engine, source, size, color, true)
 }
 
 fn render_equation(
@@ -239,29 +568,16 @@ fn render_equation(
     source: &str,
     size: f32,
     color: Rgb,
+    want_pdf: bool,
 ) -> Rendered {
     let latex = normalize_latex(source);
     if latex.is_empty() {
-        return Rendered {
-            preview: None,
-            pdf: None,
-            width_pt: 0.0,
-            height_pt: 0.0,
-            error: None,
-        };
+        return blank_render();
     }
     let display = wants_display_math(source) || wants_display_math(&latex);
     let expr = match mitex::convert_math(&latex, None) {
         Ok(expr) => mitex_to_typst(&expr),
-        Err(err) => {
-            return Rendered {
-                preview: None,
-                pdf: None,
-                width_pt: 0.0,
-                height_pt: 0.0,
-                error: Some(err),
-            };
-        }
+        Err(err) => return failed_render(err),
     };
     let wrapped = if display {
         format!("$ {expr} $")
@@ -277,24 +593,10 @@ fn render_equation(
     let warned = engine.compile_with_input(inputs);
     let doc: PagedDocument = match warned.output {
         Ok(doc) => doc,
-        Err(err) => {
-            return Rendered {
-                preview: None,
-                pdf: None,
-                width_pt: 0.0,
-                height_pt: 0.0,
-                error: Some(format_typst(&err)),
-            };
-        }
+        Err(err) => return failed_render(format_typst(&err)),
     };
     let Some(page) = doc.pages().first() else {
-        return Rendered {
-            preview: None,
-            pdf: None,
-            width_pt: 0.0,
-            height_pt: 0.0,
-            error: Some("equation produced no pages".into()),
-        };
+        return failed_render("equation produced no pages");
     };
 
     let svg = typst_svg::svg(
@@ -304,27 +606,54 @@ fn render_equation(
             pretty: false,
         },
     );
-    let pdf = match typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()) {
-        Ok(bytes) => Some(bytes),
-        Err(err) => {
-            let (preview, width_pt, height_pt) = rasterize_svg(&svg);
-            return Rendered {
-                preview,
-                pdf: None,
-                width_pt,
-                height_pt,
-                error: Some(format_typst_diags(&err)),
-            };
+    let baseline_pt = equation_baseline_pt(page);
+    let pdf = if want_pdf {
+        match typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()) {
+            Ok(bytes) => Some(bytes),
+            Err(err) => {
+                let (preview, width_pt, height_pt) = rasterize_svg(&svg);
+                return Rendered {
+                    preview,
+                    svg: Some(svg),
+                    pdf: None,
+                    width_pt,
+                    height_pt,
+                    baseline_pt,
+                    raster_scale: RASTER_SCALE,
+                    error: Some(format_typst_diags(&err)),
+                };
+            }
         }
+    } else {
+        None
     };
 
     let (preview, width_pt, height_pt) = rasterize_svg(&svg);
     Rendered {
         preview,
+        svg: Some(svg),
         pdf,
         width_pt,
         height_pt,
+        baseline_pt,
+        raster_scale: RASTER_SCALE,
         error: None,
+    }
+}
+
+/// Baseline from the top of the page frame, in PDF points. `None` when Typst
+/// left the frame on its default (bottom) baseline — paint then centers.
+fn equation_baseline_pt(page: &typst_layout::Page) -> Option<f32> {
+    let frame = &page.frame;
+    if !frame.has_baseline() {
+        return None;
+    }
+    let baseline = frame.baseline().to_pt() as f32;
+    let height = frame.size().y.to_pt() as f32;
+    if baseline > 0.5 && baseline < height - 0.25 {
+        Some(baseline)
+    } else {
+        None
     }
 }
 
@@ -808,5 +1137,165 @@ mod tests {
         let out = mitex_to_typst("⌊ x ⌋");
         assert_eq!(out, "⌊ x ⌋");
         assert!(!out.contains('Ã'));
+    }
+
+    fn key(source: &str) -> MathKey {
+        MathKey::new(source, false, 12.0, Rgb::new(0, 0, 0))
+    }
+
+    #[test]
+    fn newer_live_job_cancels_older() {
+        let mut sched = MathScheduler::new(Duration::from_millis(40));
+        let t0 = Instant::now();
+        sched.push(
+            ScheduledJob {
+                key: key("a"),
+                lane: MathLane::Live,
+                payload: "a",
+            },
+            t0,
+        );
+        sched.push(
+            ScheduledJob {
+                key: key("b"),
+                lane: MathLane::Live,
+                payload: "b",
+            },
+            t0 + Duration::from_millis(10),
+        );
+        assert!(sched.poll(t0 + Duration::from_millis(30)).is_none());
+        let job = sched.poll(t0 + Duration::from_millis(50)).expect("live job");
+        assert_eq!(job.payload, "b");
+        assert!(sched.poll(t0 + Duration::from_millis(80)).is_none());
+    }
+
+    #[test]
+    fn background_duplicate_does_not_run_twice() {
+        let mut sched = MathScheduler::new(Duration::from_millis(40));
+        let now = Instant::now();
+        let shared = key("a");
+        sched.push(
+            ScheduledJob {
+                key: shared.clone(),
+                lane: MathLane::Background,
+                payload: 1,
+            },
+            now,
+        );
+        sched.push(
+            ScheduledJob {
+                key: shared,
+                lane: MathLane::Background,
+                payload: 2,
+            },
+            now,
+        );
+        assert_eq!(sched.poll(now).expect("first").payload, 1);
+        assert!(sched.poll(now).is_none());
+    }
+
+    #[test]
+    fn live_keystroke_does_not_drop_background() {
+        let mut sched = MathScheduler::new(Duration::from_millis(40));
+        let now = Instant::now();
+        sched.push(
+            ScheduledJob {
+                key: key("bg"),
+                lane: MathLane::Background,
+                payload: "bg",
+            },
+            now,
+        );
+        sched.push(
+            ScheduledJob {
+                key: key("old"),
+                lane: MathLane::Live,
+                payload: "old",
+            },
+            now,
+        );
+        sched.push(
+            ScheduledJob {
+                key: key("new"),
+                lane: MathLane::Live,
+                payload: "new",
+            },
+            now,
+        );
+        assert_eq!(sched.poll(now).expect("background").payload, "bg");
+        assert!(sched.poll(now + Duration::from_millis(20)).is_none());
+        assert_eq!(
+            sched.poll(now + Duration::from_millis(40))
+                .expect("latest live")
+                .payload,
+            "new"
+        );
+    }
+
+    #[test]
+    fn identical_equations_share_one_cache_entry() {
+        let mut cache = MathCache::<()>::new();
+        let key = key("x^2");
+        cache.insert_pending(key.clone(), 1);
+        cache.insert_pending(MathKey::new(" x^2 ", false, 12.0, Rgb::new(0, 0, 0)), 2);
+        assert_eq!(cache.len(), 1);
+        match cache.get(&key) {
+            Some(EntryKind::Pending { req: 2 }) => {}
+            other => panic!("expected the latest pending req, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lru_evicts_oldest_past_cap() {
+        let mut cache = MathCache::with_limits(2, usize::MAX);
+        let a = key("a");
+        let b = key("b");
+        let c = key("c");
+        cache.insert_ready(a.clone(), (), 10);
+        cache.insert_ready(b.clone(), (), 10);
+        cache.insert_ready(c.clone(), (), 10);
+        assert!(cache.get(&a).is_none());
+        assert!(cache.get(&b).is_some());
+        assert!(cache.get(&c).is_some());
+        assert_eq!(cache.len(), 2);
+    }
+
+    #[test]
+    fn lru_evicts_when_texture_bytes_exceed_cap() {
+        let mut cache = MathCache::with_limits(16, 100);
+        let a = key("a");
+        let b = key("b");
+        cache.insert_ready(a.clone(), (), 80);
+        cache.insert_ready(b.clone(), (), 80);
+        assert!(cache.get(&a).is_none(), "oldest texture should leave");
+        assert!(cache.get(&b).is_some());
+        assert_eq!(cache.bytes(), 80);
+    }
+
+    #[test]
+    fn preview_without_pdf_asks_save_to_request_it() {
+        assert_eq!(pdf_plan(false, true, false, false), PdfPlan::Request);
+        assert_eq!(pdf_plan(false, true, true, false), PdfPlan::Have);
+        assert_eq!(pdf_plan(false, false, false, true), PdfPlan::Have);
+        assert_eq!(pdf_plan(true, false, false, false), PdfPlan::Wait);
+        assert_eq!(pdf_plan(false, false, false, false), PdfPlan::Wait);
+    }
+
+    #[test]
+    fn preview_omits_pdf_until_asked() {
+        let engine = build_engine();
+        let preview = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), false);
+        assert!(preview.error.is_none(), "{:?}", preview.error);
+        assert!(preview.pdf.is_none(), "preview must not build a PDF");
+        assert!(preview.svg.is_some());
+        assert!(preview.preview.is_some());
+        assert!(preview.width_pt > 1.0);
+        let with_pdf = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), true);
+        assert!(with_pdf.pdf.is_some());
+        // Page frames in this Typst version may or may not publish a baseline.
+        // Paint centers when this is None; it aligns when it is Some.
+        if let Some(baseline) = preview.baseline_pt {
+            assert!(baseline > 0.0 && baseline < preview.height_pt);
+        }
     }
 }

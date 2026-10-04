@@ -17,6 +17,7 @@ use crate::annot::{
     AnnotKind, Annotation, ForeignKind, Glyph, ShapeKind, HIGHLIGHT_OPACITY,
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
+use egui::Color32;
 
 pub const TILE_PX: i32 = 1024;
 const LIST_CACHE: usize = 8;
@@ -64,6 +65,7 @@ pub struct TileImage {
     pub y: i32,
     pub width: u32,
     pub height: u32,
+    /// Premultiplied RGBA8, row-major (`egui::ColorImage::from_rgba_premultiplied` byte order).
     pub pixels: Vec<u8>,
 }
 
@@ -208,7 +210,7 @@ impl DocumentEngine {
 
         let width = pixmap.width();
         let height = pixmap.height();
-        let pixels = rgba_from_pixmap(&pixmap);
+        let pixels = premultiplied_tile_pixels_from_pixmap(&pixmap);
         Ok(Some(TileImage {
             page,
             scale,
@@ -546,6 +548,40 @@ fn rgba_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
         }
     }
     out
+}
+
+fn premultiplied_tile_pixels_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
+    let width = pixmap.width() as usize;
+    let height = pixmap.height() as usize;
+    let components = pixmap.n() as usize;
+    let stride = pixmap.stride() as usize;
+    let samples = pixmap.samples();
+    let mut out = vec![0u8; width * height * 4];
+    for y in 0..height {
+        let row = &samples[y * stride..];
+        for x in 0..width {
+            let source = x * components;
+            let dest = (y * width + x) * 4;
+            if components >= 3 {
+                let r = row[source];
+                let g = row[source + 1];
+                let b = row[source + 2];
+                let min_c = r.min(g).min(b);
+                if min_c >= 253 {
+                    continue;
+                }
+                let premul = knock_out_to_premultiplied(r, g, b);
+                out[dest..dest + 4].copy_from_slice(&premul);
+            }
+        }
+    }
+    out
+}
+
+fn knock_out_to_premultiplied(r: u8, g: u8, b: u8) -> [u8; 4] {
+    let (ur, ug, ub, ua) = knock_out_paper(r, g, b);
+    let c = Color32::from_rgba_unmultiplied(ur, ug, ub, ua);
+    [c.r(), c.g(), c.b(), c.a()]
 }
 
 /// Convert white-backed page pixels to ink-on-transparent.
@@ -2123,6 +2159,30 @@ mod tests {
     #[test]
     fn knock_out_paper_chromatic_midtone_stays_opaque() {
         assert_eq!(knock_out_paper(100, 150, 180), (100, 150, 180, 255));
+    }
+
+    #[test]
+    fn knock_out_to_premultiplied_matches_egui_unmultiplied_path() {
+        let samples = [
+            (255, 255, 255),
+            (254, 254, 253),
+            (0, 0, 0),
+            (128, 128, 128),
+            (100, 150, 180),
+            (250, 250, 250),
+            (255, 200, 100),
+            (240, 241, 242),
+        ];
+        for (r, g, b) in samples {
+            let (ur, ug, ub, ua) = knock_out_paper(r, g, b);
+            let expected = Color32::from_rgba_unmultiplied(ur, ug, ub, ua);
+            let got = knock_out_to_premultiplied(r, g, b);
+            assert_eq!(
+                [expected.r(), expected.g(), expected.b(), expected.a()],
+                got,
+                "rgb=({r},{g},{b})"
+            );
+        }
     }
 
     /// Simulates on-screen underpaint: marker tint on white, then knocked-out ink on top.

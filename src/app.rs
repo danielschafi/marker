@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -81,6 +81,8 @@ pub(crate) struct MarkerApp {
     title_dirty: bool,
     title_tab_gen: u64,
     exit_flush_done: bool,
+    /// Tile replies waiting for a capped UI-thread upload batch.
+    pending_pdf_tiles: VecDeque<PdfReply>,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -494,6 +496,7 @@ impl MarkerApp {
             title_dirty: false,
             title_tab_gen: 0,
             exit_flush_done: false,
+            pending_pdf_tiles: VecDeque::new(),
         };
         for path in paths {
             app.open_path(path);
@@ -1590,13 +1593,44 @@ impl MarkerApp {
 
     fn poll(&mut self, ctx: &egui::Context) {
         for reply in self.worker.poll() {
-            self.on_pdf(ctx, reply);
+            match reply {
+                PdfReply::Tile { .. } => self.pending_pdf_tiles.push_back(reply),
+                other => self.on_pdf(ctx, other),
+            }
         }
+        self.upload_pending_tiles(ctx);
         for reply in self.math.poll() {
             self.on_math(ctx, reply);
         }
         for event in self.assistant.poll() {
             self.on_assistant(ctx, event);
+        }
+    }
+
+    fn upload_pending_tiles(&mut self, ctx: &egui::Context) {
+        const MAX_TILES: usize = 4;
+        const MAX_BYTES: usize = 16 * 1024 * 1024;
+        let mut count = 0usize;
+        let mut bytes = 0usize;
+        while count < MAX_TILES {
+            let nbytes = match self.pending_pdf_tiles.front() {
+                Some(PdfReply::Tile { tile, .. }) => tile.pixels.len(),
+                _ => break,
+            };
+            if count > 0 && bytes + nbytes > MAX_BYTES {
+                break;
+            }
+            bytes += nbytes;
+            count += 1;
+            let reply = self.pending_pdf_tiles.pop_front().expect("front checked");
+            self.on_pdf(ctx, reply);
+        }
+        if self
+            .pending_pdf_tiles
+            .iter()
+            .any(|reply| matches!(reply, PdfReply::Tile { .. }))
+        {
+            ctx.request_repaint();
         }
     }
 
@@ -1687,7 +1721,7 @@ impl MarkerApp {
                     return;
                 };
                 tab.inflight.remove(&key);
-                let image = egui::ColorImage::from_rgba_unmultiplied(
+                let image = egui::ColorImage::from_rgba_premultiplied(
                     [tile.width as usize, tile.height as usize],
                     &tile.pixels,
                 );

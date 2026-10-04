@@ -80,6 +80,7 @@ pub(crate) struct MarkerApp {
     title_dirty_epoch: u64,
     title_dirty: bool,
     title_tab_gen: u64,
+    exit_flush_done: bool,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -492,6 +493,7 @@ impl MarkerApp {
             title_dirty_epoch: 0,
             title_dirty: false,
             title_tab_gen: 0,
+            exit_flush_done: false,
         };
         for path in paths {
             app.open_path(path);
@@ -1498,6 +1500,9 @@ fn vim_digit(input: &egui::InputState) -> Option<u32> {
 
 impl eframe::App for MarkerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if ctx.input(|input| input.viewport().close_requested()) {
+            self.flush_on_exit_if_needed();
+        }
         self.poll_ipc(ctx);
         self.poll_dialog();
         self.poll(ctx);
@@ -1563,6 +1568,10 @@ impl eframe::App for MarkerApp {
             ctx.request_repaint_after(Duration::from_millis(500));
         }
         self.last_frame = Instant::now();
+    }
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.flush_on_exit_if_needed();
     }
 }
 
@@ -2033,7 +2042,7 @@ impl MarkerApp {
             .find(|tab| tab.doc.gen == render.gen)
             .is_some_and(|tab| tab.save_when_math_ready && math_ready(tab));
         if should_save {
-            self.start_save_gen(render.gen);
+            self.start_save_gen(render.gen, false);
         }
     }
 
@@ -2101,7 +2110,7 @@ impl MarkerApp {
             .find(|tab| tab.doc.gen == render.gen)
             .is_some_and(|tab| tab.save_when_math_ready && math_ready(tab));
         if should_save {
-            self.start_save_gen(render.gen);
+            self.start_save_gen(render.gen, false);
         }
     }
 
@@ -2121,11 +2130,17 @@ impl MarkerApp {
     }
 
     fn prepare_visible_math(&mut self) {
-        let (gen, math_ids, inline_jobs) = {
-            let Some(tab) = self.tab() else {
+        let Some(gen) = self.tab().map(|tab| tab.doc.gen) else {
+            return;
+        };
+        self.request_all_pending_math(gen);
+    }
+
+    fn request_all_pending_math(&mut self, gen: u64) {
+        let (math_ids, inline_jobs) = {
+            let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
                 return;
             };
-            let gen = tab.doc.gen;
             let math_ids: Vec<u64> = tab
                 .doc
                 .session
@@ -2160,7 +2175,7 @@ impl MarkerApp {
                     }
                 }
             }
-            (gen, math_ids, inline_jobs)
+            (math_ids, inline_jobs)
         };
         for id in math_ids {
             self.request_math(gen, id);
@@ -2682,14 +2697,90 @@ impl MarkerApp {
                 if let Some(tab) = self.tab_by_gen_mut(gen) {
                     tab.force_save = false;
                 }
-                self.start_save_gen(gen);
+                self.start_save_gen(gen, false);
             } else if let Some(tab) = self.tab_by_gen_mut(gen) {
                 tab.save_when_math_ready = true;
             }
         }
     }
 
-    fn start_save_gen(&mut self, gen: u64) {
+    fn flush_on_exit_if_needed(&mut self) {
+        if self.exit_flush_done {
+            return;
+        }
+        self.exit_flush_done = true;
+        self.flush_on_exit();
+    }
+
+    fn flush_on_exit(&mut self) {
+        const WAIT: Duration = Duration::from_secs(2);
+        self.math_deadline = None;
+        self.flush_math();
+        let ctx = self.egui_ctx.clone();
+        let gens: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|tab| {
+                tab.doc.session.is_dirty()
+                    || tab.save_when_math_ready
+                    || matches!(tab.save, SaveState::Saving)
+            })
+            .map(|tab| tab.doc.gen)
+            .collect();
+        for gen in gens {
+            let dirty = self
+                .tabs
+                .iter()
+                .find(|tab| tab.doc.gen == gen)
+                .is_some_and(|tab| tab.doc.session.is_dirty());
+            if dirty {
+                let needs_math = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.doc.gen == gen)
+                    .is_some_and(|tab| !math_ready(tab));
+                if needs_math {
+                    self.request_all_pending_math(gen);
+                    let deadline = Instant::now() + WAIT;
+                    while Instant::now() < deadline {
+                        if self
+                            .tabs
+                            .iter()
+                            .find(|tab| tab.doc.gen == gen)
+                            .is_some_and(math_ready)
+                        {
+                            break;
+                        }
+                        self.poll(&ctx);
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                }
+            }
+            let already_saving = self
+                .tabs
+                .iter()
+                .find(|tab| tab.doc.gen == gen)
+                .is_some_and(|tab| matches!(tab.save, SaveState::Saving));
+            if !already_saving {
+                self.start_save_gen(gen, true);
+            }
+            let deadline = Instant::now() + WAIT;
+            while Instant::now() < deadline {
+                let saving = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.doc.gen == gen)
+                    .is_some_and(|tab| matches!(tab.save, SaveState::Saving));
+                if !saving {
+                    break;
+                }
+                self.poll(&ctx);
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    fn start_save_gen(&mut self, gen: u64, quit: bool) {
         let (snapshot, close, detach) = {
             let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.gen == gen) else {
                 return;
@@ -2698,8 +2789,10 @@ impl MarkerApp {
                 tab.save = SaveState::Clean;
                 tab.force_save = false;
                 tab.save_when_math_ready = false;
-                (None, tab.close_after_save, tab.detach_after_save)
-            } else if !math_ready(tab) {
+                let close = if quit { false } else { tab.close_after_save };
+                let detach = if quit { false } else { tab.detach_after_save };
+                (None, close, detach)
+            } else if !math_ready(tab) && !quit {
                 tab.save_when_math_ready = true;
                 (None, false, false)
             } else {
@@ -2747,6 +2840,9 @@ impl MarkerApp {
         };
         if let Some(snapshot) = snapshot {
             self.worker.save(gen, snapshot);
+        }
+        if quit {
+            return;
         }
         if let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) {
             if detach {

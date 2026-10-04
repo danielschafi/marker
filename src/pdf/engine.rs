@@ -14,7 +14,7 @@ use mupdf::{
 };
 
 use crate::annot::{
-    AnnotKind, Annotation, ForeignKind, Glyph, ShapeKind, HIGHLIGHT_OPACITY,
+    AnnotKind, Annotation, ForeignKind, Glyph, MarkupStyle, ShapeKind, HIGHLIGHT_OPACITY,
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use egui::Color32;
@@ -891,6 +891,33 @@ fn write_marker_full(
     Ok(())
 }
 
+fn is_native_markup(kind_name: PdfAnnotationType, annot: &PdfAnnotation) -> bool {
+    let expected = match kind_name {
+        PdfAnnotationType::Underline => "Underline",
+        PdfAnnotationType::StrikeOut => "StrikeOut",
+        PdfAnnotationType::Squiggly => "Squiggly",
+        _ => return false,
+    };
+    read_marker(&annot.object()).kind.as_deref() == Some(expected)
+}
+
+fn markup_style_of(kind_name: PdfAnnotationType) -> Option<MarkupStyle> {
+    match kind_name {
+        PdfAnnotationType::Underline => Some(MarkupStyle::Underline),
+        PdfAnnotationType::StrikeOut => Some(MarkupStyle::StrikeOut),
+        PdfAnnotationType::Squiggly => Some(MarkupStyle::Squiggly),
+        _ => None,
+    }
+}
+
+fn pdf_markup_type(style: MarkupStyle) -> PdfAnnotationType {
+    match style {
+        MarkupStyle::Underline => PdfAnnotationType::Underline,
+        MarkupStyle::StrikeOut => PdfAnnotationType::StrikeOut,
+        MarkupStyle::Squiggly => PdfAnnotationType::Squiggly,
+    }
+}
+
 fn import_foreign(
     kind_name: PdfAnnotationType,
     annot: &PdfAnnotation,
@@ -963,18 +990,22 @@ fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error
         let page = doc.load_pdf_page(index)?;
         for annot in page.annotations() {
             let kind_name = annot.r#type()?;
-            if let Some(kind) = import_foreign(kind_name, &annot)? {
-                let preferred = read_nm_id(&annot.object());
-                let id = allocate_id(preferred, &mut used);
-                annotations.push(Annotation {
-                    id,
-                    page: index as usize,
-                    xref: annot.xref().ok(),
-                    dirty: false,
-                    revision: 0,
-                    kind,
-                });
-                continue;
+            // Marker-native underline / strikeout / squiggly carry a Marker dict.
+            // Unmarked copies stay foreign (read-only).
+            if !is_native_markup(kind_name, &annot) {
+                if let Some(kind) = import_foreign(kind_name, &annot)? {
+                    let preferred = read_nm_id(&annot.object());
+                    let id = allocate_id(preferred, &mut used);
+                    annotations.push(Annotation {
+                        id,
+                        page: index as usize,
+                        xref: annot.xref().ok(),
+                        dirty: false,
+                        revision: 0,
+                        kind,
+                    });
+                    continue;
+                }
             }
             if !matches!(
                 kind_name,
@@ -985,6 +1016,9 @@ fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error
                     | PdfAnnotationType::Circle
                     | PdfAnnotationType::Line
                     | PdfAnnotationType::Stamp
+                    | PdfAnnotationType::Underline
+                    | PdfAnnotationType::StrikeOut
+                    | PdfAnnotationType::Squiggly
             ) {
                 continue;
             }
@@ -1040,20 +1074,25 @@ fn import_kind(
         .unwrap_or(Rgb::new(255, 214, 0));
     match kind_name {
         PdfAnnotationType::Highlight => {
-            let mut quads: Vec<PdfRect> = annot
-                .quad_points()?
-                .into_iter()
-                .map(quad_bounds)
-                .filter(|rect| !rect.is_empty())
-                .collect();
-            if quads.is_empty() {
-                let rect = from_rect(annot.rect()?);
-                if rect.is_empty() {
-                    return Ok(None);
-                }
-                quads.push(rect);
-            }
+            let Some(quads) = text_markup_quads(annot)? else {
+                return Ok(None);
+            };
             Ok(Some(AnnotKind::Highlight {
+                quads,
+                color: stroke,
+            }))
+        }
+        PdfAnnotationType::Underline
+        | PdfAnnotationType::StrikeOut
+        | PdfAnnotationType::Squiggly => {
+            let Some(style) = markup_style_of(kind_name) else {
+                return Ok(None);
+            };
+            let Some(quads) = text_markup_quads(annot)? else {
+                return Ok(None);
+            };
+            Ok(Some(AnnotKind::Markup {
+                style,
                 quads,
                 color: stroke,
             }))
@@ -1156,6 +1195,23 @@ fn import_kind(
     }
 }
 
+fn text_markup_quads(annot: &PdfAnnotation) -> Result<Option<Vec<PdfRect>>, mupdf::Error> {
+    let mut quads: Vec<PdfRect> = annot
+        .quad_points()?
+        .into_iter()
+        .map(quad_bounds)
+        .filter(|rect| !rect.is_empty())
+        .collect();
+    if quads.is_empty() {
+        let rect = from_rect(annot.rect()?);
+        if rect.is_empty() {
+            return Ok(None);
+        }
+        quads.push(rect);
+    }
+    Ok(Some(quads))
+}
+
 fn upsert(
     doc: &mut PdfDocument,
     page: &mut PdfPage,
@@ -1208,6 +1264,22 @@ fn apply_existing(
                 annot.set_rect(to_rect(bounds))?;
             }
             write_marker(doc, annot, "Highlight", source.id, None, Some(*color), None)?;
+            annot.update()?;
+        }
+        AnnotKind::Markup { style, quads, color } => {
+            if annot.r#type()? != pdf_markup_type(*style) {
+                return Err(mupdf::Error::InvalidArgument("type changed".into()));
+            }
+            write_markup_quads(annot, quads, *color)?;
+            write_marker(
+                doc,
+                annot,
+                style.marker_name(),
+                source.id,
+                None,
+                Some(*color),
+                None,
+            )?;
             annot.update()?;
         }
         AnnotKind::Text {
@@ -1321,6 +1393,22 @@ fn apply_existing(
     Ok(())
 }
 
+fn write_markup_quads(
+    annot: &mut PdfAnnotation,
+    quads: &[PdfRect],
+    color: Rgb,
+) -> Result<(), mupdf::Error> {
+    let pdf_quads: Vec<Quad> = quads.iter().copied().map(rect_quad).collect();
+    if pdf_quads.is_empty() {
+        return Err(mupdf::Error::InvalidArgument("empty markup".into()));
+    }
+    // Text markup annots have no Rect property; MuPDF derives it from the quads.
+    annot.set_quad_points(pdf_quads)?;
+    annot.set_color(rgb_color(color))?;
+    annot.set_opacity(1.0)?;
+    Ok(())
+}
+
 fn apply_shape(
     annot: &mut PdfAnnotation,
     kind: ShapeKind,
@@ -1370,6 +1458,29 @@ fn create_annot(
                 doc,
                 &annot,
                 "Highlight",
+                source.id,
+                None,
+                Some(*color),
+                None,
+            )
+            .map_err(show)?;
+            annot
+        }
+        AnnotKind::Markup { style, quads, color } => {
+            let pdf_quads: Vec<Quad> = quads.iter().copied().map(rect_quad).collect();
+            if pdf_quads.is_empty() {
+                return Err("Markup is empty.".into());
+            }
+            let mut annot = page
+                .create_annotation(pdf_markup_type(*style))
+                .map_err(show)?;
+            annot.set_quad_points(pdf_quads).map_err(show)?;
+            annot.set_color(rgb_color(*color)).map_err(show)?;
+            annot.set_opacity(1.0).map_err(show)?;
+            write_marker(
+                doc,
+                &annot,
+                style.marker_name(),
                 source.id,
                 None,
                 Some(*color),
@@ -1843,6 +1954,7 @@ mod tests {
             .iter()
             .map(|annot| match &annot.kind {
                 AnnotKind::Highlight { .. } => "highlight",
+                AnnotKind::Markup { .. } => "markup",
                 AnnotKind::Text { content, size, .. } => {
                     assert_eq!(content, "inline note");
                     assert!((*size - 16.0).abs() < 0.2, "size {size}");
@@ -2133,6 +2245,167 @@ mod tests {
         labels.sort_unstable();
         assert_eq!(labels, ["highlight", "underline"]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn markup_underline_strikeout_squiggly_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-markup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let before = engine.render_tile(0, 1.5, 0, 0).unwrap().unwrap();
+        let blue_before = count_channel(&before.pixels, 2);
+
+        let underline_quads = vec![PdfRect::new(72.0, 80.0, 220.0, 102.0)];
+        let strike_quads = vec![PdfRect::new(72.0, 120.0, 240.0, 142.0)];
+        let squiggly_quads = vec![
+            PdfRect::new(72.0, 160.0, 180.0, 182.0),
+            PdfRect::new(190.0, 160.0, 300.0, 182.0),
+        ];
+        let underline_color = Rgb::new(28, 78, 186);
+        let strike_color = Rgb::new(186, 36, 36);
+        let squiggly_color = Rgb::new(22, 122, 58);
+
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Markup {
+                style: MarkupStyle::Underline,
+                quads: underline_quads.clone(),
+                color: underline_color,
+            },
+        );
+        session.insert(
+            0,
+            AnnotKind::Markup {
+                style: MarkupStyle::StrikeOut,
+                quads: strike_quads.clone(),
+                color: strike_color,
+            },
+        );
+        session.insert(
+            0,
+            AnnotKind::Markup {
+                style: MarkupStyle::Squiggly,
+                quads: squiggly_quads.clone(),
+                color: squiggly_color,
+            },
+        );
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+
+        let mut again = DocumentEngine::open(&path).unwrap();
+        let mut found = Vec::new();
+        for annot in &again.annotations {
+            assert!(!annot.dirty, "imported native markup should be clean");
+            let AnnotKind::Markup { style, quads, color } = &annot.kind else {
+                panic!("expected native markup, got {:?}", annot.kind);
+            };
+            found.push((*style, quads.clone(), *color));
+        }
+        found.sort_by_key(|(style, _, _)| match style {
+            MarkupStyle::Underline => 0,
+            MarkupStyle::StrikeOut => 1,
+            MarkupStyle::Squiggly => 2,
+        });
+        assert_eq!(found.len(), 3);
+        assert_eq!(found[0].0, MarkupStyle::Underline);
+        assert_eq!(found[1].0, MarkupStyle::StrikeOut);
+        assert_eq!(found[2].0, MarkupStyle::Squiggly);
+        assert_eq!(found[0].2, underline_color);
+        assert_eq!(found[1].2, strike_color);
+        assert_eq!(found[2].2, squiggly_color);
+        quads_near(&found[0].1, &underline_quads);
+        quads_near(&found[1].1, &strike_quads);
+        quads_near(&found[2].1, &squiggly_quads);
+
+        let after = again.engine.render_tile(0, 1.5, 0, 0).unwrap().unwrap();
+        let blue_after = count_channel(&after.pixels, 2);
+        assert!(
+            blue_after < blue_before + 40,
+            "tile render picked up underline pixels: before {blue_before} after {blue_after}"
+        );
+
+        // Editing the color rewrites the same annotation instead of leaving it foreign.
+        let mut session = crate::annot::Session::from_imported(again.annotations);
+        let edited = Rgb::new(10, 20, 30);
+        let underline = session
+            .annotations
+            .iter_mut()
+            .find(|annot| {
+                matches!(
+                    annot.kind,
+                    AnnotKind::Markup {
+                        style: MarkupStyle::Underline,
+                        ..
+                    }
+                )
+            })
+            .unwrap();
+        if let AnnotKind::Markup { color, .. } = &mut underline.kind {
+            *color = edited;
+        }
+        underline.dirty = true;
+        let mut engine = again.engine;
+        engine
+            .save(&SaveSnapshot {
+                upserts: vec![underline.clone()],
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+        let edited_doc = DocumentEngine::open(&path).unwrap();
+        let colors: Vec<_> = edited_doc
+            .annotations
+            .iter()
+            .map(|annot| match &annot.kind {
+                AnnotKind::Markup {
+                    style: MarkupStyle::Underline,
+                    color,
+                    ..
+                } => *color,
+                AnnotKind::Markup { .. } => Rgb::new(0, 0, 0),
+                other => panic!("markup became {other:?}"),
+            })
+            .collect();
+        assert!(colors.contains(&edited), "re-saved underline color {colors:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn quads_near(got: &[PdfRect], expect: &[PdfRect]) {
+        assert_eq!(got.len(), expect.len(), "quads {got:?} vs {expect:?}");
+        for (got, expect) in got.iter().zip(expect) {
+            for (a, b) in [(got.x0, expect.x0), (got.y0, expect.y0), (got.x1, expect.x1), (got.y1, expect.y1)]
+            {
+                assert!((a - b).abs() < 0.8, "{got:?} vs {expect:?}");
+            }
+        }
+    }
+
+    fn count_channel(pixels: &[u8], channel: usize) -> usize {
+        pixels
+            .chunks_exact(4)
+            .filter(|px| px[channel] > 180 && px[(channel + 1) % 3] < 80 && px[(channel + 2) % 3] < 80)
+            .count()
     }
 
     #[test]

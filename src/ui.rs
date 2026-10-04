@@ -1297,6 +1297,42 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
             ];
             painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
         }
+        Tool::Underline => {
+            painter.line_segment(
+                [origin + vec2(1.0, 12.4), origin + vec2(13.2, 12.4)],
+                Stroke::new(1.7_f32, color),
+            );
+            for x in [3.0, 7.0, 11.0] {
+                painter.line_segment(
+                    [origin + vec2(x, 2.2), origin + vec2(x, 8.6)],
+                    stroke,
+                );
+            }
+        }
+        Tool::StrikeOut => {
+            painter.line_segment(
+                [origin + vec2(0.8, 7.0), origin + vec2(13.4, 7.0)],
+                Stroke::new(1.7_f32, color),
+            );
+            for x in [3.2, 7.0, 10.8] {
+                painter.line_segment(
+                    [origin + vec2(x, 2.4), origin + vec2(x, 11.6)],
+                    stroke,
+                );
+            }
+        }
+        Tool::Squiggly => {
+            let base = origin.y + 11.2;
+            let mut pts = Vec::new();
+            let mut x = origin.x + 0.6;
+            let end = origin.x + 13.4;
+            while x <= end {
+                let t = (x - origin.x) / 4.2 * std::f32::consts::TAU;
+                pts.push(Pos2::new(x, base + 1.7 * t.sin()));
+                x += 1.2;
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.35_f32, color)));
+        }
         Tool::Text => {
             painter.text(
                 rect.center(),
@@ -2023,6 +2059,9 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
     match tool {
         Tool::Select => "Select tool",
         Tool::Highlight => "Highlight tool",
+        Tool::Underline => "Underline tool",
+        Tool::StrikeOut => "Strikeout tool",
+        Tool::Squiggly => "Squiggly tool",
         Tool::Text => "Text tool",
         Tool::Rect => "Rectangle tool",
         Tool::Ellipse => "Ellipse tool",
@@ -2033,8 +2072,10 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
 
 pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
     match tool {
-        Tool::Highlight => &HIGHLIGHT_COLORS,
-        _ => &INK_COLORS,
+        Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => &HIGHLIGHT_COLORS,
+        Tool::Select | Tool::Text | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Math => {
+            &INK_COLORS
+        }
     }
 }
 

@@ -343,6 +343,43 @@ pub fn math_span_at(content: &str, caret: usize) -> Option<MathSpanRef> {
     None
 }
 
+/// Caret inside a math span for typing aids (R7 / R8).
+///
+/// Closed spans use `start < caret < end` (boundaries count as outside). An
+/// unclosed span also accepts `caret == end` (EOF while still typing).
+pub fn caret_inside_math(content: &str, caret: usize) -> Option<MathSpanRef> {
+    let caret = caret.min(content.len());
+    for (index, span) in parse_spans(content).into_iter().enumerate() {
+        if let Span::Math {
+            start,
+            end,
+            inner_start,
+            inner_end,
+            display,
+            closed,
+        } = span
+        {
+            let inside = if closed {
+                caret > start && caret < end
+            } else {
+                caret > start && caret <= end
+            };
+            if inside {
+                return Some(MathSpanRef {
+                    index,
+                    start,
+                    end,
+                    inner_start,
+                    inner_end,
+                    display,
+                    closed,
+                });
+            }
+        }
+    }
+    None
+}
+
 /// Replace the inner source of a math span, preserving delimiters / openness.
 pub fn replace_math_inner(content: &str, span: &MathSpanRef, new_inner: &str) -> String {
     let mut out = String::with_capacity(content.len() + new_inner.len());
@@ -691,6 +728,17 @@ mod tests {
         assert!(math_span_at(content, 4).is_some()); // on closing `$`
         assert!(math_span_at(content, 0).is_none());
         assert!(math_span_at(content, 5).is_none());
+    }
+
+    #[test]
+    fn caret_inside_math_strict_boundaries() {
+        let content = "a $b$ c";
+        assert!(caret_inside_math(content, 2).is_none()); // on opener
+        assert!(caret_inside_math(content, 3).is_some()); // on `b`
+        assert!(caret_inside_math(content, 4).is_some()); // on closer char
+        assert!(caret_inside_math(content, 5).is_none()); // after span
+        let open = r"$\alpha";
+        assert!(caret_inside_math(open, open.len()).is_some());
     }
 
     #[test]

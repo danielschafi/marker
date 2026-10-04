@@ -3,9 +3,12 @@ use std::time::{Duration, Instant};
 use egui::text::CCursor;
 use egui::text_selection::CCursorRange;
 use egui::{
-    Button, Color32, CursorIcon, FontFamily, FontId, Id, PointerButton, Pos2, Rect, Sense, Stroke,
-    TextEdit, Vec2,
+    Button, Color32, CursorIcon, FontFamily, FontId, Id, ImeEvent, PointerButton, Pos2, Rect, Sense,
+    Stroke, TextEdit, Vec2,
 };
+
+#[path = "math_input.rs"]
+mod math_input;
 
 use crate::annot::{
     click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, MarkupStyle,
@@ -2686,7 +2689,7 @@ fn edit_text_annot(
     let mut height = screen.height();
 
     // A previous Tab exit can still hand us a caret. The key itself is handled
-    // in the same frame below via `exit_math_span`.
+    // in the same frame below via `apply_math_input`.
     if let Some(tab) = app.tab_mut() {
         if let Some(byte) = tab.pending_text_caret.take() {
             if let Some(AnnotKind::Text { content, .. }) =
@@ -2721,7 +2724,7 @@ fn edit_text_annot(
                     else {
                         return;
                     };
-                    if let Some(text_changed) = tab_exit_math(ctx, ui, text_edit_id, content) {
+                    if let Some(text_changed) = apply_math_input(ctx, ui, text_edit_id, content) {
                         changed |= text_changed;
                     }
                     let render = |inner: &str, display: bool| {
@@ -2897,46 +2900,50 @@ fn ready_texture(
     }
 }
 
-/// Tab inside a math span moves the caret past the closer. An unclosed span
-/// is closed first (`exit_math_span`). Shift+Tab stays with the text field
-/// until autopair (LT4). Returns whether the source changed.
-fn tab_exit_math(
+/// Autopair / tab-out pre-filter (R7 / R8). Runs before `conceal_editor` so
+/// `TextEdit` never sees a handled event. Skips while IME is composing.
+fn apply_math_input(
     ctx: &egui::Context,
     ui: &mut egui::Ui,
     id: Id,
     content: &mut String,
 ) -> Option<bool> {
-    let pressed = ui.input(|input| {
-        input.key_pressed(egui::Key::Tab)
-            && !input.modifiers.command
-            && !input.modifiers.shift
-            && !input.modifiers.alt
-    });
-    if !pressed {
+    if ime_composing(ui) {
         return None;
     }
     let mut state = TextEdit::load_state(ctx, id)?;
     let range = state.cursor.char_range()?;
-    if range.primary.index != range.secondary.index {
-        return None;
-    }
-    let byte = char_index_to_byte(content, range.primary.index);
-    let span = math_spans::math_span_at(content, byte)?;
-    if byte <= span.start || byte >= span.end {
-        return None;
-    }
-    if !ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
-        return None;
-    }
-    let (next, after) = math_spans::exit_math_span(content, &span);
+    let mut hit: Option<(usize, (String, CCursorRange))> = None;
+    ui.input(|input| {
+        for (index, event) in input.events.iter().enumerate() {
+            if let Some(result) = math_input::apply(content, range, event) {
+                hit = Some((index, result));
+                break;
+            }
+        }
+    });
+    let (index, (next, new_range)) = hit?;
+    ui.input_mut(|input| {
+        if index < input.events.len() {
+            input.events.remove(index);
+        }
+    });
     let text_changed = next != *content;
     *content = next;
-    let index = byte_to_char_index(content, after);
-    state
-        .cursor
-        .set_char_range(Some(CCursorRange::one(CCursor::new(index))));
+    state.cursor.set_char_range(Some(new_range));
     state.store(ctx, id);
     Some(text_changed)
+}
+
+fn ime_composing(ui: &egui::Ui) -> bool {
+    ui.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Ime(ImeEvent::Preedit(_)) | egui::Event::Ime(ImeEvent::Enabled)
+            )
+        })
+    })
 }
 
 fn paint_concealed_math(

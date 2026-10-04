@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 #[derive(Clone, Debug)]
@@ -68,33 +69,29 @@ fn which_agent() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    let output = Command::new("which")
-        .arg("agent")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if path.is_empty() {
-        None
-    } else {
-        Some(PathBuf::from(path))
-    }
+    let name = format!("agent{}", std::env::consts::EXE_SUFFIX);
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(&name))
+        .find(|path| path.is_file())
+}
+
+fn timeout_utility_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        Command::new("timeout")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    })
 }
 
 fn run_capture(bin: &Path, args: &[&str], timeout: Duration) -> Result<String, String> {
     // Prefer a short hard timeout via the `timeout` utility when available.
-    let mut cmd = if Command::new("timeout")
-        .arg("--version")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
+    let mut cmd = if timeout_utility_available() {
         let secs = timeout.as_secs().max(1).to_string();
         let mut c = Command::new("timeout");
         c.arg(&secs).arg(bin).args(args);
@@ -129,10 +126,12 @@ fn run_capture(bin: &Path, args: &[&str], timeout: Duration) -> Result<String, S
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    #[cfg(unix)]
     fn create_chat_parses_fake_cli() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = std::env::temp_dir().join(format!("marker-fake-agent-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

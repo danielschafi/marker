@@ -3,7 +3,7 @@ use std::sync::Arc;
 use egui::{
     Align, Align2, Button, Color32, CornerRadius, DragValue, FontData, FontDefinitions, FontFamily,
     FontId, Id, Key, Layout, PointerButton, Pos2, Rect, RichText, ScrollArea, Sense, Stroke,
-    StrokeKind, TextEdit, TopBottomPanel, Vec2,
+    StrokeKind, TextEdit, TopBottomPanel, Vec2, WidgetInfo, WidgetType,
 };
 
 use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, TabListState, Tool};
@@ -152,14 +152,14 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
         }
         return;
     };
-    let name = tab_file_name(tab);
+    let name = tab_file_name(tab).to_owned();
     let dirty = tab.doc.session.is_dirty();
     let tab_count = app.tabs.len();
     let list_open = app.tab_list.is_some();
 
     let title_color = colors.text;
     let galley = ui.painter().layout_no_wrap(
-        name.to_owned(),
+        name.clone(),
         FontId::new(13.0, FontFamily::Proportional),
         title_color,
     );
@@ -227,6 +227,14 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     } else {
         "Current document"
     };
+    let tab_label = if tab_count > 1 {
+        format!("{name} tab")
+    } else {
+        name.clone()
+    };
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), tab_label.clone())
+    });
     response.on_hover_text(tip);
 }
 
@@ -316,6 +324,13 @@ fn tab_list_row(
             FontId::new(13.0, FontFamily::Proportional),
             close_color,
         );
+        close.widget_info(|| {
+            WidgetInfo::labeled(
+                WidgetType::Button,
+                ui.is_enabled(),
+                format!("Close {name}"),
+            )
+        });
         let close = close.on_hover_text("Close tab (Ctrl+W)");
         close_clicked = close.clicked() || close.middle_clicked();
     }
@@ -323,6 +338,9 @@ fn tab_list_row(
     if response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), selected, name)
+    });
     let response = response.on_hover_text("Drag to split · right-click for layout");
 
     TabAction {
@@ -789,6 +807,9 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
     if response.clicked() {
         app.toggle_tab_list();
     }
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Open tabs")
+    });
     response.on_hover_text("Open tabs · Ctrl+Tab to cycle");
 }
 
@@ -841,6 +862,10 @@ fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response 
         FontId::new(12.5, FontFamily::Proportional),
         colors.text,
     );
+    let access_name = cluster_button_name(label);
+    response.widget_info(|| {
+        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), access_name)
+    });
     response
 }
 
@@ -1234,6 +1259,14 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
     if response.clicked() {
         *current = tool;
     }
+    response.widget_info(|| {
+        WidgetInfo::selected(
+            WidgetType::RadioButton,
+            ui.is_enabled(),
+            selected,
+            tool_a11y_label(tool),
+        )
+    });
     response.on_hover_text(format!("{} ({})", tool.hint(), tool.shortcut().name()));
 }
 
@@ -1830,13 +1863,19 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                     forget = Some(path.clone());
                                 }
                             }
-                            let response = if parent.is_empty() {
-                                response
+                            let tip = if parent.is_empty() {
+                                format!("Open {name}")
                             } else {
-                                response.on_hover_text(format!(
-                                    "{parent}\nRight-click or × to remove"
-                                ))
+                                format!("{parent}\nRight-click or × to remove")
                             };
+                            response.widget_info(|| {
+                                WidgetInfo::labeled(
+                                    WidgetType::Button,
+                                    ui.is_enabled(),
+                                    format!("Open recent file {name}"),
+                                )
+                            });
+                            let response = response.on_hover_text(tip);
                             if response.clicked() && !remove_clicked {
                                 if exists {
                                     open_path = Some(path.clone());
@@ -1948,7 +1987,48 @@ pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool) -> bool {
             Stroke::new(1.35, theme::color_dot_selection_ring(ui.ctx())),
         );
     }
-    response.clicked()
+    let name = palette_color_name(color);
+    response.widget_info(|| {
+        WidgetInfo::selected(WidgetType::ColorButton, ui.is_enabled(), selected, name)
+    });
+    response.on_hover_text(name).clicked()
+}
+
+fn palette_color_name(color: Rgb) -> &'static str {
+    match color {
+        c if c == HIGHLIGHT_COLORS[0] => "Yellow highlight",
+        c if c == HIGHLIGHT_COLORS[1] => "Green highlight",
+        c if c == HIGHLIGHT_COLORS[2] => "Blue highlight",
+        c if c == HIGHLIGHT_COLORS[3] => "Pink highlight",
+        c if c == HIGHLIGHT_COLORS[4] => "Orange highlight",
+        c if c == INK_COLORS[0] => "Black ink",
+        c if c == INK_COLORS[1] => "Red ink",
+        c if c == INK_COLORS[2] => "Blue ink",
+        c if c == INK_COLORS[3] => "Green ink",
+        _ => "Color",
+    }
+}
+
+fn cluster_button_name(label: &str) -> &str {
+    match label {
+        "Fit" => "Fit width",
+        "+" => "Zoom in",
+        "−" => "Zoom out",
+        "+Page" => "Insert blank page",
+        _ => label,
+    }
+}
+
+fn tool_a11y_label(tool: Tool) -> &'static str {
+    match tool {
+        Tool::Select => "Select tool",
+        Tool::Highlight => "Highlight tool",
+        Tool::Text => "Text tool",
+        Tool::Rect => "Rectangle tool",
+        Tool::Ellipse => "Ellipse tool",
+        Tool::Line => "Line tool",
+        Tool::Math => "Equation tool",
+    }
 }
 
 pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {

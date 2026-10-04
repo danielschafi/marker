@@ -21,9 +21,13 @@ pub struct LaunchArgs {
 
 impl LaunchArgs {
     pub fn from_env() -> Self {
+        Self::from_args(std::env::args().skip(1))
+    }
+
+    fn from_args(args: impl IntoIterator<Item = String>) -> Self {
         let mut new_window = false;
         let mut paths = Vec::new();
-        for arg in std::env::args().skip(1) {
+        for arg in args {
             if arg == "--new-window" || arg == "-n" {
                 new_window = true;
                 continue;
@@ -187,9 +191,8 @@ fn bind_primary(socket_path: &Path) -> Option<IpcInbox> {
         }
     }
 
-    // Stale socket left by a crashed primary: remove and retry bind.
-    if socket_path.exists() {
-        let _ = fs::remove_file(socket_path);
+    if !clear_stale_socket(socket_path) {
+        return None;
     }
 
     let listener = UnixListener::bind(socket_path).ok()?;
@@ -285,28 +288,51 @@ fn socket_path() -> Option<PathBuf> {
         }
     }
     let uid = runtime_uid();
-    Some(std::env::temp_dir().join(format!("marker-{uid}.sock")))
+    let dir = std::env::temp_dir().join(format!("marker-{uid}"));
+    remove_legacy_temp_socket(uid, &dir);
+    Some(dir.join("instance.sock"))
+}
+
+#[cfg(unix)]
+fn clear_stale_socket(socket_path: &Path) -> bool {
+    use std::io::ErrorKind;
+    use std::os::unix::net::UnixStream;
+
+    if !socket_path.exists() {
+        return true;
+    }
+    match UnixStream::connect(socket_path) {
+        Ok(_) => false,
+        Err(err) if err.kind() == ErrorKind::ConnectionRefused => {
+            let _ = fs::remove_file(socket_path);
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn clear_stale_socket(_socket_path: &Path) -> bool {
+    true
+}
+
+fn remove_legacy_temp_socket(uid: u32, new_dir: &Path) {
+    let legacy = std::env::temp_dir().join(format!("marker-{uid}.sock"));
+    if legacy != new_dir.join("instance.sock") {
+        let _ = fs::remove_file(legacy);
+    }
 }
 
 fn runtime_uid() -> u32 {
-    if let Ok(status) = fs::read_to_string("/proc/self/status") {
-        for line in status.lines() {
-            if let Some(rest) = line.strip_prefix("Uid:") {
-                if let Some(uid) = rest.split_whitespace().next().and_then(|s| s.parse().ok()) {
-                    return uid;
-                }
-            }
-        }
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid is always available on Unix.
+        return unsafe { libc::getuid() };
     }
-    std::env::var("USER")
-        .map(|u| {
-            let mut h = 0u32;
-            for b in u.bytes() {
-                h = h.wrapping_mul(31).wrapping_add(b as u32);
-            }
-            h
-        })
-        .unwrap_or(0)
+    #[cfg(not(unix))]
+    {
+        0
+    }
 }
 
 fn is_pdf(path: &Path) -> bool {
@@ -325,6 +351,79 @@ fn absolute_fallback(path: &Path) -> PathBuf {
 }
 
 /// Spawn a separate Marker window for `path` (bypasses single-instance).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn launch_args_parses_flags_and_pdf_paths() {
+        let args = LaunchArgs::from_args([
+            "--new-window".into(),
+            "-n".into(),
+            "notes.txt".into(),
+            "doc.PDF".into(),
+            "--unknown".into(),
+        ]);
+        assert!(args.new_window);
+        assert_eq!(args.paths.len(), 1);
+        assert_eq!(args.paths[0].file_name().unwrap(), "doc.PDF");
+    }
+
+    #[test]
+    fn launch_args_ignores_non_pdf_paths() {
+        let args = LaunchArgs::from_args(["readme.md".into(), "paper.pdf".into()]);
+        assert!(!args.new_window);
+        assert_eq!(args.paths.len(), 1);
+        assert!(args.paths[0].ends_with("paper.pdf"));
+    }
+
+    #[test]
+    fn handle_client_open_parses_pdf_paths() {
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client
+            .write_all(b"open\n/a.pdf\n/b.txt\n\n")
+            .unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+
+        let paths = handle_client(server).expect("valid open request");
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0], PathBuf::from("/a.pdf"));
+    }
+
+    #[test]
+    fn handle_client_rejects_unknown_command() {
+        let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
+        client.write_all(b"quit\n\n").unwrap();
+        client.shutdown(std::net::Shutdown::Write).unwrap();
+        assert!(handle_client(server).is_none());
+    }
+
+    #[test]
+    fn clear_stale_socket_removes_only_refused() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-test-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let socket_path = dir.join("instance.sock");
+
+        assert!(clear_stale_socket(&socket_path));
+
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        assert!(!clear_stale_socket(&socket_path));
+        drop(listener);
+        if socket_path.exists() {
+            assert!(clear_stale_socket(&socket_path));
+            assert!(!socket_path.exists());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
+
 pub fn spawn_new_window(path: &Path) -> Result<(), String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     std::process::Command::new(exe)

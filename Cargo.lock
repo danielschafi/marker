@@ -3170,6 +3170,7 @@ dependencies = [
  "egui",
  "egui_commonmark",
  "image",
+ "libc",
  "mitex",
  "mupdf",
  "resvg 0.45.1",

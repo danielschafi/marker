@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -258,7 +259,7 @@ fn run_turn(
         }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
-            Ok(None) => thread::sleep(std::time::Duration::from_millis(40)),
+            Ok(None) => thread::sleep(Duration::from_millis(40)),
             Err(_) => {
                 kill_pgid(pid);
                 break None;
@@ -478,20 +479,29 @@ fn spawn_agent(
         .map_err(|e| format!("failed to start {}: {e}", agent.display()))
 }
 
+/// Terminate the agent's process group and reap the group leader so it cannot become a zombie.
 fn kill_pgid(pid: u32) {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .args(["-TERM", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        thread::sleep(std::time::Duration::from_millis(150));
-        let _ = Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        use libc::{self, SIGKILL, SIGTERM, WNOHANG};
+
+        let pgid = -(pid as libc::pid_t);
+        let leader = pid as libc::pid_t;
+        unsafe {
+            let _ = libc::kill(pgid, SIGTERM);
+            let deadline = std::time::Instant::now() + Duration::from_millis(200);
+            while std::time::Instant::now() < deadline {
+                let mut status = 0;
+                let waited = libc::waitpid(leader, &mut status, WNOHANG);
+                if waited == leader || waited == -1 {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            let _ = libc::kill(pgid, SIGKILL);
+            let mut status = 0;
+            let _ = libc::waitpid(leader, &mut status, 0);
+        }
     }
     #[cfg(not(unix))]
     {
@@ -507,25 +517,32 @@ fn kill_pgid(pid: u32) {
 mod tests {
     use super::*;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn stale_completed_can_be_filtered_by_seq() {
-        // Document the contract: UI ignores events whose seq != tab.request_seq.
-        let current_seq = 3u64;
-        let event = AssistantEvent::Completed {
-            gen: 1,
-            seq: 2,
-            text: "old".into(),
-        };
-        let AssistantEvent::Completed { seq, .. } = event else {
-            panic!();
-        };
-        assert_ne!(seq, current_seq);
+    #[cfg(unix)]
+    fn kill_pgid_reaps_process_group_leader() {
+        use std::os::unix::process::CommandExt;
+
+        let child = Command::new("sleep")
+            .arg("3600")
+            .process_group(0)
+            .spawn()
+            .expect("sleep");
+        let pid = child.id();
+        kill_pgid(pid);
+        assert!(
+            unsafe { libc::kill(pid as libc::pid_t, 0) } != 0,
+            "process group leader should be gone after kill_pgid"
+        );
+        // kill_pgid already reaped the leader; dropping without wait must not leave a zombie.
+        drop(child);
     }
 
     #[test]
+    #[cfg(unix)]
     fn parses_assistant_and_result_lines() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = std::env::temp_dir().join(format!("marker-stream-parse-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();

@@ -1221,6 +1221,14 @@ impl MarkerApp {
         self.seal_then_arm();
         if let Some(tab) = self.tab_mut() {
             for id in &ids {
+                if tab
+                    .doc
+                    .session
+                    .get(*id)
+                    .is_some_and(|annot| matches!(annot.kind, crate::annot::AnnotKind::Foreign { .. }))
+                {
+                    continue;
+                }
                 tab.doc.session.remove(*id);
                 tab.previews.remove(id);
                 tab.inline_previews.retain(|(annot_id, _), _| annot_id != id);
@@ -3549,7 +3557,10 @@ impl MarkerApp {
                     ink = true;
                     stroke = true;
                 }
-                Some(AnnotKind::Image { .. } | AnnotKind::Future(_)) | None => {}
+                Some(
+                    AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. },
+                )
+                | None => {}
             }
         }
         (highlight, ink, size, stroke)

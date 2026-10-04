@@ -13,7 +13,9 @@ use mupdf::{
     Pixmap, Point, Quad, Rect, Size, StructuredText, TextBlockContent, TextPageFlags,
 };
 
-use crate::annot::{AnnotKind, Annotation, Glyph, ShapeKind, HIGHLIGHT_OPACITY};
+use crate::annot::{
+    AnnotKind, Annotation, ForeignKind, Glyph, ShapeKind, HIGHLIGHT_OPACITY,
+};
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 
 pub const TILE_PX: i32 = 1024;
@@ -853,6 +855,70 @@ fn write_marker_full(
     Ok(())
 }
 
+fn import_foreign(
+    kind_name: PdfAnnotationType,
+    annot: &PdfAnnotation,
+) -> Result<Option<AnnotKind>, mupdf::Error> {
+    let kind = match kind_name {
+        PdfAnnotationType::Underline => ForeignKind::Underline,
+        PdfAnnotationType::StrikeOut => ForeignKind::StrikeOut,
+        PdfAnnotationType::Squiggly => ForeignKind::Squiggly,
+        PdfAnnotationType::Ink => ForeignKind::Ink,
+        PdfAnnotationType::Polygon => ForeignKind::Polygon,
+        PdfAnnotationType::PolyLine => ForeignKind::PolyLine,
+        PdfAnnotationType::Caret => ForeignKind::Caret,
+        PdfAnnotationType::FileAttachment => ForeignKind::FileAttachment,
+        _ => return Ok(None),
+    };
+    let rect = from_rect(annot.rect()?);
+    let color = annot
+        .color()?
+        .and_then(color_rgb)
+        .unwrap_or(Rgb::new(32, 32, 32));
+    let contents = annot.contents()?.unwrap_or("").to_string();
+    let quads = annot
+        .quads()
+        .unwrap_or_default()
+        .into_iter()
+        .map(quad_bounds)
+        .collect();
+    let strokes = match kind_name {
+        PdfAnnotationType::Ink => annot
+            .ink_list()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|stroke| {
+                stroke
+                    .into_iter()
+                    .map(|point| PdfPoint::new(point.x, point.y))
+                    .collect()
+            })
+            .collect(),
+        PdfAnnotationType::Polygon | PdfAnnotationType::PolyLine => {
+            let points: Vec<PdfPoint> = annot
+                .vertices()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|point| PdfPoint::new(point.x, point.y))
+                .collect();
+            if points.is_empty() {
+                Vec::new()
+            } else {
+                vec![points]
+            }
+        }
+        _ => Vec::new(),
+    };
+    Ok(Some(AnnotKind::Foreign {
+        kind,
+        rect,
+        quads,
+        strokes,
+        color,
+        contents,
+    }))
+}
+
 fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error> {
     let count = doc.page_count()?;
     let mut annotations = Vec::new();
@@ -861,6 +927,19 @@ fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, mupdf::Error
         let page = doc.load_pdf_page(index)?;
         for annot in page.annotations() {
             let kind_name = annot.r#type()?;
+            if let Some(kind) = import_foreign(kind_name, &annot)? {
+                let preferred = read_nm_id(&annot.object());
+                let id = allocate_id(preferred, &mut used);
+                annotations.push(Annotation {
+                    id,
+                    page: index as usize,
+                    xref: annot.xref().ok(),
+                    dirty: false,
+                    revision: 0,
+                    kind,
+                });
+                continue;
+            }
             if !matches!(
                 kind_name,
                 PdfAnnotationType::Highlight
@@ -1200,6 +1279,8 @@ fn apply_existing(
         AnnotKind::Future(_) => {
             return Err(mupdf::Error::NotYetImplemented("future annotation".into()));
         }
+        // Leave the original object untouched. Rewriting it would drop the other app's annot.
+        AnnotKind::Foreign { .. } => {}
     }
     Ok(())
 }
@@ -1376,6 +1457,9 @@ fn create_annot(
             return annot.xref().map_err(show);
         }
         AnnotKind::Future(_) => return Err("That annotation type is not available yet.".into()),
+        AnnotKind::Foreign { .. } => {
+            return Err("Foreign annotations are read-only.".into());
+        }
     };
     annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
     annot.update().map_err(show)?;
@@ -1740,6 +1824,7 @@ mod tests {
                 AnnotKind::Math { .. } => "math",
                 AnnotKind::Image { .. } => "image",
                 AnnotKind::Future(_) => "future",
+                AnnotKind::Foreign { .. } => "foreign",
             })
             .collect::<Vec<_>>();
         kinds.sort_unstable();
@@ -1918,6 +2003,99 @@ mod tests {
         };
         assert!((rect.x0 - 120.0).abs() < 0.5, "rect snapped back: {rect:?}");
         assert_eq!(got.as_ref(), rgba.as_slice());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn foreign_underline_survives_marker_save() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-foreign-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        {
+            let doc = PdfDocument::open(path.to_str().unwrap()).unwrap();
+            let mut page = doc.load_pdf_page(0).unwrap();
+            let mut underline = page
+                .create_annotation(PdfAnnotationType::Underline)
+                .unwrap();
+            let quad = Quad::new(
+                Point::new(72.0, 80.0),
+                Point::new(220.0, 80.0),
+                Point::new(72.0, 100.0),
+                Point::new(220.0, 100.0),
+            );
+            underline.set_quad_points([quad]).unwrap();
+            underline
+                .set_color(AnnotationColor::Rgb {
+                    red: 0.1,
+                    green: 0.2,
+                    blue: 0.9,
+                })
+                .unwrap();
+            underline.update().unwrap();
+            doc.save(path.to_str().unwrap()).unwrap();
+        }
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let foreign: Vec<_> = loaded
+            .annotations
+            .iter()
+            .filter(|annot| matches!(annot.kind, AnnotKind::Foreign { .. }))
+            .collect();
+        assert_eq!(foreign.len(), 1, "underline should import");
+        assert!(!foreign[0].dirty);
+        let AnnotKind::Foreign {
+            kind: ForeignKind::Underline,
+            quads,
+            ..
+        } = &foreign[0].kind
+        else {
+            panic!("expected underline, got {:?}", foreign[0].kind);
+        };
+        assert!(!quads.is_empty(), "underline quads should be kept");
+
+        let mut engine = loaded.engine;
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Highlight {
+                quads: vec![PdfRect::new(72.0, 400.0, 140.0, 414.0)],
+                color: Rgb::new(255, 214, 0),
+            },
+        );
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+
+        let again = DocumentEngine::open(&path).unwrap();
+        let mut labels: Vec<_> = again
+            .annotations
+            .iter()
+            .map(|annot| match &annot.kind {
+                AnnotKind::Foreign {
+                    kind: ForeignKind::Underline,
+                    ..
+                } => "underline",
+                AnnotKind::Highlight { .. } => "highlight",
+                _ => "other",
+            })
+            .collect();
+        labels.sort_unstable();
+        assert_eq!(labels, ["highlight", "underline"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

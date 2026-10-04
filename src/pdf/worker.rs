@@ -63,6 +63,7 @@ pub enum PdfJob {
 
 pub enum PdfReply {
     Opened(Result<OpenedDoc, String>),
+    /// `tile.pixels` are premultiplied RGBA8 (see [`TileImage::pixels`]).
     Tile {
         gen: u64,
         tile: TileImage,

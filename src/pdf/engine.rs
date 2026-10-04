@@ -106,6 +106,8 @@ pub struct DocumentEngine {
     outline: Vec<OutlineNode>,
     lists: HashMap<usize, DisplayList>,
     list_order: VecDeque<usize>,
+    /// Byte length at open, reset after a compacting rewrite.
+    opened_len: u64,
 }
 
 impl DocumentEngine {
@@ -128,6 +130,7 @@ impl DocumentEngine {
         }
         let outline = doc.outlines().map(convert_outline).unwrap_or_default();
         let annotations = import_annotations(&doc).map_err(show)?;
+        let opened_len = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Ok(LoadedPdf {
             engine: Self {
                 doc,
@@ -136,6 +139,7 @@ impl DocumentEngine {
                 outline,
                 lists: HashMap::new(),
                 list_order: VecDeque::new(),
+                opened_len,
             },
             annotations,
         })
@@ -270,8 +274,10 @@ impl DocumentEngine {
 
     pub fn save(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, String> {
         let saved = (|| {
-            let xrefs = self.apply(snapshot)?;
-            self.persist()?;
+            let mut xrefs = self.apply(snapshot)?;
+            if self.persist()? {
+                self.remap_xrefs(&mut xrefs);
+            }
             Ok(xrefs)
         })();
         if saved.is_err() {
@@ -401,20 +407,82 @@ impl DocumentEngine {
         Ok(saved)
     }
 
-    fn persist(&mut self) -> Result<(), String> {
+    /// `Ok(true)` when a compacting rewrite ran and annotation xrefs may have moved.
+    fn persist(&mut self) -> Result<bool, String> {
         let path = self.path.clone();
         let Some(path_str) = path.to_str() else {
             return Err("The PDF path is not valid UTF-8.".into());
         };
-        if self.doc.can_be_saved_incrementally() {
+        let incremental_ok = self.doc.can_be_saved_incrementally()
+            && {
+                let mut options = PdfWriteOptions::default();
+                options.set_incremental(true);
+                options.set_appearance(false);
+                self.doc.save_with_options(path_str, options).is_ok()
+            };
+        if !incremental_ok {
+            self.rewrite_all(&path)?;
+        }
+        self.maybe_compact()
+    }
+
+    /// Full rewrite with garbage collection when incremental updates have grown
+    /// the file by more than 25% since it was opened. Level 1 drops unreferenced
+    /// objects without renumbering; xrefs are remapped anyway in case they move.
+    fn maybe_compact(&mut self) -> Result<bool, String> {
+        if self.opened_len == 0 {
+            return Ok(false);
+        }
+        let len = std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0);
+        if len <= self.opened_len.saturating_mul(5) / 4 {
+            return Ok(false);
+        }
+        self.compact_rewrite()?;
+        Ok(true)
+    }
+
+    fn compact_rewrite(&mut self) -> Result<(), String> {
+        let path = self.path.clone();
+        let tmp = temp_path(&path);
+        {
             let mut options = PdfWriteOptions::default();
-            options.set_incremental(true);
+            options.set_incremental(false);
             options.set_appearance(false);
-            if self.doc.save_with_options(path_str, options).is_ok() {
-                return Ok(());
+            options.set_garbage(true);
+            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
+            self.doc
+                .write_to_with_options(&mut file, options)
+                .map_err(show)?;
+            file.sync_all().map_err(|err| err.to_string())?;
+        }
+        std::fs::rename(&tmp, &path).map_err(|err| err.to_string())?;
+        self.doc = PdfDocument::open(path.as_path()).map_err(show)?;
+        self.lists.clear();
+        self.list_order.clear();
+        if let Ok(meta) = std::fs::metadata(&path) {
+            self.opened_len = meta.len();
+        }
+        Ok(())
+    }
+
+    fn remap_xrefs(&self, saved: &mut [SavedXref]) {
+        for entry in saved {
+            if let Some(xref) = self.xref_for_id(entry.page, entry.id) {
+                entry.xref = xref;
             }
         }
-        self.rewrite_all(&path)
+    }
+
+    fn xref_for_id(&self, page: usize, id: u64) -> Option<i32> {
+        let pdf_page = self.doc.load_pdf_page(page as i32).ok()?;
+        for annot in pdf_page.annotations() {
+            let marker = read_marker(&annot.object());
+            let same_id = marker.id == Some(id) || read_nm_id(&annot.object()) == Some(id);
+            if same_id {
+                return annot.xref().ok();
+            }
+        }
+        None
     }
 
     fn rewrite_all(&mut self, path: &Path) -> Result<(), String> {
@@ -650,6 +718,8 @@ struct MarkerMeta {
     text_color: Option<Rgb>,
     source: Option<String>,
     png: Option<Vec<u8>>,
+    /// Hash of the image's raw pixels. Absent on files written before reuse.
+    pixel_hash: Option<u64>,
 }
 
 fn read_marker(object: &PdfObject) -> MarkerMeta {
@@ -662,6 +732,7 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
             text_color: None,
             source: None,
             png: None,
+            pixel_hash: None,
         };
     };
     let kind = marker
@@ -711,6 +782,12 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         .ok()
         .flatten()
         .and_then(|obj| obj.read_stream().ok());
+    let pixel_hash = marker
+        .get_dict("PixelHash")
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_string().ok())
+        .and_then(|text| u64::from_str_radix(text.trim(), 16).ok());
     MarkerMeta {
         kind,
         id,
@@ -719,6 +796,7 @@ fn read_marker(object: &PdfObject) -> MarkerMeta {
         text_color,
         source,
         png,
+        pixel_hash,
     }
 }
 
@@ -1109,6 +1187,13 @@ fn apply_existing(
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
             annot.set_rect(to_rect(*rect))?;
+            // Same pixels: keep the existing image stream and appearance.
+            // A new Arc after reload still matches via the stored hash.
+            let hash = pixel_hash(rgba);
+            if read_marker(&annot.object()).pixel_hash == Some(hash) {
+                annot.update()?;
+                return Ok(());
+            }
             write_image_marker(doc, annot, source.id, rgba, *width, *height)?;
             install_image_appearance(doc, annot, rgba, *width, *height)?;
         }
@@ -1381,6 +1466,10 @@ fn write_image_marker(
     let mut marker = doc.new_dict()?;
     marker.dict_put("Kind", doc.new_name("Image")?)?;
     marker.dict_put("Id", doc.new_int(id as i32)?)?;
+    marker.dict_put(
+        "PixelHash",
+        doc.new_string(&format!("{:016x}", pixel_hash(rgba)))?,
+    )?;
     let buffer = Buffer::from_bytes(&png)?;
     let stream = doc.add_stream(&buffer, None, true)?;
     marker.dict_put("Png", stream)?;
@@ -1388,6 +1477,15 @@ fn write_image_marker(
     object.dict_put("Marker", marker)?;
     object.dict_put("NM", doc.new_string(&format!("marker-{id}"))?)?;
     Ok(())
+}
+
+fn pixel_hash(rgba: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in rgba {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
@@ -1738,6 +1836,88 @@ mod tests {
         assert_eq!(rgba[1], 40);
         assert_eq!(rgba[2], 40);
         assert_eq!(rgba[3], 255);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_move_does_not_reembed_pixels() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-img-move-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        const W: u32 = 96;
+        const H: u32 = 96;
+        let mut rgba = vec![0u8; (W * H * 4) as usize];
+        for (i, byte) in rgba.iter_mut().enumerate() {
+            *byte = (i.wrapping_mul(1103515245).wrapping_add(12345) >> 16) as u8;
+        }
+        rgba.chunks_exact_mut(4).for_each(|px| px[3] = 255);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        let id = session.insert(
+            0,
+            AnnotKind::Image {
+                rect: PdfRect::new(72.0, 72.0, 260.0, 260.0),
+                rgba: std::sync::Arc::from(rgba.clone()),
+                width: W,
+                height: H,
+            },
+        );
+        let xrefs = engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+        let saved = xrefs.iter().find(|entry| entry.id == id).unwrap();
+        let annot = session.get_mut(id).unwrap();
+        annot.xref = Some(saved.xref);
+        annot.dirty = true;
+        if let AnnotKind::Image { rect, .. } = &mut annot.kind {
+            *rect = PdfRect::new(120.0, 90.0, 308.0, 278.0);
+        }
+        let before = std::fs::metadata(&path).unwrap().len();
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+        let after = std::fs::metadata(&path).unwrap().len();
+        let growth = after.saturating_sub(before);
+        assert!(
+            growth < 16 * 1024,
+            "moving an image re-embedded pixels: file grew by {growth} bytes ({before} -> {after})"
+        );
+
+        let reloaded = DocumentEngine::open(&path).unwrap();
+        let images: Vec<_> = reloaded
+            .annotations
+            .iter()
+            .filter(|annot| matches!(annot.kind, AnnotKind::Image { .. }))
+            .collect();
+        assert_eq!(images.len(), 1);
+        let AnnotKind::Image { rect, rgba: got, .. } = &images[0].kind else {
+            unreachable!();
+        };
+        assert!((rect.x0 - 120.0).abs() < 0.5, "rect snapped back: {rect:?}");
+        assert_eq!(got.as_ref(), rgba.as_slice());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

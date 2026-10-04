@@ -7,9 +7,13 @@ use egui::{
     StrokeKind, TextEdit, TopBottomPanel, Vec2, WidgetInfo, WidgetType,
 };
 
-use crate::app::{MarkerApp, SaveState, SplitDropZone, SplitState, TabListState, Tool};
+use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
+use crate::app::{
+    AnnotFilterKind, MarkerApp, SaveState, SplitDropZone, SplitState, Tab, TabListState, Tool,
+};
 use crate::assistant::{
-    assistant_session_hint, AssistantAttachment, AssistantRole, CaptureMode,
+    assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
+    AssistantRole, CaptureMode,
 };
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 use crate::pdf::OutlineNode;
@@ -31,6 +35,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     search_bar(app, ctx);
     if show_chrome {
         outline_panel(app, ctx);
+        annot_sidebar(app, ctx);
         assistant_panel(app, ctx);
     }
     paint_tab_list(app, ctx, show_chrome);
@@ -109,6 +114,16 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         if let Some(tab) = app.tab_mut() {
             tab.outline_open = !tab.outline_open;
+        }
+    }
+    let annots_on = app.tab().map(|tab| tab.annots_open).unwrap_or(false);
+    if app.tab().is_some()
+        && chrome_button(ui, "Annots", annots_on)
+            .on_hover_text("Annotation list — filter, search, and jump")
+            .clicked()
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.annots_open = !tab.annots_open;
         }
     }
     if app.tab().is_some() {
@@ -930,6 +945,369 @@ fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     if let Some((page, y)) = jump {
         app.queue_jump(page, y);
     }
+}
+
+fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
+    let colors = p(ctx);
+    let Some(tab) = app.tab() else {
+        return;
+    };
+    if !tab.annots_open {
+        return;
+    }
+
+    let rows = collect_annot_sidebar_rows(tab);
+    let total = tab.doc.session.annotations.len();
+    let selected = tab.selected.clone();
+    let mut filter = tab.annot_sidebar.query.clone();
+    let mut kind_filters = tab.annot_sidebar.kinds.clone();
+    let mut color_filters = tab.annot_sidebar.colors.clone();
+    let mut activate: Option<u64> = None;
+    let mut close = false;
+
+    egui::SidePanel::left("annot-sidebar")
+        .resizable(true)
+        .default_width(280.0)
+        .width_range(220.0..=480.0)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome)
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
+                .inner_margin(10.0),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Annotations").strong().size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Hide annotation list")
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            let search = ui.add(
+                TextEdit::singleline(&mut filter)
+                    .hint_text("Search notes…")
+                    .desired_width(f32::INFINITY),
+            );
+            search.on_hover_text("Match text inside notes, equations, and highlights");
+            ui.add_space(4.0);
+
+            ui.label(RichText::new("Kind").weak().size(11.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for kind in AnnotFilterKind::ALL {
+                    let on = kind_filters.contains(&kind);
+                    if filter_chip(ui, kind.label(), on).clicked() {
+                        if on {
+                            kind_filters.remove(&kind);
+                        } else {
+                            kind_filters.insert(kind);
+                        }
+                    }
+                }
+            });
+            ui.add_space(4.0);
+
+            ui.label(RichText::new("Color").weak().size(11.0));
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                for color in HIGHLIGHT_COLORS {
+                    let on = color_filters.contains(&color);
+                    if color_dot(ui, color, on) {
+                        if on {
+                            color_filters.retain(|c| *c != color);
+                        } else {
+                            color_filters.push(color);
+                        }
+                    }
+                }
+            });
+            ui.add_space(6.0);
+
+            let query = filter.trim().to_ascii_lowercase();
+            let shown: Vec<&AnnotSidebarRow> = rows
+                .iter()
+                .filter(|row| annot_row_matches(row, &kind_filters, &color_filters, &query))
+                .collect();
+
+            ScrollArea::vertical()
+                .id_salt("annot-sidebar-list")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if total == 0 {
+                        ui.label(RichText::new("No annotations").weak());
+                        return;
+                    }
+                    if shown.is_empty() {
+                        ui.label(RichText::new("No matching annotations").weak());
+                        return;
+                    }
+                    for row in shown {
+                        let is_sel = selected.contains(&row.id);
+                        if annot_sidebar_row(ui, row, is_sel).clicked() {
+                            activate = Some(row.id);
+                        }
+                    }
+                });
+        });
+
+    if let Some(tab) = app.tab_mut() {
+        tab.annot_sidebar.query = filter;
+        tab.annot_sidebar.kinds = kind_filters;
+        tab.annot_sidebar.colors = color_filters;
+        if close {
+            tab.annots_open = false;
+        }
+    }
+    if let Some(id) = activate {
+        if let Some(tab) = app.tab_mut() {
+            let (page, y) = tab
+                .doc
+                .session
+                .get(id)
+                .map(|annot| (annot.page, annot.bounds().map(|b| b.y0)))
+                .unwrap_or((0, None));
+            tab.select_only(id);
+            tab.pending_jump = Some((page, y));
+        }
+    }
+}
+
+struct AnnotSidebarRow {
+    id: u64,
+    page: usize,
+    kind: AnnotFilterKind,
+    kind_label: &'static str,
+    color: Option<Rgb>,
+    snippet: String,
+    read_only: bool,
+}
+
+fn collect_annot_sidebar_rows(tab: &Tab) -> Vec<AnnotSidebarRow> {
+    tab.doc
+        .session
+        .annotations
+        .iter()
+        .filter_map(|annot| annot_sidebar_row_data(tab, annot))
+        .collect()
+}
+
+fn annot_sidebar_row_data(tab: &Tab, annot: &Annotation) -> Option<AnnotSidebarRow> {
+    let kind = AnnotFilterKind::from_annot(&annot.kind)?;
+    Some(AnnotSidebarRow {
+        id: annot.id,
+        page: annot.page,
+        kind,
+        kind_label: annot_kind_label(&annot.kind),
+        color: annot_display_color(&annot.kind),
+        snippet: annot_snippet(tab, annot),
+        read_only: matches!(annot.kind, AnnotKind::Foreign { .. }),
+    })
+}
+
+fn annot_row_matches(
+    row: &AnnotSidebarRow,
+    kinds: &std::collections::HashSet<AnnotFilterKind>,
+    colors: &[Rgb],
+    query: &str,
+) -> bool {
+    if !kinds.is_empty() && !kinds.contains(&row.kind) {
+        return false;
+    }
+    if !colors.is_empty() {
+        let Some(color) = row.color else {
+            return false;
+        };
+        if !colors.contains(&color) {
+            return false;
+        }
+    }
+    if query.is_empty() {
+        return true;
+    }
+    let hay = format!(
+        "{} {} {}",
+        row.kind_label,
+        row.snippet,
+        if row.read_only { "read-only imported" } else { "" }
+    )
+    .to_ascii_lowercase();
+    hay.contains(query)
+}
+
+fn annot_sidebar_row(ui: &mut egui::Ui, row: &AnnotSidebarRow, selected: bool) -> egui::Response {
+    let colors = p(ui.ctx());
+    let fill = if selected {
+        accent_fill(ui.ctx(), 36)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let available = ui.available_width();
+    let response = egui::Frame::new()
+        .fill(fill)
+        .corner_radius(5.0)
+        .inner_margin(egui::Margin::symmetric(6, 5))
+        .show(ui, |ui| {
+            ui.set_width(available - 4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (swatch, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                if let Some(color) = row.color {
+                    ui.painter()
+                        .circle_filled(swatch.center(), 5.0, color.to_color32());
+                } else {
+                    ui.painter().circle_stroke(
+                        swatch.center(),
+                        5.0,
+                        Stroke::new(1.0_f32, colors.hairline),
+                    );
+                }
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(row.kind_label).size(12.5).strong());
+                        ui.label(
+                            RichText::new(format!("p.{}", row.page + 1))
+                                .size(11.0)
+                                .weak(),
+                        );
+                        if row.read_only {
+                            ui.label(RichText::new("read-only").size(10.5).weak());
+                        }
+                    });
+                    let snippet = if row.snippet.is_empty() {
+                        "—"
+                    } else {
+                        row.snippet.as_str()
+                    };
+                    ui.label(
+                        RichText::new(snippet)
+                            .size(11.5)
+                            .color(colors.text.gamma_multiply(0.85)),
+                    );
+                });
+            });
+        })
+        .response
+        .interact(Sense::click());
+    if !row.snippet.is_empty() {
+        response.clone().on_hover_text(&row.snippet);
+    }
+    response
+}
+
+fn filter_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
+    let colors = p(ui.ctx());
+    let fill = if selected {
+        accent_fill(ui.ctx(), 42)
+    } else {
+        Color32::TRANSPARENT
+    };
+    let color = if selected { colors.accent } else { colors.text };
+    ui.add(
+        Button::new(RichText::new(label).size(11.0).color(color))
+            .fill(fill)
+            .stroke(Stroke::new(
+                1.0_f32,
+                if selected {
+                    colors.accent.gamma_multiply(0.55)
+                } else {
+                    colors.hairline
+                },
+            ))
+            .corner_radius(5.0),
+    )
+}
+
+fn annot_display_color(kind: &AnnotKind) -> Option<Rgb> {
+    match kind {
+        AnnotKind::Highlight { color, .. }
+        | AnnotKind::Markup { color, .. }
+        | AnnotKind::Text { color, .. }
+        | AnnotKind::Note { color, .. }
+        | AnnotKind::Math { color, .. }
+        | AnnotKind::Foreign { color, .. } => Some(*color),
+        AnnotKind::Shape { stroke, .. } => Some(*stroke),
+        AnnotKind::Image { .. } | AnnotKind::Future(_) => None,
+    }
+}
+
+fn annot_kind_label(kind: &AnnotKind) -> &'static str {
+    match kind {
+        AnnotKind::Highlight { .. } => "Highlight",
+        AnnotKind::Markup { style, .. } => match style {
+            MarkupStyle::Underline => "Underline",
+            MarkupStyle::StrikeOut => "Strikeout",
+            MarkupStyle::Squiggly => "Squiggly",
+        },
+        AnnotKind::Text { .. } => "Text",
+        AnnotKind::Note { .. } => "Note",
+        AnnotKind::Math { .. } => "Equation",
+        AnnotKind::Shape {
+            kind: ShapeKind::Rect,
+            ..
+        } => "Rectangle",
+        AnnotKind::Shape {
+            kind: ShapeKind::Ellipse,
+            ..
+        } => "Ellipse",
+        AnnotKind::Shape {
+            kind: ShapeKind::Line,
+            ..
+        } => "Line",
+        AnnotKind::Image { .. } => "Image",
+        AnnotKind::Future(_) => "Annotation",
+        AnnotKind::Foreign { kind, .. } => match kind {
+            ForeignKind::Underline => "Underline",
+            ForeignKind::StrikeOut => "Strikeout",
+            ForeignKind::Squiggly => "Squiggly",
+            ForeignKind::Ink => "Ink",
+            ForeignKind::Polygon => "Polygon",
+            ForeignKind::PolyLine => "Polyline",
+            ForeignKind::Caret => "Caret",
+            ForeignKind::FileAttachment => "Attachment",
+        },
+    }
+}
+
+fn annot_snippet(tab: &Tab, annot: &Annotation) -> String {
+    let raw = match &annot.kind {
+        AnnotKind::Text { content, .. } | AnnotKind::Note { content, .. } => content.clone(),
+        AnnotKind::Math { source, .. } => source.clone(),
+        AnnotKind::Foreign { contents, .. } => contents.clone(),
+        AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
+            if let Some(glyphs) = tab.doc.glyphs.get(&annot.page) {
+                let indices = glyphs_intersecting_rects(glyphs, quads);
+                if let (Some(&lo), Some(&hi)) = (indices.first(), indices.last()) {
+                    reconstruct_text(glyphs, lo, hi)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            }
+        }
+        AnnotKind::Shape { .. } | AnnotKind::Image { .. } | AnnotKind::Future(_) => String::new(),
+    };
+    one_line_snippet(&raw, 72)
+}
+
+fn one_line_snippet(text: &str, max_chars: usize) -> String {
+    let collapsed: String = text
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if collapsed.chars().count() <= max_chars {
+        return collapsed;
+    }
+    let mut out: String = collapsed.chars().take(max_chars.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
@@ -2199,6 +2577,52 @@ fn vec2(x: f32, y: f32) -> Vec2 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn one_line_snippet_collapses_and_truncates() {
+        assert_eq!(one_line_snippet("hello\n  world", 72), "hello world");
+        let long = "word ".repeat(40);
+        let out = one_line_snippet(&long, 20);
+        assert!(out.ends_with('…'));
+        assert!(out.chars().count() <= 20);
+    }
+
+    #[test]
+    fn annot_row_filter_matches_kind_color_and_query() {
+        let row = AnnotSidebarRow {
+            id: 1,
+            page: 0,
+            kind: AnnotFilterKind::Note,
+            kind_label: "Note",
+            color: Some(HIGHLIGHT_COLORS[0]),
+            snippet: "key idea about commits".into(),
+            read_only: false,
+        };
+        let mut kinds = HashSet::new();
+        kinds.insert(AnnotFilterKind::Highlight);
+        assert!(!annot_row_matches(&row, &kinds, &[], ""));
+        kinds.insert(AnnotFilterKind::Note);
+        assert!(annot_row_matches(&row, &kinds, &[], ""));
+        assert!(!annot_row_matches(
+            &row,
+            &HashSet::new(),
+            &[HIGHLIGHT_COLORS[1]],
+            ""
+        ));
+        assert!(annot_row_matches(
+            &row,
+            &HashSet::new(),
+            &[HIGHLIGHT_COLORS[0]],
+            "commits"
+        ));
+        assert!(!annot_row_matches(
+            &row,
+            &HashSet::new(),
+            &[HIGHLIGHT_COLORS[0]],
+            "missing"
+        ));
+    }
 
     #[test]
     fn recent_exists_stats_on_load_and_focus_not_every_frame() {

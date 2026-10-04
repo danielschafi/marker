@@ -74,6 +74,8 @@ pub(crate) struct MarkerApp {
     egui_ctx: egui::Context,
     /// Last window title sent to the viewport (skip redundant updates).
     last_title: String,
+    /// When the previous frame finished, so interacting frames stay at least ~8ms apart.
+    last_frame: Instant,
     /// Cached `session.is_dirty()` for the active tab's title suffix.
     title_dirty_epoch: u64,
     title_dirty: bool,
@@ -486,6 +488,7 @@ impl MarkerApp {
             ipc,
             egui_ctx,
             last_title: String::new(),
+            last_frame: Instant::now(),
             title_dirty_epoch: 0,
             title_dirty: false,
             title_tab_gen: 0,
@@ -1514,13 +1517,13 @@ impl eframe::App for MarkerApp {
         ui::tab_drag_overlay(self, ctx);
         self.set_title(ctx);
 
-        // Soft frame budget while interacting (~60fps). Background work wakes the
-        // UI via egui::Context::request_repaint from worker threads; a slow safety
-        // net covers a missed wake without burning CPU.
+        // Title changes are sent only when the text changes, so idle must not
+        // schedule another frame. The old UI-thread sleep was only there to stop
+        // a set_title-every-frame loop from spinning the CPU.
         //
-        // With vsync off (Hyprland hidden-workspace workaround), Wayland/OpenGL
-        // may deliver uncapped RedrawRequested. Pace idle frames so that path
-        // cannot spin the CPU when nothing is changing.
+        // vsync stays off (Hyprland hidden workspaces never get frame callbacks).
+        // While interacting, keep a ~60fps budget and do not schedule the next
+        // frame sooner than 8ms after this one.
         let interacting = ctx.input(|input| {
             let scroll = input.smooth_scroll_delta.length_sq() > 0.01
                 || input.raw_scroll_delta.length_sq() > 0.01;
@@ -1542,15 +1545,16 @@ impl eframe::App for MarkerApp {
             });
         if interacting {
             let focused = ctx.input(|input| input.focused);
-            let wait = if focused { 16 } else { 33 };
+            let base = if focused { 16 } else { 33 };
+            let elapsed = self.last_frame.elapsed().as_millis() as u64;
+            let wait = if elapsed < 8 { base.max(8 - elapsed) } else { base };
             ctx.request_repaint_after(Duration::from_millis(wait));
         } else if let Some((_, _, _, when)) = self.math_deadline {
             ctx.request_repaint_after(when.saturating_duration_since(Instant::now()));
         } else if pending {
             ctx.request_repaint_after(Duration::from_millis(500));
-        } else {
-            thread::sleep(Duration::from_millis(100));
         }
+        self.last_frame = Instant::now();
     }
 }
 

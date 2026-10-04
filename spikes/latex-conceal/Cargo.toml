@@ -1,0 +1,12 @@
+[package]
+name = "latex-conceal-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+eframe = "0.33"
+egui = "0.33"
+
+[profile.dev.package."*"]
+opt-level = 2

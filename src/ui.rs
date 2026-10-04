@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{
@@ -996,57 +997,7 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
 
             let streaming = app.tab().is_some_and(|t| t.assistant.streaming);
             let error = app.tab().and_then(|t| t.assistant.error.clone());
-            let turns = app
-                .tab()
-                .map(|t| t.assistant.turns.clone())
-                .unwrap_or_default();
-
-            ScrollArea::vertical()
-                .id_salt("assistant-transcript")
-                .auto_shrink([false, false])
-                .max_height(ui.available_height() - 180.0)
-                .show(ui, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    if turns.is_empty() {
-                        ui.label(
-                            RichText::new(
-                                "Attach selected text or a page region, then ask Cursor a question.",
-                            )
-                            .weak(),
-                        );
-                    }
-                    for turn in &turns {
-                        let who = match turn.role {
-                            AssistantRole::User => "You",
-                            AssistantRole::Assistant => "Cursor",
-                        };
-                        ui.label(RichText::new(who).strong().size(12.0));
-                        match turn.role {
-                            // User prompts stay plain so typed Markdown is not re-interpreted.
-                            AssistantRole::User => {
-                                ui.label(&turn.text);
-                            }
-                            AssistantRole::Assistant => {
-                                // While streaming, prefer plain text so half-open fences stay readable.
-                                if turn.incomplete {
-                                    if !turn.text.is_empty() {
-                                        ui.label(&turn.text);
-                                    }
-                                } else {
-                                    crate::assistant::show_markdown(
-                                        ui,
-                                        &mut app.assistant_md_cache,
-                                        &turn.text,
-                                    );
-                                }
-                            }
-                        }
-                        if turn.incomplete {
-                            ui.label(RichText::new("…").weak());
-                        }
-                        ui.add_space(8.0);
-                    }
-                });
+            paint_assistant_turns(ui, app);
 
             if let Some(err) = error {
                 ui.colored_label(Color32::from_rgb(200, 80, 80), err);
@@ -1185,6 +1136,59 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     if send {
         app.assistant_send();
     }
+}
+
+/// Paint the transcript from a borrow of the live turns.
+fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
+    let active = app.active;
+    let cache = &mut app.assistant_md_cache;
+    let turns = app
+        .tabs
+        .get(active)
+        .map(|tab| tab.assistant.turns.as_slice())
+        .unwrap_or(&[]);
+    ScrollArea::vertical()
+        .id_salt("assistant-transcript")
+        .auto_shrink([false, false])
+        .max_height(ui.available_height() - 180.0)
+        .show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            if turns.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Attach selected text or a page region, then ask Cursor a question.",
+                    )
+                    .weak(),
+                );
+            }
+            for turn in turns {
+                let who = match turn.role {
+                    AssistantRole::User => "You",
+                    AssistantRole::Assistant => "Cursor",
+                };
+                ui.label(RichText::new(who).strong().size(12.0));
+                match turn.role {
+                    // User prompts stay plain so typed Markdown is not re-interpreted.
+                    AssistantRole::User => {
+                        ui.label(&turn.text);
+                    }
+                    AssistantRole::Assistant => {
+                        // While streaming, prefer plain text so half-open fences stay readable.
+                        if turn.incomplete {
+                            if !turn.text.is_empty() {
+                                ui.label(&turn.text);
+                            }
+                        } else {
+                            crate::assistant::show_markdown(ui, cache, &turn.text);
+                        }
+                    }
+                }
+                if turn.incomplete {
+                    ui.label(RichText::new("…").weak());
+                }
+                ui.add_space(8.0);
+            }
+        });
 }
 
 fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
@@ -1781,6 +1785,64 @@ fn vbar(ui: &mut egui::Ui) {
     );
 }
 
+/// `is_file` results for the empty-state recent list.
+///
+/// Refreshed when the path list changes (settings load, open, forget) and when
+/// the window gains focus. A missing path stays in the list.
+#[derive(Clone, Default)]
+struct RecentExistsCache {
+    paths: Vec<PathBuf>,
+    exists: Vec<bool>,
+    focused: bool,
+    seen_focus: bool,
+}
+
+fn sync_recent_exists(
+    cache: &mut RecentExistsCache,
+    recent: &[PathBuf],
+    focus_gain: bool,
+    mut is_file: impl FnMut(&Path) -> bool,
+) {
+    if cache.paths.as_slice() == recent {
+        if !focus_gain {
+            return;
+        }
+        for (path, slot) in cache.paths.iter().zip(cache.exists.iter_mut()) {
+            *slot = is_file(path);
+        }
+        return;
+    }
+    cache.exists.clear();
+    cache.exists.reserve(recent.len());
+    for path in recent {
+        cache.exists.push(is_file(path));
+    }
+    cache.paths.clear();
+    cache.paths.extend(recent.iter().cloned());
+}
+
+fn recent_file_flags(ctx: &egui::Context, recent: &[PathBuf]) -> Vec<bool> {
+    let id = Id::new("marker-recent-file-exists");
+    let (focused, event_gain) = ctx.input(|input| {
+        let focused = input.viewport().focused.unwrap_or(false);
+        let event_gain = input
+            .events
+            .iter()
+            .any(|event| matches!(event, egui::Event::WindowFocused(true)));
+        (focused, event_gain)
+    });
+    let mut cache = ctx
+        .data(|data| data.get_temp::<RecentExistsCache>(id))
+        .unwrap_or_default();
+    let focus_gain = event_gain || (cache.seen_focus && focused && !cache.focused);
+    sync_recent_exists(&mut cache, recent, focus_gain, Path::is_file);
+    cache.focused = focused;
+    cache.seen_focus = true;
+    let exists = cache.exists.clone();
+    ctx.data_mut(|data| data.insert_temp(id, cache));
+    exists
+}
+
 pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let colors = p(ui.ctx());
     let rect = ui.available_rect_before_wrap();
@@ -1830,12 +1892,12 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                         ui.label(RichText::new("Recent").size(13.0).color(colors.text_dim));
                         ui.add_space(8.0);
                         let list_width = ui.available_width().min(440.0).max(280.0);
-                        for path in &recent {
+                        let exists_flags = recent_file_flags(ui.ctx(), &recent);
+                        for (path, exists) in recent.iter().zip(exists_flags) {
                             let name = path
                                 .file_name()
                                 .and_then(|name| name.to_str())
                                 .unwrap_or("document.pdf");
-                            let exists = path.is_file();
                             let parent = path
                                 .parent()
                                 .map(|p| p.display().to_string())
@@ -2132,4 +2194,49 @@ fn accent_fill(ctx: &egui::Context, alpha: u8) -> Color32 {
 
 fn vec2(x: f32, y: f32) -> Vec2 {
     Vec2::new(x, y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recent_exists_stats_on_load_and_focus_not_every_frame() {
+        let recent = vec![
+            PathBuf::from("/tmp/marker-a.pdf"),
+            PathBuf::from("/tmp/marker-b.pdf"),
+        ];
+        let mut cache = RecentExistsCache::default();
+        let mut stats = 0;
+        sync_recent_exists(&mut cache, &recent, false, |_| {
+            stats += 1;
+            true
+        });
+        assert_eq!(stats, 2);
+        assert_eq!(cache.exists, vec![true, true]);
+
+        sync_recent_exists(&mut cache, &recent, false, |_| {
+            stats += 1;
+            false
+        });
+        assert_eq!(stats, 2);
+        assert_eq!(cache.exists, vec![true, true]);
+
+        sync_recent_exists(&mut cache, &recent, true, |_| {
+            stats += 1;
+            false
+        });
+        assert_eq!(stats, 4);
+        assert_eq!(cache.exists, vec![false, false]);
+
+        let changed = vec![recent[0].clone()];
+        sync_recent_exists(&mut cache, &changed, false, |_| {
+            stats += 1;
+            true
+        });
+        assert_eq!(stats, 5);
+        assert_eq!(cache.exists, vec![true]);
+        // Missing entries stay in the cached list; nothing is deleted here.
+        assert_eq!(cache.paths, changed);
+    }
 }

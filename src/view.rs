@@ -1685,7 +1685,12 @@ fn paint_document(app: &MarkerApp, painter: &egui::Painter, view: Rect, pixels_p
         let rect = tab.doc.page_rect(page, view);
         let shadow = rect.expand(2.0).translate(Vec2::new(0.0, 4.0));
         painter.rect_filled(shadow, 6.0, Color32::from_black_alpha(28));
-        painter.rect_filled(rect, 1.0, Color32::WHITE);
+        let page_bg = if app.settings.sepia {
+            Color32::from_rgb(244, 236, 216)
+        } else {
+            Color32::WHITE
+        };
+        painter.rect_filled(rect, 1.0, page_bg);
         // Highlights underpaint paper so glyphs (opaque tile ink) stay readable.
         paint_highlight_fills(app, painter, page, view);
         paint_tiles(&tab.doc, painter, page, view, render_scale, pixels_per_point);

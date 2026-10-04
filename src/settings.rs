@@ -17,6 +17,9 @@ pub struct Settings {
     /// Annotation tool strip under the tab bar. Tools stay reachable via shortcuts when hidden.
     #[serde(default = "default_true")]
     pub toolbar_visible: bool,
+    /// Warm sepia fill behind page tiles instead of white paper.
+    #[serde(default)]
+    pub sepia: bool,
     #[serde(default)]
     pub recent: Vec<PathBuf>,
 }
@@ -34,6 +37,7 @@ impl Default for Settings {
             shape_color: Rgb::new(28, 78, 186),
             shape_width: 1.5,
             toolbar_visible: true,
+            sepia: false,
             recent: Vec::new(),
         }
     }

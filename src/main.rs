@@ -34,7 +34,7 @@ fn run_ui(
         // Hyprland does not deliver frame callbacks to a window on a hidden
         // workspace. Waiting for vsync there blocks the event loop, so the
         // compositor reports the app as not responding until you switch back.
-        // Frame pacing is owned by app-level request_repaint_after / idle sleep.
+        // Frame pacing is owned by app-level request_repaint_after while interacting.
         vsync: false,
         ..Default::default()
     };

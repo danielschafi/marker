@@ -72,6 +72,12 @@ pub(crate) struct MarkerApp {
     ipc: Option<IpcInbox>,
     /// Cloned into worker/dialog threads so they can wake the UI on completion.
     egui_ctx: egui::Context,
+    /// Last window title sent to the viewport (skip redundant updates).
+    last_title: String,
+    /// Cached `session.is_dirty()` for the active tab's title suffix.
+    title_dirty_epoch: u64,
+    title_dirty: bool,
+    title_tab_gen: u64,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -479,6 +485,10 @@ impl MarkerApp {
             dialog_busy: false,
             ipc,
             egui_ctx,
+            last_title: String::new(),
+            title_dirty_epoch: 0,
+            title_dirty: false,
+            title_tab_gen: 0,
         };
         for path in paths {
             app.open_path(path);
@@ -3678,24 +3688,40 @@ impl MarkerApp {
         self.settings.save();
     }
 
-    fn set_title(&self, ctx: &egui::Context) {
-        let title = match self.tab() {
-            Some(tab) => {
-                let name = tab
-                    .doc
-                    .path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("document.pdf");
-                let dirty = if tab.doc.session.is_dirty() {
+    fn set_title(&mut self, ctx: &egui::Context) {
+        if std::env::var_os("PERF_NO_TITLE").is_some_and(|v| v == "1") {
+            return;
+        }
+        let title = if let Some(tab) = self.tabs.get(self.active) {
+            let name = tab
+                .doc
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("document.pdf");
+            let epoch = tab.doc.session.epoch;
+            let gen = tab.doc.gen;
+            let dirty_suffix = if gen == self.title_tab_gen && epoch == self.title_dirty_epoch {
+                if self.title_dirty {
                     " •"
                 } else {
                     ""
-                };
-                format!("Marker — {name}{dirty}")
-            }
-            None => "Marker".into(),
+                }
+            } else {
+                let dirty = tab.doc.session.is_dirty();
+                self.title_tab_gen = gen;
+                self.title_dirty_epoch = epoch;
+                self.title_dirty = dirty;
+                if dirty { " •" } else { "" }
+            };
+            format!("Marker — {name}{dirty_suffix}")
+        } else {
+            "Marker".into()
         };
+        if title == self.last_title {
+            return;
+        }
+        self.last_title = title.clone();
         ctx.send_viewport_cmd(ViewportCommand::Title(title));
     }
 }

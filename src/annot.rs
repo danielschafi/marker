@@ -24,6 +24,27 @@ pub enum ShapeKind {
     Line,
 }
 
+/// Stroke along glyph quads. Editable and saved as a PDF text-markup annotation.
+///
+/// Someone else's underline, strikeout, or squiggly stays [`ForeignKind`] — those
+/// are read-only. A native mark is dirty when edited and round-trips on its own.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkupStyle {
+    Underline,
+    StrikeOut,
+    Squiggly,
+}
+
+impl MarkupStyle {
+    pub fn marker_name(self) -> &'static str {
+        match self {
+            Self::Underline => "Underline",
+            Self::StrikeOut => "StrikeOut",
+            Self::Squiggly => "Squiggly",
+        }
+    }
+}
+
 /// Annotation types written by another app. Marker displays them and does not edit them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForeignKind {
@@ -51,6 +72,12 @@ pub enum FutureKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnnotKind {
     Highlight {
+        quads: Vec<PdfRect>,
+        color: Rgb,
+    },
+    /// Underline, strikeout, or squiggly on the same quads as a highlight.
+    Markup {
+        style: MarkupStyle,
         quads: Vec<PdfRect>,
         color: Rgb,
     },
@@ -123,7 +150,7 @@ impl Annotation {
 impl AnnotKind {
     pub fn bounds(&self) -> Option<PdfRect> {
         match self {
-            Self::Highlight { quads, .. } => {
+            Self::Highlight { quads, .. } | Self::Markup { quads, .. } => {
                 let first = *quads.first()?;
                 Some(quads.iter().skip(1).fold(first, |acc, q| {
                     PdfRect::new(
@@ -163,7 +190,7 @@ impl AnnotKind {
 
     pub fn translate(&mut self, dx: f32, dy: f32) {
         match self {
-            Self::Highlight { quads, .. } => {
+            Self::Highlight { quads, .. } | Self::Markup { quads, .. } => {
                 for q in quads {
                     *q = q.translate(dx, dy);
                 }
@@ -207,7 +234,9 @@ impl AnnotKind {
 
     pub fn hit(&self, p: PdfPoint, slop: f32) -> bool {
         match self {
-            Self::Highlight { quads, .. } => quads.iter().any(|q| q.inflate(slop).contains(p)),
+            Self::Highlight { quads, .. } | Self::Markup { quads, .. } => {
+                quads.iter().any(|q| q.inflate(slop).contains(p))
+            }
             Self::Foreign { .. } => false,
             Self::Shape {
                 kind: ShapeKind::Line,

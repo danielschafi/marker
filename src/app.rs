@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use egui::{DragValue, Key, ViewportCommand};
 
-use crate::annot::{AnnotKind, Annotation, Glyph, Handle, Session, ShapeKind};
+use crate::annot::{AnnotKind, Annotation, Glyph, Handle, MarkupStyle, Session, ShapeKind};
 use crate::assistant::{
     absolute_filepath, AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole,
     AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
@@ -369,6 +369,9 @@ pub(crate) struct SearchState {
 pub(crate) enum Tool {
     Select,
     Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
     Text,
     Rect,
     Ellipse,
@@ -377,9 +380,12 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 7] = [
+    pub(crate) const ALL: [Tool; 10] = [
         Tool::Select,
         Tool::Highlight,
+        Tool::Underline,
+        Tool::StrikeOut,
+        Tool::Squiggly,
         Tool::Text,
         Tool::Rect,
         Tool::Ellipse,
@@ -388,10 +394,14 @@ impl Tool {
     ];
 
     /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
+    /// Underline is `U`, strikeout is `X`, squiggly is `W`.
     pub(crate) fn shortcut(self) -> Key {
         match self {
             Tool::Select => Key::S,
             Tool::Highlight => Key::H,
+            Tool::Underline => Key::U,
+            Tool::StrikeOut => Key::X,
+            Tool::Squiggly => Key::W,
             Tool::Text => Key::T,
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
@@ -404,12 +414,38 @@ impl Tool {
         match self {
             Tool::Select => "Select text or objects, marquee, move, copy",
             Tool::Highlight => "Mark text",
+            Tool::Underline => "Underline text",
+            Tool::StrikeOut => "Strike through text",
+            Tool::Squiggly => "Squiggly underline",
             Tool::Text => "Write on the page",
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
             Tool::Math => "Equation",
         }
+    }
+
+    /// `None` is the highlight fill. The three stroke tools share its gesture.
+    pub(crate) fn markup_style(self) -> Option<MarkupStyle> {
+        match self {
+            Tool::Underline => Some(MarkupStyle::Underline),
+            Tool::StrikeOut => Some(MarkupStyle::StrikeOut),
+            Tool::Squiggly => Some(MarkupStyle::Squiggly),
+            Tool::Select
+            | Tool::Highlight
+            | Tool::Text
+            | Tool::Rect
+            | Tool::Ellipse
+            | Tool::Line
+            | Tool::Math => None,
+        }
+    }
+
+    pub(crate) fn is_text_mark(self) -> bool {
+        matches!(
+            self,
+            Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly
+        )
     }
 }
 
@@ -479,6 +515,8 @@ pub(crate) enum Drag {
         word_lo: Option<usize>,
         word_hi: Option<usize>,
         replace: Option<u64>,
+        /// `None` paints a highlight fill. A style paints underline, strike, or squiggle.
+        style: Option<MarkupStyle>,
     },
     Shape {
         page: usize,
@@ -1274,7 +1312,7 @@ impl MarkerApp {
             let id = tab.selected[0];
             let annot = tab.doc.session.get(id)?;
             match &annot.kind {
-                AnnotKind::Highlight { quads, .. } => {
+                AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
                     let glyphs = tab.doc.glyphs.get(&annot.page)?;
                     let indices = crate::assistant::glyphs_intersecting_rects(glyphs, quads);
                     let (&lo, &hi) = (indices.first()?, indices.last()?);
@@ -2402,6 +2440,7 @@ impl MarkerApp {
                     }
                     AnnotKind::Math { .. }
                     | AnnotKind::Highlight { .. }
+                    | AnnotKind::Markup { .. }
                     | AnnotKind::Note { .. }
                     | AnnotKind::Shape { .. }
                     | AnnotKind::Image { .. }
@@ -2758,6 +2797,7 @@ impl MarkerApp {
                 }
                 AnnotKind::Text { .. }
                 | AnnotKind::Highlight { .. }
+                | AnnotKind::Markup { .. }
                 | AnnotKind::Note { .. }
                 | AnnotKind::Shape { .. }
                 | AnnotKind::Image { .. }
@@ -3383,7 +3423,7 @@ impl MarkerApp {
             } else {
                 return;
             }
-        } else if self.tool == Tool::Highlight {
+        } else if self.tool.is_text_mark() {
             (
                 palette_for(self.tool),
                 ColorTarget::Highlights,
@@ -4059,9 +4099,11 @@ impl MarkerApp {
             return color;
         }
         match self.tool {
-            Tool::Highlight => self.settings.highlight_color,
+            Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
+                self.settings.highlight_color
+            }
             Tool::Rect | Tool::Ellipse | Tool::Line => self.settings.shape_color,
-            _ => self.settings.text_color,
+            Tool::Select | Tool::Text | Tool::Math => self.settings.text_color,
         }
     }
 
@@ -4073,8 +4115,9 @@ impl MarkerApp {
     fn selected_highlight_color(&self) -> Option<Rgb> {
         let tab = self.tab()?;
         for id in &tab.selected {
-            if let Some(AnnotKind::Highlight { color, .. }) =
-                tab.doc.session.get(*id).map(|a| &a.kind)
+            if let Some(
+                AnnotKind::Highlight { color, .. } | AnnotKind::Markup { color, .. },
+            ) = tab.doc.session.get(*id).map(|a| &a.kind)
             {
                 return Some(*color);
             }
@@ -4160,7 +4203,7 @@ impl MarkerApp {
         let mut stroke = false;
         for id in &tab.selected {
             match tab.doc.session.get(*id).map(|a| &a.kind) {
-                Some(AnnotKind::Highlight { .. }) => {
+                Some(AnnotKind::Highlight { .. } | AnnotKind::Markup { .. }) => {
                     highlight = true;
                 }
                 Some(AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Note { .. }) => {
@@ -4192,7 +4235,11 @@ impl MarkerApp {
                 let mut touched = None;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
                     match (&mut annot.kind, target) {
-                        (AnnotKind::Highlight { color: slot, .. }, ColorTarget::Highlights) => {
+                        (
+                            AnnotKind::Highlight { color: slot, .. }
+                            | AnnotKind::Markup { color: slot, .. },
+                            ColorTarget::Highlights,
+                        ) => {
                             *slot = color;
                             touched = Some(0);
                         }

@@ -8,14 +8,14 @@ use egui::{
 };
 
 use crate::annot::{
-    click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, ShapeKind,
-    HIGHLIGHT_OPACITY,
+    click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, MarkupStyle,
+    ShapeKind, HIGHLIGHT_OPACITY,
 };
 use crate::app::{
     clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool,
 };
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
-use crate::geom::{tile_render_scale, PdfPoint, PdfRect, MAX_SCALE, MIN_SCALE};
+use crate::geom::{tile_render_scale, PdfPoint, PdfRect, Rgb, MAX_SCALE, MIN_SCALE};
 use crate::math::rich_text::{self, LaidRun, MathMetrics, TextMeasure};
 use crate::math_spans;
 use crate::pdf::{PageInfo, TILE_PX};
@@ -398,7 +398,8 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
     {
         response.clone().on_hover_cursor(CursorIcon::Crosshair);
     } else if matches!(app.capture, CaptureMode::LearningText)
-        || matches!(app.tool, Tool::Highlight | Tool::Text | Tool::Math)
+        || app.tool.is_text_mark()
+        || matches!(app.tool, Tool::Text | Tool::Math)
         || matches!(
             app.tab().and_then(|tab| tab.drag.as_ref()),
             Some(Drag::TextSelect { .. })
@@ -465,7 +466,9 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
     };
     match tool {
         Tool::Select => begin_select(tab, page, point, pos, view),
-        Tool::Highlight => begin_highlight(tab, page, point),
+        Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
+            begin_highlight(tab, page, point, tool.markup_style());
+        }
         Tool::Rect | Tool::Ellipse | Tool::Line => {
             tab.drag = Some(Drag::Shape {
                 page,
@@ -611,7 +614,7 @@ fn begin_select(tab: &mut Tab, page: usize, point: PdfPoint, pos: Pos2, view: Re
     }
 }
 
-fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint) {
+fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint, style: Option<MarkupStyle>) {
     tab.selected.clear();
     tab.text_sel = None;
     tab.style_bar = None;
@@ -655,6 +658,7 @@ fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint) {
             word_lo,
             word_hi,
             replace,
+            style,
         });
         return;
     }
@@ -667,6 +671,7 @@ fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint) {
         word_lo: None,
         word_hi: None,
         replace: None,
+        style,
     });
 }
 
@@ -695,6 +700,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             word_lo,
             word_hi,
             replace,
+            style,
             ..
         } => {
             let Some(tab) = app.tab_mut() else {
@@ -720,6 +726,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 word_lo,
                 word_hi,
                 replace,
+                style,
             });
         }
         Drag::LearningSelect {
@@ -1095,9 +1102,15 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 app.clear_page_selection();
             }
         }
-        Tool::Highlight => {
-            if select_glyphs_at_point(app, page, point, double, GlyphClick::Highlight) {
-                // Highlight created (single glyph, or whole word on double-click).
+        Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
+            if select_glyphs_at_point(
+                app,
+                page,
+                point,
+                double,
+                GlyphClick::Mark(tool.markup_style()),
+            ) {
+                // Mark created (single glyph, or whole word on double-click).
             } else if hit.is_none() {
                 app.clear_page_selection();
             }
@@ -1168,7 +1181,8 @@ fn is_editable(tab: &Tab, id: u64) -> bool {
 #[derive(Clone, Copy)]
 enum GlyphClick {
     TextSelect,
-    Highlight,
+    /// `None` is a highlight fill. A style is underline, strikeout, or squiggly.
+    Mark(Option<MarkupStyle>),
     Learning,
 }
 
@@ -1228,7 +1242,7 @@ fn select_glyphs_at_point(
             app.attach_learning_text();
             true
         }
-        GlyphClick::Highlight => {
+        GlyphClick::Mark(style) => {
             let color = app.settings.highlight_color;
             let replace = {
                 let Some(tab) = app.tab() else {
@@ -1265,11 +1279,8 @@ fn select_glyphs_at_point(
             if let Some(old) = replace {
                 tab.doc.session.remove(old);
             }
-            let id = tab
-                .doc
-                .session
-                .insert(page, AnnotKind::Highlight { quads, color });
-            // Leave the new mark unselected so the user can keep highlighting.
+            let id = tab.doc.session.insert(page, text_mark_kind(style, quads, color));
+            // Leave the new mark unselected so the user can keep marking.
             tab.selected.clear();
             tab.text_sel = None;
             if let Some(w) = word {
@@ -1387,29 +1398,22 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             word_lo,
             word_hi,
             replace,
+            style,
         } => {
             let color = app.settings.highlight_color;
-            let Some(tab) = app.tab_mut() else {
-                return;
-            };
             let quads = {
-                let range = match (anchor, current, word_lo, word_hi) {
-                    (Some(a), Some(c), Some(wlo), Some(whi)) => {
-                        Some((a.min(c).min(wlo), a.max(c).max(whi)))
-                    }
-                    (Some(a), Some(c), _, _) => Some((a.min(c), a.max(c))),
-                    _ => None,
+                let Some(tab) = app.tab() else {
+                    return;
                 };
-                if let (Some((lo, hi)), Some(glyphs)) = (range, tab.doc.glyphs.get(&page)) {
-                    highlight_quads(glyphs, lo, hi)
-                } else {
-                    let rect = PdfRect::from_points(origin, current_pt);
-                    if rect.is_empty() {
-                        Vec::new()
-                    } else {
-                        vec![rect]
-                    }
-                }
+                mark_drag_quads(
+                    tab,
+                    page,
+                    anchor,
+                    current,
+                    origin,
+                    current_pt,
+                    (word_lo, word_hi),
+                )
             };
             if quads.is_empty() {
                 return;
@@ -1424,7 +1428,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             let id = tab
                 .doc
                 .session
-                .insert(page, AnnotKind::Highlight { quads, color });
+                .insert(page, text_mark_kind(style, quads, color));
             // Leave the new mark unselected so the user can keep highlighting.
             tab.selected.clear();
             tab.text_sel = None;
@@ -1753,6 +1757,7 @@ fn paint_highlight_fills(
         }
     }
     // Drag preview for the highlight tool also belongs under the ink.
+    // Stroke tools preview on top of the tiles instead.
     if let Some(Drag::Highlight {
         page: drag_page,
         anchor,
@@ -1761,6 +1766,7 @@ fn paint_highlight_fills(
         current_pt,
         word_lo,
         word_hi,
+        style: None,
         ..
     }) = &tab.drag
     {
@@ -1768,21 +1774,122 @@ fn paint_highlight_fills(
             return;
         }
         let fill = highlight_fill(highlight_color);
-        let range = match (anchor, current, word_lo, word_hi) {
-            (Some(a), Some(c), Some(wlo), Some(whi)) => {
-                Some(((*a).min(*c).min(*wlo), (*a).max(*c).max(*whi)))
-            }
-            (Some(a), Some(c), _, _) => Some(((*a).min(*c), (*a).max(*c))),
-            _ => None,
-        };
-        if let (Some((lo, hi)), Some(glyphs)) = (range, tab.doc.glyphs.get(&page)) {
-            for rect in highlight_quads(glyphs, lo, hi) {
-                painter.rect_filled(pdf_rect_screen(&tab.doc, page, rect, view), 1.0, fill);
-            }
-        } else {
-            let rect = PdfRect::from_points(*origin, *current_pt);
+        for rect in mark_drag_quads(
+            tab,
+            *drag_page,
+            *anchor,
+            *current,
+            *origin,
+            *current_pt,
+            (*word_lo, *word_hi),
+        ) {
             painter.rect_filled(pdf_rect_screen(&tab.doc, page, rect, view), 1.0, fill);
         }
+    }
+}
+
+fn text_mark_kind(style: Option<MarkupStyle>, quads: Vec<PdfRect>, color: Rgb) -> AnnotKind {
+    match style {
+        Some(style) => AnnotKind::Markup { style, quads, color },
+        None => AnnotKind::Highlight { quads, color },
+    }
+}
+
+fn mark_drag_quads(
+    tab: &Tab,
+    page: usize,
+    anchor: Option<usize>,
+    current: Option<usize>,
+    origin: PdfPoint,
+    current_pt: PdfPoint,
+    word: (Option<usize>, Option<usize>),
+) -> Vec<PdfRect> {
+    let (word_lo, word_hi) = word;
+    let range = match (anchor, current, word_lo, word_hi) {
+        (Some(a), Some(c), Some(wlo), Some(whi)) => Some((a.min(c).min(wlo), a.max(c).max(whi))),
+        (Some(a), Some(c), _, _) => Some((a.min(c), a.max(c))),
+        _ => None,
+    };
+    if let (Some((lo, hi)), Some(glyphs)) = (range, tab.doc.glyphs.get(&page)) {
+        highlight_quads(glyphs, lo, hi)
+    } else {
+        let rect = PdfRect::from_points(origin, current_pt);
+        if rect.is_empty() {
+            Vec::new()
+        } else {
+            vec![rect]
+        }
+    }
+}
+
+fn paint_markup_strokes(
+    painter: &egui::Painter,
+    doc: &DocState,
+    page: usize,
+    view: Rect,
+    style: MarkupStyle,
+    quads: &[PdfRect],
+    color: Rgb,
+) {
+    let color32 = color.to_color32();
+    let width = (1.45 * doc.scale).max(1.15);
+    let stroke = Stroke::new(width, color32);
+    for quad in quads {
+        let screen = pdf_rect_screen(doc, page, *quad, view);
+        if screen.width() < 0.5 {
+            continue;
+        }
+        match style {
+            MarkupStyle::Underline => {
+                let y = screen.bottom() - width * 0.35;
+                painter.line_segment(
+                    [Pos2::new(screen.left(), y), Pos2::new(screen.right(), y)],
+                    stroke,
+                );
+            }
+            MarkupStyle::StrikeOut => {
+                let y = screen.center().y;
+                painter.line_segment(
+                    [Pos2::new(screen.left(), y), Pos2::new(screen.right(), y)],
+                    stroke,
+                );
+            }
+            MarkupStyle::Squiggly => {
+                paint_squiggle(
+                    painter,
+                    screen.left(),
+                    screen.right(),
+                    screen.bottom() - width * 0.35,
+                    doc.scale,
+                    stroke,
+                );
+            }
+        }
+    }
+}
+
+fn paint_squiggle(
+    painter: &egui::Painter,
+    left: f32,
+    right: f32,
+    y: f32,
+    scale: f32,
+    stroke: Stroke,
+) {
+    let amp = (1.45 * scale).max(1.1);
+    let wavelength = (8.0 * scale).max(5.0);
+    let step = (wavelength / 8.0).max(1.0);
+    let mut pts = Vec::new();
+    let mut x = left;
+    while x < right {
+        let t = (x - left) / wavelength * std::f32::consts::TAU;
+        pts.push(Pos2::new(x, y + amp * t.sin()));
+        x += step;
+    }
+    let t = (right - left) / wavelength * std::f32::consts::TAU;
+    pts.push(Pos2::new(right, y + amp * t.sin()));
+    if pts.len() >= 2 {
+        painter.add(egui::Shape::line(pts, stroke));
     }
 }
 
@@ -1904,6 +2011,21 @@ fn paint_annotations(
         match &annot.kind {
             // Highlight fills are underpainted before tiles; only selection chrome remains here.
             AnnotKind::Highlight { .. } => {}
+            AnnotKind::Markup {
+                style,
+                quads,
+                color,
+            } => {
+                paint_markup_strokes(
+                    &painter,
+                    &tab.doc,
+                    page,
+                    view,
+                    *style,
+                    quads,
+                    *color,
+                );
+            }
             AnnotKind::Text {
                 rect,
                 content,
@@ -2262,8 +2384,38 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
                 Color32::from_rgba_unmultiplied(80, 160, 255, 40),
             );
         }
+        Some(Drag::Highlight {
+            style: Some(style),
+            page,
+            anchor,
+            current,
+            origin,
+            current_pt,
+            word_lo,
+            word_hi,
+            ..
+        }) => {
+            let quads = mark_drag_quads(
+                tab,
+                *page,
+                *anchor,
+                *current,
+                *origin,
+                *current_pt,
+                (*word_lo, *word_hi),
+            );
+            paint_markup_strokes(
+                painter,
+                &tab.doc,
+                *page,
+                view,
+                *style,
+                &quads,
+                app.settings.highlight_color,
+            );
+        }
         Some(Drag::Highlight { .. }) => {
-            // Filled in `paint_highlight_fills` under the page tiles.
+            // Highlight fill is painted in `paint_highlight_fills` under the page tiles.
         }
         Some(Drag::Shape {
             page,
@@ -3198,7 +3350,10 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     };
     // Assistant only when there is page/highlight text to work with — not for
     // every annotation that happens to have a copyable body (text/note).
-    let on_highlight = matches!(hit_kind, Some(AnnotKind::Highlight { .. }));
+    let on_highlight = matches!(
+        hit_kind,
+        Some(AnnotKind::Highlight { .. } | AnnotKind::Markup { .. })
+    );
     let show_assistant_actions = has_learning
         || has_text_sel
         || on_highlight
@@ -3453,7 +3608,9 @@ fn ensure_learning_from_menu(app: &mut MarkerApp, menu: &ContextMenu) {
     if let Some(id) = menu.hit {
         let page = tab.doc.session.get(id).map(|annot| annot.page);
         let quads = tab.doc.session.get(id).and_then(|annot| match &annot.kind {
-            AnnotKind::Highlight { quads, .. } => Some(quads.clone()),
+            AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
+                Some(quads.clone())
+            }
             _ => None,
         });
         if let (Some(page), Some(quads)) = (page, quads) {
@@ -3501,6 +3658,11 @@ enum MenuAction {
 fn annot_menu_label(kind: &AnnotKind) -> &'static str {
     match kind {
         AnnotKind::Highlight { .. } => "Highlight",
+        AnnotKind::Markup { style, .. } => match style {
+            MarkupStyle::Underline => "Underline",
+            MarkupStyle::StrikeOut => "Strikeout",
+            MarkupStyle::Squiggly => "Squiggly",
+        },
         AnnotKind::Text { .. } => "Text",
         AnnotKind::Note { .. } => "Note",
         AnnotKind::Math { .. } => "Equation",

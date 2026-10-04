@@ -18,7 +18,8 @@ use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::instance::{self, IpcInbox};
 use crate::math::{
-    pdf_plan, EntryKind, MathCache, MathKey, MathLane, MathRender, MathWorker, PdfPlan, RgbaImage,
+    map_typst_error, needs_sharper_raster, pdf_plan, raster_scale_for, EntryKind, MathCache,
+    MathKey, MathLane, MathRender, MathWorker, PdfPlan, RgbaImage,
 };
 use crate::math_spans;
 use crate::pdf::{
@@ -73,8 +74,8 @@ pub(crate) struct MarkerApp {
     /// Last successful key for `(gen, annot id, span ordinal)`, so a later error
     /// can still find the previous good render.
     math_last_good: HashMap<(u64, u64, usize), MathKey>,
-    /// Last prepare_visible_math scan: gen → (epoch, cache revision, first page, last page).
-    math_scan: HashMap<u64, (u64, u64, usize, usize)>,
+    /// Last prepare_visible_math scan: gen → (epoch, cache rev, first, last, zoom×ppp bits).
+    math_scan: HashMap<u64, (u64, u64, usize, usize, u32)>,
     next_gen: u64,
     dialog_tx: Sender<Option<PathBuf>>,
     dialog_rx: Receiver<Option<PathBuf>>,
@@ -325,11 +326,9 @@ pub(crate) struct MathPreview {
 /// Ready payload for [`MathCache`]. The SVG stays so a later zoom can re-raster.
 pub(crate) struct InlineReady {
     /// SVG stays so a later zoom can re-raster without asking Typst again.
-    #[allow(dead_code)]
     pub(crate) svg: String,
     pub(crate) texture: Option<egui::TextureHandle>,
-    /// Raster pixels per PDF point used for `texture`.
-    #[allow(dead_code)]
+    /// CSS-pixel multiplier used for `texture` (√2 buckets from the base 3×).
     pub(crate) raster_scale: f32,
     pub(crate) w_pt: f32,
     pub(crate) h_pt: f32,
@@ -337,6 +336,8 @@ pub(crate) struct InlineReady {
     pub(crate) pdf: Option<Vec<u8>>,
     pub(crate) pdf_pending: bool,
     pdf_req: Option<u64>,
+    /// In-flight sharper raster (`MathRender::req`), if any.
+    reraster_req: Option<u64>,
 }
 
 enum CacheAction {
@@ -1666,7 +1667,7 @@ impl eframe::App for MarkerApp {
         self.poll_dialog();
         self.poll(ctx);
         self.flush_math();
-        self.prepare_visible_math();
+        self.prepare_visible_math(pixels_per_point);
         self.dispatch_search();
         self.handle_keys(ctx);
         self.autosave(ctx);
@@ -2263,6 +2264,43 @@ impl MarkerApp {
             self.finish_math_save(render.gen);
             return;
         }
+        // Sharper zoom raster: reuse the texture id and keep drawing until this lands.
+        let reraster_hit = self
+            .math_cache
+            .ready_mut(&render.key)
+            .is_some_and(|ready| ready.reraster_req == Some(render.req));
+        if reraster_hit {
+            let bytes = render
+                .preview
+                .as_ref()
+                .map(|image| image.width as usize * image.height as usize * 4);
+            if let Some(ready) = self.math_cache.ready_mut(&render.key) {
+                if let Some(image) = render.preview.as_ref() {
+                    let pixels = egui::ColorImage::from_rgba_premultiplied(
+                        [image.width as usize, image.height as usize],
+                        &image.pixels,
+                    );
+                    if let Some(texture) = ready.texture.as_mut() {
+                        texture.set(pixels, egui::TextureOptions::LINEAR);
+                    } else {
+                        let stamp = render.span_key.unwrap_or(0);
+                        ready.texture = Some(upload_preview(
+                            ctx,
+                            render.gen,
+                            render.id ^ stamp,
+                            render.req,
+                            image,
+                        ));
+                    }
+                    ready.raster_scale = render.raster_scale;
+                }
+                ready.reraster_req = None;
+            }
+            if let Some(bytes) = bytes {
+                self.math_cache.set_ready_bytes(&render.key, bytes);
+            }
+            return;
+        }
         let accept = match self.math_cache.get(&render.key) {
             Some(EntryKind::Pending { req }) => *req == render.req,
             Some(EntryKind::Ready { .. } | EntryKind::Error { .. }) => false,
@@ -2273,7 +2311,8 @@ impl MarkerApp {
         }
         if let Some(message) = render.error.clone() {
             if render.preview.is_none() {
-                self.math_cache.insert_error(render.key, message);
+                self.math_cache
+                    .insert_error(render.key, map_typst_error(&message));
                 self.finish_math_save(render.gen);
                 return;
             }
@@ -2300,6 +2339,7 @@ impl MarkerApp {
                 pdf: render.pdf,
                 pdf_pending: false,
                 pdf_req: None,
+                reraster_req: None,
             },
             bytes,
         );
@@ -2389,7 +2429,7 @@ impl MarkerApp {
     }
 
     /// Re-scan only when the document, the cache, or the visible page range changes.
-    fn prepare_visible_math(&mut self) {
+    fn prepare_visible_math(&mut self, pixels_per_point: f32) {
         let mut panes: Vec<(usize, egui::Rect)> = Vec::new();
         if self.active < self.tabs.len() {
             panes.push((self.active, self.view_rect));
@@ -2402,12 +2442,15 @@ impl MarkerApp {
         }
         let revision = self.math_cache.revision();
         let mut queued: Vec<(u64, u64, u64, String, f32, Rgb, bool)> = Vec::new();
+        let mut reraster: Vec<(u64, u64, u64, MathKey, f32)> = Vec::new();
         let mut block: Vec<(u64, u64)> = Vec::new();
-        let mut scanned: Vec<(u64, u64, usize, usize)> = Vec::new();
+        let mut scanned: Vec<(u64, u64, usize, usize, u32)> = Vec::new();
         for (index, view) in panes {
             let tab = &self.tabs[index];
             let (first, last) = view::visible_pages(&tab.doc, view);
-            let stamp = (tab.doc.session.epoch, revision, first, last);
+            let needed = tab.doc.scale * pixels_per_point.max(0.5);
+            let needed_bits = needed.to_bits();
+            let stamp = (tab.doc.session.epoch, revision, first, last, needed_bits);
             if self.math_scan.get(&tab.doc.gen) == Some(&stamp) {
                 continue;
             }
@@ -2434,21 +2477,35 @@ impl MarkerApp {
                                 continue;
                             }
                             let cache_key = MathKey::new(inner, span.display, *size, *color);
-                            if matches!(
-                                self.math_cache.get(&cache_key),
-                                Some(EntryKind::Ready { .. } | EntryKind::Error { .. } | EntryKind::Pending { .. })
-                            ) {
-                                continue;
+                            match self.math_cache.get(&cache_key) {
+                                Some(EntryKind::Pending { .. } | EntryKind::Error { .. }) => {}
+                                Some(EntryKind::Ready { value, .. }) => {
+                                    if value.reraster_req.is_none()
+                                        && !value.svg.is_empty()
+                                        && needs_sharper_raster(value.raster_scale, needed)
+                                    {
+                                        let scale = raster_scale_for(needed);
+                                        if scale > value.raster_scale + f32::EPSILON {
+                                            reraster.push((
+                                                gen,
+                                                annot.id,
+                                                math_spans::span_key(inner, span.display),
+                                                cache_key,
+                                                scale,
+                                            ));
+                                        }
+                                    }
+                                }
+                                None => queued.push((
+                                    gen,
+                                    annot.id,
+                                    math_spans::span_key(inner, span.display),
+                                    math_spans::source_for_render(inner, span.display),
+                                    *size,
+                                    *color,
+                                    span.display,
+                                )),
                             }
-                            queued.push((
-                                gen,
-                                annot.id,
-                                math_spans::span_key(inner, span.display),
-                                math_spans::source_for_render(inner, span.display),
-                                *size,
-                                *color,
-                                span.display,
-                            ));
                         }
                     }
                     AnnotKind::Math { .. }
@@ -2461,7 +2518,7 @@ impl MarkerApp {
                     | AnnotKind::Foreign { .. } => {}
                 }
             }
-            scanned.push((gen, tab.doc.session.epoch, first, last));
+            scanned.push((gen, tab.doc.session.epoch, first, last, needed_bits));
         }
         for (gen, id) in block {
             self.request_math(gen, id);
@@ -2479,9 +2536,13 @@ impl MarkerApp {
                 false,
             );
         }
+        for (gen, id, span_key, key, scale) in reraster {
+            self.request_inline_reraster(gen, id, span_key, key, scale);
+        }
         let revision = self.math_cache.revision();
-        for (gen, epoch, first, last) in scanned {
-            self.math_scan.insert(gen, (epoch, revision, first, last));
+        for (gen, epoch, first, last, needed_bits) in scanned {
+            self.math_scan
+                .insert(gen, (epoch, revision, first, last, needed_bits));
         }
     }
 
@@ -2668,6 +2729,44 @@ impl MarkerApp {
                 );
             }
         }
+    }
+
+    fn request_inline_reraster(
+        &mut self,
+        gen: u64,
+        id: u64,
+        span_key: u64,
+        key: MathKey,
+        raster_scale: f32,
+    ) {
+        let Some(ready) = self.math_cache.ready_mut(&key) else {
+            return;
+        };
+        if ready.reraster_req.is_some() || ready.svg.is_empty() {
+            return;
+        }
+        if raster_scale <= ready.raster_scale + f32::EPSILON {
+            return;
+        }
+        self.math_seq += 1;
+        let req = self.math_seq;
+        let svg = ready.svg.clone();
+        let width_pt = ready.w_pt;
+        let height_pt = ready.h_pt;
+        let baseline_pt = ready.baseline_pt;
+        ready.reraster_req = Some(req);
+        self.math.request_reraster(
+            gen,
+            id,
+            Some(span_key),
+            req,
+            key,
+            svg,
+            raster_scale,
+            width_pt,
+            height_pt,
+            baseline_pt,
+        );
     }
 
     fn request_block_pdf(&mut self, gen: u64, id: u64) {

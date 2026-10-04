@@ -733,12 +733,16 @@ mod tests {
     #[test]
     fn caret_inside_math_strict_boundaries() {
         let content = "a $b$ c";
-        assert!(caret_inside_math(content, 2).is_none()); // on opener
-        assert!(caret_inside_math(content, 3).is_some()); // on `b`
-        assert!(caret_inside_math(content, 4).is_some()); // on closer char
-        assert!(caret_inside_math(content, 5).is_none()); // after span
-        let open = r"$\alpha";
-        assert!(caret_inside_math(open, open.len()).is_some());
+        assert!(super::caret_inside_math(content, 2).is_none()); // on opener
+        assert!(super::caret_inside_math(content, 3).is_some()); // on `b`
+        assert!(super::caret_inside_math(content, 4).is_some()); // on closer char
+        assert!(super::caret_inside_math(content, 5).is_none()); // after span
+        // Unclosed inline `$` is prose (Pandoc); unclosed `$$` / `\(` stay math to EOF.
+        assert!(super::caret_inside_math(r"$\alpha", 3).is_none());
+        let open = r"$$\alpha";
+        assert!(super::caret_inside_math(open, open.len()).is_some());
+        let paren = r"\(x";
+        assert!(super::caret_inside_math(paren, paren.len()).is_some());
     }
 
     #[test]

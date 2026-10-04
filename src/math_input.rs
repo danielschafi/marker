@@ -59,8 +59,8 @@ fn apply_char(text: &str, sel: CCursorRange, ch: char) -> Option<(String, CCurso
     let byte = char_to_byte(text, caret);
     match ch {
         '$' => apply_dollar(text, caret, byte),
-        '{' => apply_open_brace(text, caret, byte),
-        '(' => apply_open_paren(text, caret, byte),
+        '{' => apply_open_brace(text, byte),
+        '(' => apply_open_paren(text, byte),
         '}' | ')' => step_over_char(text, caret, ch),
         _ => None,
     }
@@ -85,14 +85,12 @@ fn apply_dollar(text: &str, caret: usize, byte: usize) -> Option<(String, CCurso
     None
 }
 
-fn apply_open_brace(text: &str, caret: usize, byte: usize) -> Option<(String, CCursorRange)> {
-    if math_spans::caret_inside_math(text, byte).is_none() {
-        return None;
-    }
+fn apply_open_brace(text: &str, byte: usize) -> Option<(String, CCursorRange)> {
+    math_spans::caret_inside_math(text, byte)?;
     Some(splice(text, byte, byte, "{}", 1))
 }
 
-fn apply_open_paren(text: &str, caret: usize, byte: usize) -> Option<(String, CCursorRange)> {
+fn apply_open_paren(text: &str, byte: usize) -> Option<(String, CCursorRange)> {
     if math_spans::caret_inside_math(text, byte).is_none() {
         if ends_with_unescaped_backslash(text, byte) {
             return Some(splice(text, byte, byte, "(\\)", 1));
@@ -378,8 +376,9 @@ mod tests {
 
     #[test]
     fn left_paren_inserts_right() {
-        let (out, c) = apply_text(r"$a\left", 7, "(");
-        assert_eq!(out, r"$a\left(\right)");
+        // Closed `$…$` from autopair: caret sits on the closer, still inside.
+        let (out, c) = apply_text(r"$a\left$", 7, "(");
+        assert_eq!(out, r"$a\left(\right)$");
         assert_eq!(c, 8);
     }
 
@@ -412,7 +411,7 @@ mod tests {
 
         let (out, range) = apply(text, caret(9), &key(Key::Tab, Modifiers::NONE)).unwrap();
         assert_eq!(out, text);
-        assert_eq!(range.primary.index, 10);
+        assert_eq!(range.primary.index, 11);
 
         let (out, range) = apply(text, caret(9), &key(Key::Tab, Modifiers::SHIFT)).unwrap();
         assert_eq!(out, text);
@@ -426,9 +425,15 @@ mod tests {
 
     #[test]
     fn tab_closes_unclosed_span() {
-        let (out, range) = apply(r"$\alpha", caret(3), &key(Key::Tab, Modifiers::NONE)).unwrap();
-        assert_eq!(out, r"$\alpha$");
-        assert_eq!(range.primary.index, 7);
+        // Unclosed inline `$` is prose; tab-out closes `$$` / `\(` spans.
+        let (out, range) =
+            apply(r"$$\alpha", caret(4), &key(Key::Tab, Modifiers::NONE)).unwrap();
+        assert_eq!(out, r"$$\alpha$$");
+        assert_eq!(range.primary.index, 10);
+
+        let (out, range) = apply(r"\(x", caret(3), &key(Key::Tab, Modifiers::NONE)).unwrap();
+        assert_eq!(out, r"\(x\)");
+        assert_eq!(range.primary.index, 5);
     }
 
     #[test]

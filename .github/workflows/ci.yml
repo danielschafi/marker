@@ -29,6 +29,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: 1.99.0
           components: clippy
 
       - name: Cache cargo
@@ -52,6 +53,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -73,6 +76,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

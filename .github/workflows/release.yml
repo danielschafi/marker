@@ -24,12 +24,14 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.99.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: cargo build --release
-        run: cargo build --release
+      - name: cargo build --profile dist
+        run: cargo build --profile dist
 
       - name: Resolve release identity
         id: meta
@@ -49,8 +51,7 @@ jobs:
       - name: Package binary
         run: |
           set -euo pipefail
-          strip -s target/release/marker
-          install -D target/release/marker "dist/${{ steps.meta.outputs.asset }}"
+          install -D target/dist/marker "dist/${{ steps.meta.outputs.asset }}"
           (cd dist && sha256sum "${{ steps.meta.outputs.asset }}" > SHA256SUMS)
 
       - name: Create GitHub Release

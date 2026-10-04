@@ -2,6 +2,7 @@
 name = "marker"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.85"
 description = "A fast, minimal PDF annotator"
 license = "MIT"
 
@@ -14,7 +15,7 @@ eframe = "0.33"
 egui = "0.33"
 # Match egui 0.33; default-features off so assistant MD never fetches/loads images.
 egui_commonmark = { version = "0.22", default-features = false, features = ["pulldown_cmark"] }
-image = { version = "0.25.10", features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png"] }
 libc = "0.2"
 mitex = "0.2.4"
 mupdf = { version = "0.8.0", default-features = false, features = [
@@ -30,11 +31,12 @@ mupdf = { version = "0.8.0", default-features = false, features = [
     "sys-lib-openjpeg",
     "sys-lib-zlib",
 ] }
-resvg = "0.45"
+resvg = "0.47"
 rfd = "0.15"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1.0.151"
 toml = "0.9"
+# typst 0.15 and typst-as-lib 0.16 are pinned as a pair.
 typst = "0.15"
 typst-as-lib = { version = "0.16", default-features = false, features = [
     "typst-kit-embed-fonts",
@@ -52,6 +54,14 @@ typst-svg = "0.15"
 [patch.crates-io]
 winit = { path = "vendor/winit" }
 egui-winit = { path = "vendor/egui-winit" }
+
+[profile.release]
+strip = "symbols"
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
+codegen-units = 1
 
 [profile.dev.package."*"]
 opt-level = 2

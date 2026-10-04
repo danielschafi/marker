@@ -534,10 +534,7 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
             }
         } else if !reraster.is_empty() {
             // Drain sharper rasters without blocking new Typst jobs.
-            match jobs.try_recv() {
-                Ok(job) => Some(job),
-                Err(_) => None,
-            }
+            jobs.try_recv().ok()
         } else {
             match jobs.recv() {
                 Ok(job) => Some(job),
@@ -1070,7 +1067,7 @@ fn format_typst_diags(diags: &[typst::diag::SourceDiagnostic]) -> String {
     }
     diags
         .iter()
-        .map(|diag| map_typst_error(&diag.message.to_string()))
+        .map(|diag| map_typst_error(diag.message.as_ref()))
         .collect::<Vec<_>>()
         .join("\n")
 }

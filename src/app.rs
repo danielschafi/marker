@@ -1810,7 +1810,8 @@ impl MarkerApp {
                         redo: Vec::new(),
                         page_op: None,
                         annot_by_page: Vec::new(),
-                        annot_index_epoch: 0,
+                        // Imported sessions start at epoch 0. MAX forces the first index build.
+                        annot_index_epoch: u64::MAX,
                         image_textures_epoch: 0,
                         autosave_dirty_epoch: 0,
                         autosave_dirty: false,

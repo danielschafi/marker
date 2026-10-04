@@ -1350,7 +1350,12 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     .copied()
                     .find(|&id| {
                         tab.doc.session.get(id).is_some_and(|annot| {
-                            !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                            !matches!(
+                                annot.kind,
+                                AnnotKind::Image { .. }
+                                    | AnnotKind::Future(_)
+                                    | AnnotKind::Foreign { .. }
+                            )
                         })
                     })
                     .or_else(|| tab.primary_selected())
@@ -1995,6 +2000,26 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                     );
                 }
             }
+            AnnotKind::Foreign {
+                kind,
+                rect,
+                quads,
+                strokes,
+                color,
+                ..
+            } => {
+                paint_foreign(
+                    &painter,
+                    &tab.doc,
+                    page,
+                    view,
+                    *kind,
+                    *rect,
+                    quads,
+                    strokes,
+                    *color,
+                );
+            }
             AnnotKind::Future(_) => {}
         }
         if selected {
@@ -2017,6 +2042,91 @@ fn paint_annotations(app: &MarkerApp, painter: &egui::Painter, page: usize, view
                         egui::StrokeKind::Inside,
                     );
                 }
+            }
+        }
+    }
+}
+
+fn paint_foreign(
+    painter: &egui::Painter,
+    doc: &DocState,
+    page: usize,
+    view: Rect,
+    kind: crate::annot::ForeignKind,
+    rect: PdfRect,
+    quads: &[PdfRect],
+    strokes: &[Vec<PdfPoint>],
+    color: crate::geom::Rgb,
+) {
+    use crate::annot::ForeignKind;
+    let color32 = color.to_color32();
+    let stroke = Stroke::new((1.25 * doc.scale).max(1.0), color32);
+    let boxes: Vec<PdfRect> = if quads.is_empty() {
+        vec![rect]
+    } else {
+        quads.to_vec()
+    };
+    match kind {
+        ForeignKind::Underline | ForeignKind::StrikeOut | ForeignKind::Squiggly => {
+            for quad in boxes {
+                let screen = pdf_rect_screen(doc, page, quad, view);
+                let y = if kind == ForeignKind::StrikeOut {
+                    screen.center().y
+                } else {
+                    screen.bottom()
+                };
+                if kind == ForeignKind::Squiggly {
+                    let mut pts = Vec::new();
+                    let mut x = screen.left();
+                    let mut up = true;
+                    while x < screen.right() {
+                        let y2 = if up { y - 2.0 } else { y + 1.0 };
+                        pts.push(Pos2::new(x, y2));
+                        x += 4.0;
+                        up = !up;
+                    }
+                    pts.push(Pos2::new(screen.right(), y));
+                    if pts.len() >= 2 {
+                        painter.add(egui::Shape::line(pts, stroke));
+                    }
+                } else {
+                    painter.line_segment(
+                        [Pos2::new(screen.left(), y), Pos2::new(screen.right(), y)],
+                        stroke,
+                    );
+                }
+            }
+        }
+        ForeignKind::Ink | ForeignKind::Polygon | ForeignKind::PolyLine => {
+            if strokes.is_empty() {
+                let screen = pdf_rect_screen(doc, page, rect, view);
+                painter.rect_stroke(screen, 0.0, stroke, egui::StrokeKind::Inside);
+            }
+            for path in strokes {
+                let pts: Vec<Pos2> = path
+                    .iter()
+                    .map(|point| doc.page_to_screen(page, *point, view))
+                    .collect();
+                if pts.len() >= 2 {
+                    let mut draw = pts;
+                    if kind == ForeignKind::Polygon {
+                        draw.push(draw[0]);
+                    }
+                    painter.add(egui::Shape::line(draw, stroke));
+                }
+            }
+        }
+        ForeignKind::Caret | ForeignKind::FileAttachment => {
+            let screen = pdf_rect_screen(doc, page, rect, view);
+            painter.rect_stroke(screen, 2.0, stroke, egui::StrokeKind::Inside);
+            if kind == ForeignKind::FileAttachment {
+                painter.text(
+                    screen.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "📎",
+                    FontId::new((screen.height() * 0.6).max(10.0), FontFamily::Proportional),
+                    color32,
+                );
             }
         }
     }
@@ -2976,13 +3086,21 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         app.tab().is_some_and(|tab| {
             tab.selected.iter().any(|id| {
                 tab.doc.session.get(*id).is_some_and(|annot| {
-                    !matches!(annot.kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+                    !matches!(
+                        annot.kind,
+                        AnnotKind::Image { .. }
+                            | AnnotKind::Future(_)
+                            | AnnotKind::Foreign { .. }
+                    )
                 })
             })
         })
     } else {
         hit_kind.as_ref().is_some_and(|kind| {
-            !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Future(_))
+            !matches!(
+                kind,
+                AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. }
+            )
         })
     };
     let can_edit = !multi
@@ -3326,6 +3444,16 @@ fn annot_menu_label(kind: &AnnotKind) -> &'static str {
         } => "Line",
         AnnotKind::Image { .. } => "Image",
         AnnotKind::Future(_) => "Annotation",
+        AnnotKind::Foreign { kind, .. } => match kind {
+            crate::annot::ForeignKind::Underline => "Underline",
+            crate::annot::ForeignKind::StrikeOut => "Strikeout",
+            crate::annot::ForeignKind::Squiggly => "Squiggly",
+            crate::annot::ForeignKind::Ink => "Ink",
+            crate::annot::ForeignKind::Polygon => "Polygon",
+            crate::annot::ForeignKind::PolyLine => "Polyline",
+            crate::annot::ForeignKind::Caret => "Caret",
+            crate::annot::ForeignKind::FileAttachment => "Attachment",
+        },
     }
 }
 

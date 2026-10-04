@@ -24,6 +24,19 @@ pub enum ShapeKind {
     Line,
 }
 
+/// Annotation types written by another app. Marker displays them and does not edit them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForeignKind {
+    Underline,
+    StrikeOut,
+    Squiggly,
+    Ink,
+    Polygon,
+    PolyLine,
+    Caret,
+    FileAttachment,
+}
+
 /// Reserved for later tools. They are not created by the UI yet.
 #[derive(Clone, Debug, PartialEq)]
 #[allow(dead_code)]
@@ -79,6 +92,15 @@ pub enum AnnotKind {
     /// Ink lands here later without a session rewrite.
     #[allow(dead_code)]
     Future(FutureKind),
+    /// Read-only import of an annotation Marker does not edit.
+    Foreign {
+        kind: ForeignKind,
+        rect: PdfRect,
+        quads: Vec<PdfRect>,
+        strokes: Vec<Vec<PdfPoint>>,
+        color: Rgb,
+        contents: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -115,7 +137,8 @@ impl AnnotKind {
             Self::Text { rect, .. }
             | Self::Note { rect, .. }
             | Self::Math { rect, .. }
-            | Self::Image { rect, .. } => Some(*rect),
+            | Self::Image { rect, .. }
+            | Self::Foreign { rect, .. } => Some(*rect),
             Self::Shape {
                 kind: ShapeKind::Line,
                 start,
@@ -177,12 +200,15 @@ impl AnnotKind {
                     }
                 }
             }
+            // Foreign annotations stay where the other app put them.
+            Self::Foreign { .. } => {}
         }
     }
 
     pub fn hit(&self, p: PdfPoint, slop: f32) -> bool {
         match self {
             Self::Highlight { quads, .. } => quads.iter().any(|q| q.inflate(slop).contains(p)),
+            Self::Foreign { .. } => false,
             Self::Shape {
                 kind: ShapeKind::Line,
                 start,

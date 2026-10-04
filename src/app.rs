@@ -163,8 +163,9 @@ pub(crate) struct Tab {
     pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
     /// After Tab exits a math island, place the TextEdit caret here (bytes).
     pub(crate) pending_text_caret: Option<usize>,
-    /// Sticky inline-math edit: `(text_annot_id, span_start_byte)` while TeX overlay is open.
-    pub(crate) inline_math_edit: Option<(u64, usize)>,
+    /// Caret is strictly inside this math span: `(text_annot_id, span_start_byte)`.
+    /// Selects the live render lane. There is no second editor.
+    pub(crate) live_math: Option<(u64, usize)>,
     pub(crate) save: SaveState,
     pub(crate) save_epoch: u64,
     pub(crate) save_deletes: Vec<(usize, i32)>,
@@ -630,6 +631,18 @@ impl MarkerApp {
 
     pub(crate) fn tab_mut(&mut self) -> Option<&mut Tab> {
         self.tabs.get_mut(self.active)
+    }
+
+    /// Cache and the active tab together, so the conceal layouter can read
+    /// renders while the text buffer is borrowed.
+    pub(crate) fn math_cache_and_tab_mut(
+        &mut self,
+    ) -> Option<(&crate::math::MathCache<InlineReady>, &mut Tab)> {
+        let active = self.active;
+        if active >= self.tabs.len() {
+            return None;
+        }
+        Some((&self.math_cache, &mut self.tabs[active]))
     }
 
     pub(crate) fn doc(&self) -> Option<&DocState> {
@@ -1559,7 +1572,7 @@ impl MarkerApp {
             }
             if tab.editing.take().is_some() {
                 tab.focus_edit = false;
-                tab.inline_math_edit = None;
+                tab.live_math = None;
                 tab.pending_text_caret = None;
                 seal = true;
             } else if tab.assistant.learning.take().is_some()
@@ -1827,7 +1840,7 @@ impl MarkerApp {
                         previews: HashMap::new(),
                         image_textures: HashMap::new(),
                         pending_text_caret: None,
-                        inline_math_edit: None,
+                        live_math: None,
                         save: SaveState::Clean,
                         save_epoch: 0,
                         save_deletes: Vec::new(),
@@ -2357,7 +2370,7 @@ impl MarkerApp {
         let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
             return false;
         };
-        let Some((edit_id, start)) = tab.inline_math_edit else {
+        let Some((edit_id, start)) = tab.live_math else {
             return false;
         };
         if edit_id != id {
@@ -2856,6 +2869,22 @@ impl MarkerApp {
             })?;
         let inner = &content[span.inner_start..span.inner_end];
         self.preview_at(inner, span.display, *size, *color)
+    }
+
+    /// Last successful render of this span, kept while the current source is invalid.
+    pub(crate) fn last_good_inline(&self, annot_id: u64, ordinal: usize) -> Option<InlinePreview> {
+        let gen = self.tab()?.doc.gen;
+        let key = self.math_last_good.get(&(gen, annot_id, ordinal))?;
+        match self.math_cache.get(key)? {
+            EntryKind::Ready { value, .. } => Some(InlinePreview {
+                pending: false,
+                texture: value.texture.clone(),
+                width_pt: value.w_pt,
+                height_pt: value.h_pt,
+                error: None,
+            }),
+            EntryKind::Pending { .. } | EntryKind::Error { .. } => None,
+        }
     }
 
     pub(crate) fn preview_at(

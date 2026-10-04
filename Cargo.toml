@@ -15,6 +15,7 @@ egui = "0.33"
 # Match egui 0.33; default-features off so assistant MD never fetches/loads images.
 egui_commonmark = { version = "0.22", default-features = false, features = ["pulldown_cmark"] }
 image = { version = "0.25.10", features = ["png"] }
+libc = "0.2"
 mitex = "0.2.4"
 mupdf = { version = "0.8.0", default-features = false, features = [
     "base14-fonts",

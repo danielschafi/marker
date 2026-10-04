@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -87,6 +88,8 @@ pub(crate) struct MarkerApp {
     pub(crate) tile_frame: u64,
     /// Keyboard-focused tab; unfocused tabs are trimmed to a smaller tile share.
     tile_focus_tab: usize,
+    /// Latest wanted tile keys per document generation (read by the pdf worker).
+    tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -259,6 +262,8 @@ pub(crate) struct DocState {
     pub(crate) scale: f32,
     pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
+    /// Previous `scroll_y` for prefetch direction (updated in `wanted_tiles`).
+    pub(crate) scroll_y_prev: f32,
     pub(crate) fitted: bool,
     pub(crate) last_zoom: Instant,
     /// Last pan/scroll; keeps the interactive frame budget warm between wheel samples.
@@ -485,6 +490,7 @@ impl MarkerApp {
         if let Some(inbox) = ipc.as_ref() {
             inbox.bind_ctx(egui_ctx.clone());
         }
+        let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let mut app = Self {
             settings: Settings::load(),
             tool: Tool::Select,
@@ -507,7 +513,7 @@ impl MarkerApp {
             assistant_md_cache: CommonMarkCache::default(),
             vim_count: 0,
             vim_g: false,
-            worker: PdfWorker::spawn(egui_ctx.clone()),
+            worker: PdfWorker::spawn(egui_ctx.clone(), Arc::clone(&tile_wanted)),
             math: MathWorker::spawn(egui_ctx.clone()),
             assistant: AssistantWorker::spawn(egui_ctx.clone()),
             math_seq: 1,
@@ -527,6 +533,7 @@ impl MarkerApp {
             pending_pdf_tiles: VecDeque::new(),
             tile_frame: 0,
             tile_focus_tab: 0,
+            tile_wanted,
         };
         for path in paths {
             app.open_path(path);
@@ -750,6 +757,10 @@ impl MarkerApp {
                 .cancel(tab.doc.gen, tab.assistant.request_seq);
         }
         self.worker.close(tab.doc.gen);
+        self.tile_wanted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&tab.doc.gen);
         if let Some(drag) = self.tab_drag {
             if drag == index {
                 self.tab_drag = None;
@@ -1704,6 +1715,7 @@ impl MarkerApp {
                             scale: 1.0,
                             scroll_x: 0.0,
                             scroll_y: 0.0,
+                            scroll_y_prev: 0.0,
                             fitted: false,
                             last_zoom: Instant::now(),
                             last_scroll: Instant::now(),
@@ -2450,12 +2462,30 @@ impl MarkerApp {
     }
 
     fn dispatch_tiles_at(&mut self, index: usize, view: egui::Rect, pixels_per_point: f32) {
-        let Some(tab) = self.tabs.get(index) else {
+        if index >= self.tabs.len() {
             return;
+        }
+        let (gen, wanted) = {
+            let tab = &mut self.tabs[index];
+            let wanted = view::wanted_tiles(
+                &mut tab.doc,
+                &tab.inflight,
+                self.tool,
+                view,
+                pixels_per_point,
+            );
+            (tab.doc.gen, wanted)
         };
-        let wanted =
-            view::wanted_tiles(&tab.doc, &tab.inflight, self.tool, view, pixels_per_point);
-        let gen = tab.doc.gen;
+        {
+            let mut guard = self
+                .tile_wanted
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            guard.insert(
+                gen,
+                wanted.tiles.iter().map(|req| req.key).collect(),
+            );
+        }
         let mut glyph_pages = Vec::new();
         let mut tiles = Vec::new();
         for page in wanted.words {
@@ -2465,14 +2495,22 @@ impl MarkerApp {
                 }
             }
         }
-        for (key, scale) in wanted.tiles {
+        for req in wanted.tiles {
             if let Some(tab) = self.tabs.get_mut(index) {
-                tab.inflight.insert(key);
+                tab.inflight.insert(req.key);
             }
-            tiles.push((key, scale));
+            tiles.push(req);
         }
-        for (key, scale) in tiles {
-            self.worker.tile(gen, key.page, scale, key.col, key.row);
+        for req in tiles {
+            self.worker.tile(
+                gen,
+                req.key.page,
+                req.scale,
+                req.key.col,
+                req.key.row,
+                req.prefetch,
+                req.distance,
+            );
         }
         for page in glyph_pages {
             self.worker.glyphs(gen, page);

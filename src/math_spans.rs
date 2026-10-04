@@ -1,6 +1,13 @@
-//! Parse `$...$` / `$$...$$` math islands inside text annotations.
+//! Parse `$...$` / `$$...$$`, `\(...\)`, `\[...\]` math islands in text annotations.
 //!
-//! `\$` is a literal dollar in prose. `$$` is always checked before `$`.
+//! `\$` is a literal dollar in prose. `$$` is checked before `$` except immediately
+//! after a closing inline `$`, where adjacent `$$` opens a second inline span (Pandoc).
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Delim {
+    DollarInline,
+    DollarDisplay,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Span {
@@ -34,25 +41,101 @@ pub struct MathSpanRef {
     pub closed: bool,
 }
 
+/// Map byte offsets in `content` to character indexes (for galley / caret mapping).
+#[allow(dead_code)] // public for LT0; only unit tests call this on the bin target today
+pub fn byte_range_char_indices(content: &str, start: usize, end: usize) -> (usize, usize) {
+    let start = start.min(content.len());
+    let end = end.min(content.len());
+    (
+        content[..start].chars().count(),
+        content[..end].chars().count(),
+    )
+}
+
+impl Span {
+    /// Character indexes for this span's byte range in `content`.
+    #[allow(dead_code)]
+    pub fn char_range(&self, content: &str) -> (usize, usize) {
+        match self {
+            Span::Prose { start, end } | Span::Math { start, end, .. } => {
+                byte_range_char_indices(content, *start, *end)
+            }
+        }
+    }
+}
+
 /// Split `content` into prose and math spans.
 pub fn parse_spans(content: &str) -> Vec<Span> {
     let bytes = content.as_bytes();
     let mut spans = Vec::new();
     let mut i = 0;
     let mut prose_start = 0;
+    let mut after_inline_dollar_close = false;
 
     while i < bytes.len() {
-        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-            i += 2;
-            continue;
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            let next = bytes[i + 1];
+            if next == b'$' {
+                i += 2;
+                after_inline_dollar_close = false;
+                continue;
+            }
+            if next == b'(' || next == b'[' {
+                let display = next == b'[';
+                let open_len = 2;
+                let delim_start = i;
+                if prose_start < delim_start {
+                    spans.push(Span::Prose {
+                        start: prose_start,
+                        end: delim_start,
+                    });
+                }
+                let inner_start = delim_start + open_len;
+                if let Some(close_at) = find_latex_close(bytes, inner_start, display) {
+                    let close_len = 2;
+                    let end = close_at + close_len;
+                    spans.push(Span::Math {
+                        start: delim_start,
+                        end,
+                        inner_start,
+                        inner_end: close_at,
+                        display,
+                        closed: true,
+                    });
+                    i = end;
+                    prose_start = end;
+                    after_inline_dollar_close = false;
+                } else {
+                    spans.push(Span::Math {
+                        start: delim_start,
+                        end: bytes.len(),
+                        inner_start,
+                        inner_end: bytes.len(),
+                        display,
+                        closed: false,
+                    });
+                    return spans;
+                }
+                continue;
+            }
         }
+
         if bytes[i] != b'$' {
             i += 1;
+            after_inline_dollar_close = false;
             continue;
         }
 
-        let display = i + 1 < bytes.len() && bytes[i + 1] == b'$';
-        let open_len = if display { 2 } else { 1 };
+        let (delim, _open_len, inner_start) =
+            match dollar_open_at(bytes, i, after_inline_dollar_close) {
+                Some(parsed) => parsed,
+                None => {
+                    i += 1;
+                    after_inline_dollar_close = false;
+                    continue;
+                }
+            };
+        let display = matches!(delim, Delim::DollarDisplay);
         let delim_start = i;
 
         if prose_start < delim_start {
@@ -62,11 +145,11 @@ pub fn parse_spans(content: &str) -> Vec<Span> {
             });
         }
 
-        let inner_start = delim_start + open_len;
-        let close = find_closing_delim(bytes, inner_start, display);
+        let close = find_dollar_close(bytes, inner_start, delim);
         match close {
             Some(close_at) => {
-                let end = close_at + open_len;
+                let close_len = dollar_close_len(delim);
+                let end = close_at + close_len;
                 spans.push(Span::Math {
                     start: delim_start,
                     end,
@@ -77,8 +160,16 @@ pub fn parse_spans(content: &str) -> Vec<Span> {
                 });
                 i = end;
                 prose_start = end;
+                after_inline_dollar_close =
+                    matches!(delim, Delim::DollarInline) && close_len == 1;
             }
             None => {
+                if matches!(delim, Delim::DollarInline) {
+                    // No valid closing `$` (Pandoc price rules) — treat opener as prose.
+                    i = delim_start + 1;
+                    after_inline_dollar_close = false;
+                    continue;
+                }
                 spans.push(Span::Math {
                     start: delim_start,
                     end: bytes.len(),
@@ -101,7 +192,51 @@ pub fn parse_spans(content: &str) -> Vec<Span> {
     spans
 }
 
-fn find_closing_delim(bytes: &[u8], from: usize, display: bool) -> Option<usize> {
+fn dollar_open_at(
+    bytes: &[u8],
+    i: usize,
+    after_inline_dollar_close: bool,
+) -> Option<(Delim, usize, usize)> {
+    if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+        if after_inline_dollar_close {
+            // `$` immediately after an inline close: twin `$` opens the next inline span.
+            let inner_start = i + 2;
+            if inner_start <= bytes.len() && valid_inline_dollar_open(bytes, i) {
+                return Some((Delim::DollarInline, 2, inner_start));
+            }
+            return None;
+        }
+        return Some((Delim::DollarDisplay, 2, i + 2));
+    }
+    if valid_inline_dollar_open(bytes, i) {
+        return Some((Delim::DollarInline, 1, i + 1));
+    }
+    None
+}
+
+fn dollar_close_len(delim: Delim) -> usize {
+    match delim {
+        Delim::DollarDisplay => 2,
+        Delim::DollarInline => 1,
+    }
+}
+
+fn valid_inline_dollar_open(bytes: &[u8], i: usize) -> bool {
+    let after = i + 1;
+    after < bytes.len()
+        && !bytes[after].is_ascii_whitespace()
+        && !bytes[after].is_ascii_digit()
+}
+
+fn valid_inline_dollar_close(bytes: &[u8], at: usize) -> bool {
+    if at == 0 || bytes[at - 1].is_ascii_whitespace() {
+        return false;
+    }
+    let after = at + 1;
+    after >= bytes.len() || !bytes[after].is_ascii_digit()
+}
+
+fn find_dollar_close(bytes: &[u8], from: usize, delim: Delim) -> Option<usize> {
     let mut i = from;
     while i < bytes.len() {
         if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'$' {
@@ -112,23 +247,54 @@ fn find_closing_delim(bytes: &[u8], from: usize, display: bool) -> Option<usize>
             i += 1;
             continue;
         }
-        if display {
-            if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-                return Some(i);
+        match delim {
+            Delim::DollarDisplay => {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                    return Some(i);
+                }
+                i += 1;
             }
-            i += 1;
-        } else {
-            // A `$$` while looking for single `$` starts display elsewhere; treat
-            // the first `$` of `$$` as a closer only when it is a lone `$`.
-            if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
-                // `$$` is not a valid close for inline `$...$`.
-                i += 2;
-                continue;
+            Delim::DollarInline => {
+                if valid_inline_dollar_close(bytes, i) {
+                    return Some(i);
+                }
+                if i + 1 < bytes.len() && bytes[i + 1] == b'$' {
+                    i += 2;
+                    continue;
+                }
+                i += 1;
             }
-            return Some(i);
         }
     }
     None
+}
+
+fn find_latex_close(bytes: &[u8], from: usize, display: bool) -> Option<usize> {
+    let close = if display { b']' } else { b')' };
+    let mut i = from;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == close {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn closing_delim_text(content: &str, span: &MathSpanRef) -> &'static str {
+    if span.start + 1 < content.len() {
+        if content[span.start..].starts_with("\\[") {
+            return "\\]";
+        }
+        if content[span.start..].starts_with("\\(") {
+            return "\\)";
+        }
+    }
+    if span.display {
+        "$$"
+    } else {
+        "$"
+    }
 }
 
 /// Expand `\$` → `$` for display / FreeText fallbacks.
@@ -196,7 +362,7 @@ pub fn exit_math_span(content: &str, span: &MathSpanRef) -> (String, usize) {
     if span.closed {
         return (content.to_string(), span.end);
     }
-    let delim = if span.display { "$$" } else { "$" };
+    let delim = closing_delim_text(content, span);
     let mut out = String::with_capacity(content.len() + delim.len());
     out.push_str(&content[..span.end]);
     out.push_str(delim);
@@ -564,5 +730,147 @@ mod tests {
             } => assert_eq!(&"$$a$$"[*inner_start..*inner_end], "a"),
             _ => panic!("expected math"),
         }
+    }
+
+    #[test]
+    fn prices_stay_prose() {
+        let content = "$5 and $10";
+        let spans = parse_spans(content);
+        assert_eq!(spans.len(), 1);
+        assert!(matches!(spans[0], Span::Prose { .. }));
+        assert!(!has_math(content));
+    }
+
+    #[test]
+    fn adjacent_inline_dollars() {
+        let content = "$a$$b$";
+        let spans = parse_spans(content);
+        assert_eq!(spans.len(), 2);
+        assert!(matches!(
+            spans[0],
+            Span::Math {
+                display: false,
+                closed: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            spans[1],
+            Span::Math {
+                display: false,
+                closed: true,
+                ..
+            }
+        ));
+        match (&spans[0], &spans[1]) {
+            (
+                Span::Math {
+                    inner_start: a0,
+                    inner_end: a1,
+                    ..
+                },
+                Span::Math {
+                    inner_start: b0,
+                    inner_end: b1,
+                    ..
+                },
+            ) => {
+                assert_eq!(&content[*a0..*a1], "a");
+                assert_eq!(&content[*b0..*b1], "b");
+            }
+            _ => panic!("expected two inline math spans"),
+        }
+    }
+
+    #[test]
+    fn latex_paren_delimiters() {
+        let content = r"see \(a+b\) and \[x\]";
+        let spans = parse_spans(content);
+        assert_eq!(spans.len(), 4);
+        assert!(matches!(
+            spans[1],
+            Span::Math {
+                display: false,
+                closed: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            spans[3],
+            Span::Math {
+                display: true,
+                closed: true,
+                ..
+            }
+        ));
+        match &spans[1] {
+            Span::Math {
+                inner_start,
+                inner_end,
+                ..
+            } => assert_eq!(&content[*inner_start..*inner_end], "a+b"),
+            _ => panic!("expected inline latex"),
+        }
+        match &spans[3] {
+            Span::Math {
+                inner_start,
+                inner_end,
+                ..
+            } => assert_eq!(&content[*inner_start..*inner_end], "x"),
+            _ => panic!("expected display latex"),
+        }
+    }
+
+    #[test]
+    fn unclosed_latex_paren() {
+        let spans = parse_spans(r"tail \( \alpha");
+        assert_eq!(spans.len(), 2);
+        assert!(matches!(
+            spans[1],
+            Span::Math {
+                display: false,
+                closed: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exit_closes_unclosed_latex_paren() {
+        let content = r"q \(x";
+        let span = math_span_at(content, 2).unwrap();
+        let (next, caret) = exit_math_span(content, &span);
+        assert_eq!(next, r"q \(x\)");
+        assert_eq!(caret, next.len());
+    }
+
+    #[test]
+    fn mixed_prices_and_equation() {
+        let content = "Item $5, solve $x^2$ for x.";
+        let spans = parse_spans(content);
+        assert!(has_math(content));
+        let math: Vec<_> = spans
+            .iter()
+            .filter(|s| matches!(s, Span::Math { .. }))
+            .collect();
+        assert_eq!(math.len(), 1);
+        match math[0] {
+            Span::Math {
+                inner_start,
+                inner_end,
+                display: false,
+                ..
+            } => assert_eq!(&content[*inner_start..*inner_end], "x^2"),
+            _ => panic!("expected one inline equation"),
+        }
+    }
+
+    #[test]
+    fn byte_range_char_indices_counts_utf8() {
+        let content = "é $x$";
+        let spans = parse_spans(content);
+        let (c0, c1) = spans[0].char_range(content);
+        assert_eq!(c0, 0);
+        assert_eq!(c1, 2); // "é " is two chars
     }
 }

@@ -2,7 +2,7 @@
 # Build Marker (release) and install it as the user-local default PDF app.
 #
 # Usage:
-#   ./packaging/install-local.sh              # cargo build --release, then install
+#   ./packaging/install-local.sh              # cargo build --profile dist, then install
 #   ./packaging/install-local.sh /path/to/bin # install a specific binary (skip build)
 #
 # Installs into ${PREFIX:-$HOME/.local}: binary, .desktop entry, icon, and
@@ -17,9 +17,9 @@ icon_dir="$prefix/share/icons/hicolor/scalable/apps"
 
 binary="${1:-}"
 if [[ -z "$binary" ]]; then
-  echo "Building release binary..."
-  cargo build --release --manifest-path "$root/Cargo.toml"
-  binary="$root/target/release/marker"
+  echo "Building dist binary..."
+  cargo build --profile dist --manifest-path "$root/Cargo.toml"
+  binary="$root/target/dist/marker"
 elif [[ ! -x "$binary" ]]; then
   echo "error: not an executable: $binary" >&2
   exit 1

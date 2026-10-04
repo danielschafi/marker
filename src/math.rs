@@ -16,7 +16,10 @@ pub mod rich_text;
 
 /// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
 const LIVE_DEBOUNCE: Duration = Duration::from_millis(40);
+/// Base CSS-pixel multiplier for the first preview raster (√2 buckets step up from here).
 const RASTER_SCALE: f32 = 3.0;
+/// Re-raster when `zoom × ppp` exceeds the cached scale by this factor.
+const RASTER_UPGRADE: f32 = 1.3;
 
 pub const MATH_CACHE_CAP: usize = 256;
 pub const MATH_CACHE_BYTE_CAP: usize = 32 * 1024 * 1024;
@@ -61,6 +64,22 @@ pub fn pdf_plan(pending: bool, ready: bool, has_pdf: bool, failed: bool) -> PdfP
     } else {
         PdfPlan::Request
     }
+}
+
+/// Pick a √2 raster bucket at least as sharp as `needed` (`zoom × pixels_per_point`).
+pub fn raster_scale_for(needed: f32) -> f32 {
+    let needed = needed.max(0.5);
+    if needed <= RASTER_SCALE {
+        return RASTER_SCALE;
+    }
+    // steps of √2 above the base: 3, 3√2, 6, 6√2, …
+    let steps = ((needed / RASTER_SCALE).log2() * 2.0).ceil().max(0.0) as i32;
+    RASTER_SCALE * 2f32.powf(steps as f32 / 2.0)
+}
+
+/// True when the cached raster is too soft for the current screen scale.
+pub fn needs_sharper_raster(cached: f32, needed: f32) -> bool {
+    needed > cached.max(0.5) * RASTER_UPGRADE
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +254,19 @@ impl<T> MathCache<T> {
         }
     }
 
+    /// Update the byte weight of a ready entry after an in-place texture replace.
+    pub fn set_ready_bytes(&mut self, key: &MathKey, new_bytes: usize) {
+        let Some(entry) = self.entries.get_mut(key) else {
+            return;
+        };
+        let EntryKind::Ready { bytes, .. } = &mut entry.kind else {
+            return;
+        };
+        self.bytes = self.bytes.saturating_sub(*bytes).saturating_add(new_bytes);
+        *bytes = new_bytes;
+        self.evict();
+    }
+
     fn bump_revision(&mut self) {
         self.revision = self.revision.wrapping_add(1);
     }
@@ -341,8 +373,23 @@ struct RenderRequest {
     want_pdf: bool,
 }
 
+/// Re-raster an existing SVG at a sharper scale. No Typst, no PDF.
+struct RerasterRequest {
+    gen: u64,
+    id: u64,
+    span_key: Option<u64>,
+    req: u64,
+    key: MathKey,
+    svg: String,
+    raster_scale: f32,
+    width_pt: f32,
+    height_pt: f32,
+    baseline_pt: Option<f32>,
+}
+
 enum Job {
     Render(RenderRequest),
+    Reraster(RerasterRequest),
     Shutdown,
 }
 
@@ -411,6 +458,36 @@ impl MathWorker {
         }));
     }
 
+    /// Re-raster a cached SVG at `raster_scale`. Coalesced latest-wins per key on
+    /// the worker so a zoom burst does not enqueue one job per frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn request_reraster(
+        &self,
+        gen: u64,
+        id: u64,
+        span_key: Option<u64>,
+        req: u64,
+        key: MathKey,
+        svg: String,
+        raster_scale: f32,
+        width_pt: f32,
+        height_pt: f32,
+        baseline_pt: Option<f32>,
+    ) {
+        let _ = self.jobs.send(Job::Reraster(RerasterRequest {
+            gen,
+            id,
+            span_key,
+            req,
+            key,
+            svg,
+            raster_scale,
+            width_pt,
+            height_pt,
+            baseline_pt,
+        }));
+    }
+
     pub fn poll(&self) -> Vec<MathRender> {
         let mut out = Vec::new();
         while let Ok(reply) = self.replies.try_recv() {
@@ -435,10 +512,18 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
     // Pay for fonts and the engine before the first equation, not during it.
     let engine = build_engine();
     let mut sched: MathScheduler<RenderRequest> = MathScheduler::new(LIVE_DEBOUNCE);
+    // Latest sharper raster per equation key; zoom bursts replace, not stack.
+    let mut reraster: HashMap<MathKey, RerasterRequest> = HashMap::new();
     loop {
         if let Some(job) = sched.poll(Instant::now()) {
             run_job(&ctx, &replies, &engine, job.payload);
             continue;
+        }
+        if let Some(key) = reraster.keys().next().cloned() {
+            if let Some(request) = reraster.remove(&key) {
+                run_reraster(&ctx, &replies, request);
+                continue;
+            }
         }
         let incoming = if let Some(deadline) = sched.live_deadline() {
             let wait = deadline.saturating_duration_since(Instant::now());
@@ -447,6 +532,9 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
                 Err(RecvTimeoutError::Timeout) => None,
                 Err(RecvTimeoutError::Disconnected) => break,
             }
+        } else if !reraster.is_empty() {
+            // Drain sharper rasters without blocking new Typst jobs.
+            jobs.try_recv().ok()
         } else {
             match jobs.recv() {
                 Ok(job) => Some(job),
@@ -470,6 +558,9 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
                     Instant::now(),
                 );
             }
+            Job::Reraster(request) => {
+                reraster.insert(request.key.clone(), request);
+            }
         }
     }
 }
@@ -486,8 +577,44 @@ fn run_job(
         request.size,
         request.color,
         request.want_pdf,
+        RASTER_SCALE,
     );
     reply(ctx, replies, to_reply(request, rendered));
+}
+
+fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: RerasterRequest) {
+    let (preview, width_pt, height_pt) = rasterize_svg(&request.svg, request.raster_scale);
+    // Keep the Typst page size from the first render; only the bitmap changes.
+    let width_pt = if request.width_pt > 0.0 {
+        request.width_pt
+    } else {
+        width_pt
+    };
+    let height_pt = if request.height_pt > 0.0 {
+        request.height_pt
+    } else {
+        height_pt
+    };
+    reply(
+        ctx,
+        replies,
+        MathRender {
+            gen: request.gen,
+            id: request.id,
+            span_key: request.span_key,
+            req: request.req,
+            key: request.key,
+            preview,
+            svg: Some(request.svg),
+            pdf: None,
+            width_pt,
+            height_pt,
+            baseline_pt: request.baseline_pt,
+            raster_scale: request.raster_scale,
+            error: None,
+            want_pdf: false,
+        },
+    );
 }
 
 fn to_reply(request: RenderRequest, rendered: Rendered) -> MathRender {
@@ -560,7 +687,7 @@ fn build_engine() -> TypstEngine<typst_as_lib::TypstTemplateMainFile> {
 #[cfg(test)]
 fn render_equation_blocking(source: &str, size: f32, color: Rgb) -> Rendered {
     let engine = build_engine();
-    render_equation(&engine, source, size, color, true)
+    render_equation(&engine, source, size, color, true, RASTER_SCALE)
 }
 
 fn render_equation(
@@ -569,6 +696,7 @@ fn render_equation(
     size: f32,
     color: Rgb,
     want_pdf: bool,
+    raster_scale: f32,
 ) -> Rendered {
     let latex = normalize_latex(source);
     if latex.is_empty() {
@@ -607,11 +735,12 @@ fn render_equation(
         },
     );
     let baseline_pt = equation_baseline_pt(page);
+    let scale = raster_scale.max(RASTER_SCALE);
     let pdf = if want_pdf {
         match typst_pdf::pdf(&doc, &typst_pdf::PdfOptions::default()) {
             Ok(bytes) => Some(bytes),
             Err(err) => {
-                let (preview, width_pt, height_pt) = rasterize_svg(&svg);
+                let (preview, width_pt, height_pt) = rasterize_svg(&svg, scale);
                 return Rendered {
                     preview,
                     svg: Some(svg),
@@ -619,7 +748,7 @@ fn render_equation(
                     width_pt,
                     height_pt,
                     baseline_pt,
-                    raster_scale: RASTER_SCALE,
+                    raster_scale: scale,
                     error: Some(format_typst_diags(&err)),
                 };
             }
@@ -628,7 +757,7 @@ fn render_equation(
         None
     };
 
-    let (preview, width_pt, height_pt) = rasterize_svg(&svg);
+    let (preview, width_pt, height_pt) = rasterize_svg(&svg, scale);
     Rendered {
         preview,
         svg: Some(svg),
@@ -636,7 +765,7 @@ fn render_equation(
         width_pt,
         height_pt,
         baseline_pt,
-        raster_scale: RASTER_SCALE,
+        raster_scale: scale,
         error: None,
     }
 }
@@ -895,7 +1024,7 @@ fn collapse_ws(s: &str) -> String {
     out.trim().to_string()
 }
 
-fn rasterize_svg(svg: &str) -> (Option<RgbaImage>, f32, f32) {
+fn rasterize_svg(svg: &str, raster_scale: f32) -> (Option<RgbaImage>, f32, f32) {
     let Ok(tree) = resvg::usvg::Tree::from_str(svg, &resvg::usvg::Options::default()) else {
         return (None, 0.0, 0.0);
     };
@@ -903,7 +1032,7 @@ fn rasterize_svg(svg: &str) -> (Option<RgbaImage>, f32, f32) {
     // usvg reports CSS pixels (96 dpi). Convert to PDF points so the overlay matches.
     let width_pt = size.width() * 72.0 / 96.0;
     let height_pt = size.height() * 72.0 / 96.0;
-    let scale = 3.0;
+    let scale = raster_scale.max(0.5);
     let width = (size.width() * scale).ceil().max(1.0) as u32;
     let height = (size.height() * scale).ceil().max(1.0) as u32;
     let Some(mut pixmap) = resvg::tiny_skia::Pixmap::new(width, height) else {
@@ -928,7 +1057,7 @@ fn rasterize_svg(svg: &str) -> (Option<RgbaImage>, f32, f32) {
 fn format_typst(err: &TypstAsLibError) -> String {
     match err {
         TypstAsLibError::TypstSource(diags) => format_typst_diags(diags),
-        other => other.to_string(),
+        other => map_typst_error(&other.to_string()),
     }
 }
 
@@ -938,9 +1067,57 @@ fn format_typst_diags(diags: &[typst::diag::SourceDiagnostic]) -> String {
     }
     diags
         .iter()
-        .map(|diag| diag.message.to_string())
+        .map(|diag| map_typst_error(diag.message.as_ref()))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Map Typst / MiTeX-flavored diagnostics back to LaTeX wording.
+///
+/// `unknown variable: mitexsqrt` → `unknown command \sqrt`. Unmapped text passes through.
+pub fn map_typst_error(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return trimmed.to_string();
+    }
+    // Multi-line diagnostics: map each line independently.
+    if trimmed.contains('\n') {
+        return trimmed
+            .lines()
+            .map(map_typst_error)
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    let Some(name) = trimmed.strip_prefix("unknown variable:") else {
+        return trimmed.to_string();
+    };
+    let name = name
+        .trim()
+        .trim_matches(|ch: char| ch == '`' || ch == '"' || ch == '\'');
+    if name.is_empty() {
+        return trimmed.to_string();
+    }
+    let command = latex_command_for_typst_name(name);
+    if command.is_empty() {
+        return trimmed.to_string();
+    }
+    format!("unknown command \\{command}")
+}
+
+/// Reverse of the helpers [`mitex_to_typst`] rewrites, plus a plain name fallback.
+fn latex_command_for_typst_name(name: &str) -> &str {
+    match name {
+        "mitexsqrt" => "sqrt",
+        "mitexmathbf" => "mathbf",
+        "mitexdisplaystyle" | "mitexdisplay" => "displaystyle",
+        "mitexoverbrace" => "overbrace",
+        "mitexunderbrace" => "underbrace",
+        "operatorname" => "operatorname",
+        "bmatrix" | "Bmatrix" | "pmatrix" | "vmatrix" | "Vmatrix" | "matrix" => name,
+        "aligned" | "alignedat" | "align" | "alignat" | "gather" | "gathered" | "split" => name,
+        "partial" => "partial",
+        other => other.strip_prefix("mitex").unwrap_or(other),
+    }
 }
 
 #[cfg(test)]
@@ -1284,18 +1461,131 @@ mod tests {
     #[test]
     fn preview_omits_pdf_until_asked() {
         let engine = build_engine();
-        let preview = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), false);
+        let preview = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), false, RASTER_SCALE);
         assert!(preview.error.is_none(), "{:?}", preview.error);
         assert!(preview.pdf.is_none(), "preview must not build a PDF");
         assert!(preview.svg.is_some());
         assert!(preview.preview.is_some());
         assert!(preview.width_pt > 1.0);
-        let with_pdf = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), true);
+        assert!((preview.raster_scale - RASTER_SCALE).abs() < f32::EPSILON);
+        let with_pdf = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), true, RASTER_SCALE);
         assert!(with_pdf.pdf.is_some());
         // Page frames in this Typst version may or may not publish a baseline.
         // Paint centers when this is None; it aligns when it is Some.
         if let Some(baseline) = preview.baseline_pt {
             assert!(baseline > 0.0 && baseline < preview.height_pt);
         }
+    }
+
+    #[test]
+    fn raster_scale_buckets_are_sqrt2_steps() {
+        assert_eq!(raster_scale_for(1.0), RASTER_SCALE);
+        assert_eq!(raster_scale_for(RASTER_SCALE), RASTER_SCALE);
+        // 1.2× base sits between 3 and 3√2 → first step up.
+        let next = raster_scale_for(RASTER_SCALE * 1.2);
+        let expected = RASTER_SCALE * std::f32::consts::SQRT_2;
+        assert!(
+            (next - expected).abs() < 1e-3,
+            "got {next}, expected ~{expected}"
+        );
+        // Exactly 2× base lands on the 6× bucket.
+        let double = raster_scale_for(RASTER_SCALE * 2.0);
+        assert!(
+            (double - RASTER_SCALE * 2.0).abs() < 1e-3,
+            "got {double}, expected {}",
+            RASTER_SCALE * 2.0
+        );
+        // Just above 2× needs the next √2 step (6√2).
+        let above = raster_scale_for(RASTER_SCALE * 2.0 + 0.01);
+        let expect_above = RASTER_SCALE * 2.0 * std::f32::consts::SQRT_2;
+        assert!(
+            (above - expect_above).abs() < 1e-2,
+            "got {above}, expected ~{expect_above}"
+        );
+    }
+
+    #[test]
+    fn sharper_raster_uses_hysteresis() {
+        assert!(!needs_sharper_raster(3.0, 3.0));
+        assert!(!needs_sharper_raster(3.0, 3.0 * 1.2));
+        assert!(needs_sharper_raster(3.0, 3.0 * 1.3 + 0.01));
+    }
+
+    #[test]
+    fn map_typst_error_uses_latex_commands() {
+        assert_eq!(
+            map_typst_error("unknown variable: mitexsqrt"),
+            "unknown command \\sqrt"
+        );
+        assert_eq!(
+            map_typst_error("unknown variable: foo"),
+            "unknown command \\foo"
+        );
+        assert_eq!(
+            map_typst_error("unknown variable: `bmatrix`"),
+            "unknown command \\bmatrix"
+        );
+        assert_eq!(
+            map_typst_error("unknown variable: mitexmathbf"),
+            "unknown command \\mathbf"
+        );
+        assert_eq!(
+            map_typst_error("unbalanced delimiters"),
+            "unbalanced delimiters"
+        );
+        assert_eq!(
+            map_typst_error("unknown variable: mitexsqrt\nunknown variable: foo"),
+            "unknown command \\sqrt\nunknown command \\foo"
+        );
+    }
+
+    #[test]
+    fn reraster_from_svg_skips_typst_and_pdf() {
+        let engine = build_engine();
+        let first = render_equation(&engine, r"\frac{a}{b}", 14.0, Rgb::new(0, 0, 0), false, RASTER_SCALE);
+        assert!(first.error.is_none(), "{:?}", first.error);
+        let svg = first.svg.expect("svg");
+        let sharp = RASTER_SCALE * std::f32::consts::SQRT_2;
+        let (preview, w, h) = rasterize_svg(&svg, sharp);
+        let preview = preview.expect("sharper preview");
+        let base = first.preview.expect("base preview");
+        assert!(preview.width > base.width || preview.height > base.height);
+        assert!((w - first.width_pt).abs() < 0.5);
+        assert!((h - first.height_pt).abs() < 0.5);
+    }
+
+    /// Manual artifact: `LT6_ZOOM_PNG=/path/to.png cargo test --bin marker write_lt6_zoom_png -- --exact --nocapture`
+    #[test]
+    fn write_lt6_zoom_png() {
+        let Ok(path) = std::env::var("LT6_ZOOM_PNG") else {
+            return;
+        };
+        // ~400% zoom: ZOOM_100≈1.333 → scale≈5.33; bucket above base×1.3.
+        let needed = crate::geom::ZOOM_100 * 4.0;
+        let scale = raster_scale_for(needed);
+        assert!(needs_sharper_raster(RASTER_SCALE, needed));
+        let engine = build_engine();
+        let rendered = render_equation(
+            &engine,
+            r"x = \frac{-b \pm \sqrt{b^2 - 4ac}}{2a}",
+            18.0,
+            Rgb::new(20, 20, 20),
+            false,
+            scale,
+        );
+        assert!(rendered.error.is_none(), "{:?}", rendered.error);
+        let preview = rendered.preview.expect("preview");
+        image::save_buffer(
+            &path,
+            &preview.pixels,
+            preview.width,
+            preview.height,
+            image::ColorType::Rgba8,
+        )
+        .expect("write png");
+        eprintln!(
+            "wrote {path} at raster_scale={scale} ({}×{})",
+            preview.width, preview.height
+        );
     }
 }

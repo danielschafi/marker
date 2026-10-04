@@ -355,6 +355,7 @@ fn absolute_fallback(path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::io::Write;
+    use std::os::fd::AsRawFd;
     use std::os::unix::net::UnixListener;
 
     #[test]
@@ -402,10 +403,8 @@ mod tests {
 
     #[test]
     fn clear_stale_socket_removes_only_refused() {
-        let dir = std::env::temp_dir().join(format!(
-            "marker-test-{}",
-            std::process::id()
-        ));
+        // pdf::engine tests remove `marker-test-{pid}` while this runs.
+        let dir = std::env::temp_dir().join(format!("marker-instance-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let socket_path = dir.join("instance.sock");
@@ -414,11 +413,17 @@ mod tests {
 
         let listener = UnixListener::bind(&socket_path).unwrap();
         assert!(!clear_stale_socket(&socket_path));
+        // Other tests spawn processes in this process. fork copies the
+        // listening fd until exec, so drop() alone can leave connect()
+        // succeeding. shutdown is shared by those duplicated fds.
+        // SAFETY: `listener` is an open Unix socket. SHUT_RD only stops
+        // accepts on that socket and does not close the fd.
+        let rc = unsafe { libc::shutdown(listener.as_raw_fd(), libc::SHUT_RD) };
+        assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
         drop(listener);
-        if socket_path.exists() {
-            assert!(clear_stale_socket(&socket_path));
-            assert!(!socket_path.exists());
-        }
+        assert!(socket_path.exists());
+        assert!(clear_stale_socket(&socket_path));
+        assert!(!socket_path.exists());
 
         let _ = fs::remove_dir_all(&dir);
     }

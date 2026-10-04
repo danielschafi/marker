@@ -176,6 +176,8 @@ pub(crate) struct Tab {
     /// After a successful save, spawn this tab in a new window and drop it here.
     pub(crate) detach_after_save: bool,
     pub(crate) outline_open: bool,
+    pub(crate) annots_open: bool,
+    pub(crate) annot_sidebar: AnnotSidebarState,
     pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
@@ -365,6 +367,85 @@ pub(crate) struct SearchState {
     pub(crate) current: usize,
     pub(crate) focus: bool,
     pub(crate) pending: bool,
+}
+
+/// Coarse kind buckets for the annotation sidebar filters (FT8).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum AnnotFilterKind {
+    Highlight,
+    Underline,
+    StrikeOut,
+    Squiggly,
+    Text,
+    Note,
+    Math,
+    Shape,
+    Image,
+    Foreign,
+}
+
+impl AnnotFilterKind {
+    pub(crate) const ALL: [Self; 10] = [
+        Self::Highlight,
+        Self::Underline,
+        Self::StrikeOut,
+        Self::Squiggly,
+        Self::Text,
+        Self::Note,
+        Self::Math,
+        Self::Shape,
+        Self::Image,
+        Self::Foreign,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Highlight => "Highlight",
+            Self::Underline => "Underline",
+            Self::StrikeOut => "Strikeout",
+            Self::Squiggly => "Squiggly",
+            Self::Text => "Text",
+            Self::Note => "Note",
+            Self::Math => "Equation",
+            Self::Shape => "Shape",
+            Self::Image => "Image",
+            Self::Foreign => "Imported",
+        }
+    }
+
+    pub(crate) fn from_annot(kind: &AnnotKind) -> Option<Self> {
+        match kind {
+            AnnotKind::Highlight { .. } => Some(Self::Highlight),
+            AnnotKind::Markup {
+                style: MarkupStyle::Underline,
+                ..
+            } => Some(Self::Underline),
+            AnnotKind::Markup {
+                style: MarkupStyle::StrikeOut,
+                ..
+            } => Some(Self::StrikeOut),
+            AnnotKind::Markup {
+                style: MarkupStyle::Squiggly,
+                ..
+            } => Some(Self::Squiggly),
+            AnnotKind::Text { .. } => Some(Self::Text),
+            AnnotKind::Note { .. } => Some(Self::Note),
+            AnnotKind::Math { .. } => Some(Self::Math),
+            AnnotKind::Shape { .. } => Some(Self::Shape),
+            AnnotKind::Image { .. } => Some(Self::Image),
+            AnnotKind::Foreign { .. } => Some(Self::Foreign),
+            AnnotKind::Future(_) => None,
+        }
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct AnnotSidebarState {
+    pub(crate) query: String,
+    /// Empty means every kind. Non-empty is an OR of selected kinds.
+    pub(crate) kinds: HashSet<AnnotFilterKind>,
+    /// Empty means every color. Non-empty is an OR of selected palette colors.
+    pub(crate) colors: Vec<Rgb>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1850,6 +1931,8 @@ impl MarkerApp {
                         close_after_save: false,
                         detach_after_save: false,
                         outline_open: has_outline,
+                        annots_open: false,
+                        annot_sidebar: AnnotSidebarState::default(),
                         assistant: TabAssistant::default(),
                         search: SearchState::default(),
                         last_hl: None,

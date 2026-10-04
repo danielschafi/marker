@@ -633,11 +633,19 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
         (page, count)
     });
     let want_page_focus = app.page_focus;
+    let dirty = app
+        .tab()
+        .is_some_and(|tab| tab.doc.session.is_dirty());
     let notice = app.tab().and_then(|tab| match &tab.save {
         SaveState::Clean | SaveState::Dirty { .. } => None,
-        SaveState::Saving => Some(("Saving…".to_string(), colors.accent)),
+        SaveState::Saving => Some((
+            "Saving…".to_string(),
+            colors.accent,
+            "Writing changes to disk…".to_string(),
+        )),
         SaveState::Failed { message, .. } => {
-            Some((message.clone(), Color32::from_rgb(230, 120, 110)))
+            let fail = Color32::from_rgb(230, 120, 110);
+            Some((message.clone(), fail, message.clone()))
         }
     });
     let error = app.error.clone();
@@ -688,8 +696,12 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
                 }
             });
         }
-        if let Some((label, color)) = notice {
-            ui.label(RichText::new(label).color(color).size(12.0));
+        if let Some((label, color, hover)) = notice {
+            ui.label(RichText::new(label).color(color).size(12.0))
+                .on_hover_text(hover);
+        } else if dirty {
+            ui.label(RichText::new("Modified").color(colors.dirty).size(12.0))
+                .on_hover_text("Unsaved changes — will be written automatically");
         }
         if let Some(error) = error {
             ui.label(

@@ -657,6 +657,13 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
             tabs_indicator_button(app, ui);
         }
         if app.doc().is_some() {
+            if ui
+                .checkbox(&mut app.settings.sepia, "Sepia")
+                .on_hover_text("Warm page background for reading")
+                .changed()
+            {
+                app.settings.save();
+            }
             control_cluster(ui, |ui| {
                 if cluster_button(ui, "Fit", Vec2::new(36.0, CONTROL_H))
                     .on_hover_text("Fit width, then height on next click (Ctrl+0)")

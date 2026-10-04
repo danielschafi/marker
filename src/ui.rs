@@ -180,7 +180,7 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     let fill = if list_open || response.dragged() {
         colors.chrome_raised
     } else if response.hovered() && tab_count > 1 {
-        Color32::from_white_alpha(14)
+        theme::chrome_overlay(ui.ctx(), 14)
     } else {
         Color32::TRANSPARENT
     };
@@ -270,7 +270,7 @@ fn tab_list_row(
     } else if selected {
         accent_fill(ui.ctx(), 36)
     } else if response.hovered() || response.dragged() {
-        Color32::from_white_alpha(14)
+        theme::chrome_overlay(ui.ctx(), 14)
     } else {
         Color32::TRANSPARENT
     };
@@ -748,9 +748,9 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let fill = if list_open {
         accent_fill(ui.ctx(), 42)
     } else if response.is_pointer_button_down_on() {
-        Color32::from_white_alpha(28)
+        theme::chrome_overlay(ui.ctx(), 28)
     } else if response.hovered() {
-        Color32::from_white_alpha(16)
+        theme::chrome_overlay(ui.ctx(), 16)
     } else {
         colors.chrome_raised
     };
@@ -805,9 +805,9 @@ fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response 
     let colors = p(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.is_pointer_button_down_on() {
-        Color32::from_white_alpha(28)
+        theme::chrome_overlay(ui.ctx(), 28)
     } else if response.hovered() {
-        Color32::from_white_alpha(16)
+        theme::chrome_overlay(ui.ctx(), 16)
     } else {
         Color32::TRANSPARENT
     };
@@ -827,16 +827,18 @@ fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response 
 
 fn cluster_drag(ui: &mut egui::Ui, drag: DragValue<'_>, width: f32) -> egui::Response {
     ui.scope(|ui| {
+        let hover = theme::chrome_overlay(ui.ctx(), 16);
+        let active = theme::chrome_overlay(ui.ctx(), 28);
         {
             let visuals = ui.visuals_mut();
             visuals.widgets.inactive.bg_fill = Color32::TRANSPARENT;
             visuals.widgets.inactive.weak_bg_fill = Color32::TRANSPARENT;
             visuals.widgets.inactive.bg_stroke = Stroke::NONE;
-            visuals.widgets.hovered.bg_fill = Color32::from_white_alpha(16);
-            visuals.widgets.hovered.weak_bg_fill = Color32::from_white_alpha(16);
+            visuals.widgets.hovered.bg_fill = hover;
+            visuals.widgets.hovered.weak_bg_fill = hover;
             visuals.widgets.hovered.bg_stroke = Stroke::NONE;
-            visuals.widgets.active.bg_fill = Color32::from_white_alpha(28);
-            visuals.widgets.active.weak_bg_fill = Color32::from_white_alpha(28);
+            visuals.widgets.active.bg_fill = active;
+            visuals.widgets.active.weak_bg_fill = active;
             visuals.widgets.active.bg_stroke = Stroke::NONE;
             visuals.widgets.inactive.corner_radius = CornerRadius::same(5);
             visuals.widgets.hovered.corner_radius = CornerRadius::same(5);
@@ -1192,7 +1194,7 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
     let fill = if selected {
         accent_fill(ui.ctx(), 48)
     } else if response.hovered() {
-        Color32::from_white_alpha(16)
+        theme::chrome_overlay(ui.ctx(), 16)
     } else {
         Color32::TRANSPARENT
     };
@@ -1755,9 +1757,9 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                 Sense::click(),
                             );
                             let fill = if response.hovered() {
-                                Color32::from_white_alpha(18)
+                                theme::chrome_overlay(ui.ctx(), 18)
                             } else {
-                                Color32::from_white_alpha(10)
+                                theme::chrome_overlay(ui.ctx(), 10)
                             };
                             ui.painter()
                                 .rect_filled(rect, CornerRadius::same(8), fill);
@@ -1921,8 +1923,11 @@ pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool) -> bool {
     ui.painter()
         .circle_filled(rect.center(), 5.0, color.to_color32());
     if selected {
-        ui.painter()
-            .circle_stroke(rect.center(), 6.5, Stroke::new(1.35, Color32::WHITE));
+        ui.painter().circle_stroke(
+            rect.center(),
+            6.5,
+            Stroke::new(1.35, theme::color_dot_selection_ring(ui.ctx())),
+        );
     }
     response.clicked()
 }

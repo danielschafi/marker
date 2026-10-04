@@ -76,6 +76,22 @@ pub(crate) fn accent_fill(ctx: &Context, alpha: u8) -> Color32 {
     Color32::from_rgba_unmultiplied(a.r(), a.g(), a.b(), alpha)
 }
 
+/// Semi-transparent wash for custom chrome (tab pills, tool chips, clusters).
+pub(crate) fn chrome_overlay(ctx: &Context, alpha: u8) -> Color32 {
+    match ctx.theme() {
+        Theme::Dark => Color32::from_white_alpha(alpha),
+        Theme::Light => Color32::from_black_alpha(alpha),
+    }
+}
+
+/// Ring around the active color swatch in the style bar.
+pub(crate) fn color_dot_selection_ring(ctx: &Context) -> Color32 {
+    match ctx.theme() {
+        Theme::Dark => Color32::WHITE,
+        Theme::Light => Color32::from_rgba_unmultiplied(28, 28, 32, 230),
+    }
+}
+
 /// Install dual dark/light styles and follow the OS where possible.
 pub(crate) fn apply_theme(ctx: &Context) {
     ctx.set_theme(ThemePreference::System);

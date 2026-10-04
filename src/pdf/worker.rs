@@ -1,7 +1,10 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+
+use crate::app::TileKey;
 
 use crate::annot::{Annotation, Glyph};
 use crate::geom::PdfRect;
@@ -24,6 +27,8 @@ pub enum PdfJob {
         scale: f32,
         col: i32,
         row: i32,
+        prefetch: bool,
+        distance: u32,
     },
     Glyphs {
         gen: u64,
@@ -125,13 +130,16 @@ pub struct PdfWorker {
 }
 
 impl PdfWorker {
-    pub fn spawn(ctx: egui::Context) -> Self {
+    pub fn spawn(
+        ctx: egui::Context,
+        tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    ) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (reply_tx, reply_rx) = mpsc::channel();
         let loop_tx = job_tx.clone();
         thread::Builder::new()
             .name("marker-pdf".into())
-            .spawn(move || worker_loop(ctx, job_rx, loop_tx, reply_tx))
+            .spawn(move || worker_loop(ctx, job_rx, loop_tx, reply_tx, tile_wanted))
             .expect("pdf thread");
         Self {
             jobs: job_tx,
@@ -147,13 +155,24 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::Close { gen });
     }
 
-    pub fn tile(&self, gen: u64, page: usize, scale: f32, col: i32, row: i32) {
+    pub fn tile(
+        &self,
+        gen: u64,
+        page: usize,
+        scale: f32,
+        col: i32,
+        row: i32,
+        prefetch: bool,
+        distance: u32,
+    ) {
         let _ = self.jobs.send(PdfJob::Tile {
             gen,
             page,
             scale,
             col,
             row,
+            prefetch,
+            distance,
         });
     }
 
@@ -211,7 +230,7 @@ impl Drop for PdfWorker {
     }
 }
 
-fn job_rank(job: &PdfJob) -> u8 {
+fn job_sort_key(job: &PdfJob) -> (u8, u32) {
     match job {
         PdfJob::Shutdown
         | PdfJob::Open { .. }
@@ -219,10 +238,20 @@ fn job_rank(job: &PdfJob) -> u8 {
         | PdfJob::Save { .. }
         | PdfJob::InsertPage { .. }
         | PdfJob::InsertPageAt { .. }
-        | PdfJob::DeletePage { .. } => 0,
-        PdfJob::Tile { .. } => 1,
-        PdfJob::Crop { .. } | PdfJob::Search { .. } => 2,
-        PdfJob::Glyphs { .. } => 3,
+        | PdfJob::DeletePage { .. } => (0, 0),
+        PdfJob::Tile {
+            prefetch,
+            distance,
+            ..
+        } => {
+            if *prefetch {
+                (2, *distance)
+            } else {
+                (1, *distance)
+            }
+        }
+        PdfJob::Crop { .. } | PdfJob::Search { .. } => (3, 0),
+        PdfJob::Glyphs { .. } => (4, 0),
     }
 }
 
@@ -287,7 +316,29 @@ fn handle_tile(
     scale: f32,
     col: i32,
     row: i32,
+    tile_wanted: &Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
 ) {
+    let key = TileKey {
+        page,
+        scale_bits: scale.to_bits(),
+        col,
+        row,
+    };
+    let still_wanted = tile_wanted
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&gen)
+        .is_some_and(|set| set.contains(&key));
+    if !still_wanted {
+        ctx.send(PdfReply::TileMiss {
+            gen,
+            page,
+            scale,
+            col,
+            row,
+        });
+        return;
+    }
     let Some(engine) = ctx.engines.get_mut(&gen) else {
         return;
     };
@@ -429,7 +480,11 @@ fn handle_delete_page(ctx: &mut WorkerCtx<'_>, gen: u64, index: usize) {
     ctx.send(reply);
 }
 
-fn handle_job(ctx: &mut WorkerCtx<'_>, job: PdfJob) -> bool {
+fn handle_job(
+    ctx: &mut WorkerCtx<'_>,
+    job: PdfJob,
+    tile_wanted: &Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+) -> bool {
     match job {
         PdfJob::Shutdown => true,
         PdfJob::Open { gen, path } => {
@@ -446,8 +501,9 @@ fn handle_job(ctx: &mut WorkerCtx<'_>, job: PdfJob) -> bool {
             scale,
             col,
             row,
+            ..
         } => {
-            handle_tile(ctx, gen, page, scale, col, row);
+            handle_tile(ctx, gen, page, scale, col, row, tile_wanted);
             false
         }
         PdfJob::Glyphs { gen, page } => {
@@ -505,7 +561,7 @@ fn dequeue_job(jobs: &Receiver<PdfJob>, queued: &mut VecDeque<PdfJob>) -> Option
     let idx = queued
         .iter()
         .enumerate()
-        .min_by_key(|(_, job)| job_rank(job))
+        .min_by_key(|(_, job)| job_sort_key(job))
         .map(|(index, _)| index)
         .unwrap_or(0);
     queued.remove(idx)
@@ -516,6 +572,7 @@ fn worker_loop(
     jobs: Receiver<PdfJob>,
     jobs_tx: Sender<PdfJob>,
     replies: Sender<PdfReply>,
+    tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
 ) {
     let mut engines: HashMap<u64, DocumentEngine> = HashMap::new();
     let mut latest_search: HashMap<u64, u64> = HashMap::new();
@@ -528,7 +585,7 @@ fn worker_loop(
             engines: &mut engines,
             latest_search: &mut latest_search,
         };
-        if handle_job(&mut worker, job) {
+        if handle_job(&mut worker, job, &tile_wanted) {
             break;
         }
     }

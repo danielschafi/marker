@@ -3610,39 +3610,48 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     }
 }
 
+pub(crate) struct TileRequest {
+    pub key: crate::app::TileKey,
+    pub scale: f32,
+    pub prefetch: bool,
+    pub distance: u32,
+}
+
 pub(crate) struct TileWant {
-    pub tiles: Vec<(crate::app::TileKey, f32)>,
+    pub tiles: Vec<TileRequest>,
     pub words: Vec<usize>,
 }
 
-pub(crate) fn wanted_tiles(
+fn tile_distance_sq(doc: &DocState, page: usize, col: i32, row: i32, scale: f32, view: Rect) -> u32 {
+    let rect = doc.page_rect(page, view);
+    let cx = view.center().x;
+    let cy = view.center().y;
+    let tile_cx =
+        rect.left() + (col as f32 * TILE_PX as f32 + TILE_PX as f32 * 0.5) / scale * doc.scale;
+    let tile_cy =
+        rect.top() + (row as f32 * TILE_PX as f32 + TILE_PX as f32 * 0.5) / scale * doc.scale;
+    let dx = tile_cx - cx;
+    let dy = tile_cy - cy;
+    dx.mul_add(dx, dy * dy).min(f32::MAX) as u32
+}
+
+fn collect_tiles_in_band(
     doc: &DocState,
     inflight: &std::collections::HashSet<crate::app::TileKey>,
-    _tool: Tool,
     view: Rect,
-    pixels_per_point: f32,
-) -> TileWant {
-    let mut want = TileWant {
-        tiles: Vec::new(),
-        words: Vec::new(),
-    };
-    if doc.pages.is_empty() {
-        return want;
+    band: Rect,
+    render_scale: f32,
+    bits: u32,
+    prefetch: bool,
+    seen: &mut std::collections::HashSet<crate::app::TileKey>,
+    out: &mut Vec<TileRequest>,
+) {
+    if band.width() < 1.0 || band.height() < 1.0 {
+        return;
     }
-    let render_scale = doc.render_scale(pixels_per_point);
-    let bits = render_scale.to_bits();
-    let (first, last) = visible_pages(doc, view);
-    let view_top = doc.scroll_y;
-    let view_bot = doc.scroll_y + view.height();
-    for page in first..=last {
-        let y0 = doc.tops[page] * doc.scale;
-        let y1 = y0 + doc.pages[page].height() * doc.scale;
-        let on_screen = y1 >= view_top && y0 <= view_bot;
-        if on_screen && !doc.glyphs.contains_key(&page) {
-            want.words.push(page);
-        }
+    for page in 0..doc.pages.len() {
         let rect = doc.page_rect(page, view);
-        let visible = rect.intersect(view);
+        let visible = rect.intersect(band);
         if visible.width() < 1.0 || visible.height() < 1.0 {
             continue;
         }
@@ -3670,12 +3679,89 @@ pub(crate) fn wanted_tiles(
                     col,
                     row,
                 };
-                if doc.tiles.contains_key(&key) || inflight.contains(&key) {
+                if doc.tiles.contains_key(&key) || inflight.contains(&key) || !seen.insert(key) {
                     continue;
                 }
-                want.tiles.push((key, scale));
+                out.push(TileRequest {
+                    key,
+                    scale,
+                    prefetch,
+                    distance: tile_distance_sq(doc, page, col, row, scale, view),
+                });
             }
         }
     }
+}
+
+pub(crate) fn wanted_tiles(
+    doc: &mut DocState,
+    inflight: &std::collections::HashSet<crate::app::TileKey>,
+    _tool: Tool,
+    view: Rect,
+    pixels_per_point: f32,
+) -> TileWant {
+    let mut want = TileWant {
+        tiles: Vec::new(),
+        words: Vec::new(),
+    };
+    if doc.pages.is_empty() {
+        return want;
+    }
+    let scroll_dir = doc.scroll_y - doc.scroll_y_prev;
+    let render_scale = doc.render_scale(pixels_per_point);
+    let bits = render_scale.to_bits();
+    let (first, last) = visible_pages(doc, view);
+    let view_top = doc.scroll_y;
+    let view_bot = doc.scroll_y + view.height();
+    for page in first..=last {
+        let y0 = doc.tops[page] * doc.scale;
+        let y1 = y0 + doc.pages[page].height() * doc.scale;
+        let on_screen = y1 >= view_top && y0 <= view_bot;
+        if on_screen && !doc.glyphs.contains_key(&page) {
+            want.words.push(page);
+        }
+    }
+    if scroll_dir < 0.0 {
+        if first > 0
+            && !doc.glyphs.contains_key(&(first - 1))
+            && !want.words.contains(&(first - 1))
+        {
+            want.words.push(first - 1);
+        }
+    } else if last + 1 < doc.pages.len()
+        && !doc.glyphs.contains_key(&(last + 1))
+        && !want.words.contains(&(last + 1))
+    {
+        want.words.push(last + 1);
+    }
+    let mut seen = std::collections::HashSet::new();
+    collect_tiles_in_band(
+        doc,
+        inflight,
+        view,
+        view,
+        render_scale,
+        bits,
+        false,
+        &mut seen,
+        &mut want.tiles,
+    );
+    let prefetch_band = if scroll_dir < 0.0 {
+        view.translate(Vec2::new(0.0, -view.height()))
+    } else {
+        view.translate(Vec2::new(0.0, view.height()))
+    };
+    collect_tiles_in_band(
+        doc,
+        inflight,
+        view,
+        prefetch_band,
+        render_scale,
+        bits,
+        true,
+        &mut seen,
+        &mut want.tiles,
+    );
+    doc.scroll_y_prev = doc.scroll_y;
     want
 }

@@ -972,7 +972,7 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::new()
                 .fill(colors.chrome)
-                .stroke(Stroke::new(1.0, colors.hairline))
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
                 .inner_margin(10.0),
         )
         .show(ctx, |ui| {
@@ -1018,7 +1018,7 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                 for color in HIGHLIGHT_COLORS {
-                    let on = color_filters.iter().any(|c| *c == color);
+                    let on = color_filters.contains(&color);
                     if color_dot(ui, color, on) {
                         if on {
                             color_filters.retain(|c| *c != color);
@@ -1124,7 +1124,7 @@ fn annot_row_matches(
         let Some(color) = row.color else {
             return false;
         };
-        if !colors.iter().any(|c| *c == color) {
+        if !colors.contains(&color) {
             return false;
         }
     }
@@ -1165,7 +1165,7 @@ fn annot_sidebar_row(ui: &mut egui::Ui, row: &AnnotSidebarRow, selected: bool) -
                     ui.painter().circle_stroke(
                         swatch.center(),
                         5.0,
-                        Stroke::new(1.0, colors.hairline),
+                        Stroke::new(1.0_f32, colors.hairline),
                     );
                 }
                 ui.vertical(|ui| {
@@ -1213,7 +1213,7 @@ fn filter_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response
         Button::new(RichText::new(label).size(11.0).color(color))
             .fill(fill)
             .stroke(Stroke::new(
-                1.0,
+                1.0_f32,
                 if selected {
                     colors.accent.gamma_multiply(0.55)
                 } else {

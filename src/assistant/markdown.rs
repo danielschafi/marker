@@ -1,7 +1,26 @@
 //! Safe Markdown rendering for assistant turns (issue #26).
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
+
+#[cfg(test)]
+use std::cell::Cell;
+
 use egui::Ui;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+
+/// Finished replies kept so a painted turn is not sanitized again next frame.
+const FINISHED_CACHE_CAP: usize = 128;
+
+thread_local! {
+    static FINISHED_MD: RefCell<HashMap<Arc<str>, Arc<str>>> = RefCell::new(HashMap::new());
+}
+
+#[cfg(test)]
+thread_local! {
+    static SANITIZE_COUNT: Cell<u64> = const { Cell::new(0) };
+}
 
 /// Schemes allowed for clickable links in assistant Markdown.
 fn link_scheme_allowed(url: &str) -> bool {
@@ -105,12 +124,55 @@ fn parse_md_link(s: &str) -> Option<(usize, &str)> {
     Some((label_end, url))
 }
 
+/// Markdown for one paint.
+///
+/// A finished turn is sanitized once and reused. A streaming turn changes on
+/// every delta, so it is sanitized again and not stored.
+fn render_markdown(text: &str, incomplete: bool) -> Arc<str> {
+    if incomplete {
+        bump_sanitize_count();
+        return Arc::from(sanitize_markdown(text));
+    }
+    FINISHED_MD.with(|cell| {
+        let mut map = cell.borrow_mut();
+        if let Some(hit) = map.get(text) {
+            return Arc::clone(hit);
+        }
+        bump_sanitize_count();
+        let sanitized: Arc<str> = sanitize_markdown(text).into();
+        if map.len() >= FINISHED_CACHE_CAP {
+            map.clear();
+        }
+        map.insert(Arc::from(text), Arc::clone(&sanitized));
+        sanitized
+    })
+}
+
+fn bump_sanitize_count() {
+    #[cfg(test)]
+    SANITIZE_COUNT.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+fn sanitize_count() -> u64 {
+    SANITIZE_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+fn reset_render_cache() {
+    SANITIZE_COUNT.with(|count| count.set(0));
+    FINISHED_MD.with(|cell| cell.borrow_mut().clear());
+}
+
 /// Render assistant Markdown into `ui`. Plain text stays readable as paragraphs.
+///
+/// Callers pass finished turns only. Streaming text stays a plain label so a
+/// half-open fence is not parsed, and so this cache is not filled with partials.
 pub fn show(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
     if text.is_empty() {
         return;
     }
-    let sanitized = sanitize_markdown(text);
+    let sanitized = render_markdown(text, false);
     ui.scope(|ui| {
         ui.style_mut().url_in_tooltip = true;
         CommonMarkViewer::new()
@@ -152,5 +214,32 @@ mod tests {
     fn headings_lists_code_pass_through() {
         let s = "# Title\n\n- a\n- b\n\n`code` and **bold**\n\n```rust\nfn main() {}\n```\n";
         assert_eq!(sanitize_markdown(s), s);
+    }
+
+    #[test]
+    fn finished_turn_is_sanitized_once() {
+        reset_render_cache();
+        let raw = "Click [here](javascript:alert(1)) now.";
+        let first = render_markdown(raw, false);
+        assert_eq!(&*first, "Click here now.");
+        assert_eq!(sanitize_count(), 1);
+        for _ in 0..4 {
+            let again = render_markdown(raw, false);
+            assert_eq!(again, first);
+        }
+        assert_eq!(sanitize_count(), 1);
+
+        // Streaming text changes every delta: sanitize each update, do not reuse.
+        let partial = "See [docs](https://example.com) ";
+        assert_eq!(&*render_markdown(partial, true), partial);
+        assert_eq!(&*render_markdown(partial, true), partial);
+        assert_eq!(sanitize_count(), 3);
+
+        // The next finished body is its own entry.
+        let other = "See [docs](https://example.com/a) please.";
+        assert_eq!(&*render_markdown(other, false), other);
+        assert_eq!(sanitize_count(), 4);
+        assert_eq!(&*render_markdown(other, false), other);
+        assert_eq!(sanitize_count(), 4);
     }
 }

@@ -321,6 +321,9 @@ impl Session {
         if let Some(xref) = annot.xref {
             self.pending_deletes.push((annot.page, xref));
         }
+        // Bump so Tab::annot_by_page (and other epoch caches) rebuild. Painting
+        // indexes annotations through that cache; a stale list panics on delete.
+        self.epoch += 1;
         true
     }
 
@@ -360,6 +363,7 @@ impl Session {
                 *page += 1;
             }
         }
+        self.epoch += 1;
     }
 
     /// Inverse of [`Self::shift_pages_from`] after deleting the page at `at`.
@@ -377,6 +381,7 @@ impl Session {
                 *page -= 1;
             }
         }
+        self.epoch += 1;
     }
 }
 
@@ -614,6 +619,36 @@ mod tests {
         let restored = restore_session(&session, before);
         assert!(restored.annotations.is_empty());
         assert_eq!(restored.pending_deletes, vec![(0, 9)]);
+    }
+
+    #[test]
+    fn remove_bumps_epoch_and_records_xref_delete() {
+        let mut session = Session::new();
+        let keep = session.insert(
+            0,
+            AnnotKind::Text {
+                rect: PdfRect::new(0.0, 0.0, 10.0, 10.0),
+                content: "keep".into(),
+                size: 12.0,
+                color: Rgb::new(0, 0, 0),
+            },
+        );
+        let drop = session.insert(
+            0,
+            AnnotKind::Highlight {
+                quads: vec![PdfRect::new(0.0, 0.0, 20.0, 10.0)],
+                color: Rgb::new(255, 230, 0),
+            },
+        );
+        session.get_mut(drop).unwrap().xref = Some(42);
+        let epoch_before = session.epoch;
+        assert!(session.remove(drop));
+        assert_eq!(session.epoch, epoch_before + 1);
+        assert_eq!(session.annotations.len(), 1);
+        assert_eq!(session.annotations[0].id, keep);
+        assert_eq!(session.pending_deletes, vec![(0, 42)]);
+        assert!(!session.remove(drop));
+        assert_eq!(session.epoch, epoch_before + 1);
     }
 
     #[test]

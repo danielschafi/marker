@@ -1690,7 +1690,11 @@ fn resize_target(
 
 fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
     let tab_idx = app.active;
-    if app.tabs.get_mut(tab_idx).is_none() {
+    if app
+        .tabs
+        .get(tab_idx)
+        .is_none_or(|tab| tab.doc.pages.is_empty())
+    {
         return;
     }
     if let Some(tab) = app.tabs.get_mut(tab_idx) {

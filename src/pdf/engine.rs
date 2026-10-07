@@ -121,6 +121,9 @@ impl DocumentEngine {
             return Err("This PDF is password protected.".into());
         }
         let count = doc.page_count().map_err(show)?;
+        if count <= 0 {
+            return Err("This PDF has no readable pages. It may be damaged.".into());
+        }
         let mut pages = Vec::with_capacity(count as usize);
         for index in 0..count {
             let page = doc.load_pdf_page(index).map_err(show)?;
@@ -1858,6 +1861,22 @@ mod tests {
             .commit(&mut doc, true)
             .unwrap();
         doc.save(path.to_str().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn open_rejects_pdf_without_readable_pages() {
+        let dir = std::env::temp_dir().join(format!("marker-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.pdf");
+        PdfDocument::new().save(path.to_str().unwrap()).unwrap();
+
+        let result = DocumentEngine::open(&path);
+
+        assert!(matches!(
+            result,
+            Err(message) if message == "This PDF has no readable pages. It may be damaged."
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

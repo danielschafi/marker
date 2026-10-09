@@ -330,6 +330,8 @@ pub(crate) struct InlineReady {
     /// SVG stays so a later zoom can re-raster without asking Typst again.
     pub(crate) svg: String,
     pub(crate) texture: Option<egui::TextureHandle>,
+    /// Alpha-identical white copy used by the fixed-contrast live preview.
+    pub(crate) white_texture: Option<egui::TextureHandle>,
     /// CSS-pixel multiplier used for `texture` (√2 buckets from the base 3×).
     pub(crate) raster_scale: f32,
     pub(crate) w_pt: f32,
@@ -352,6 +354,7 @@ enum CacheAction {
 pub(crate) struct InlinePreview {
     pub(crate) pending: bool,
     pub(crate) texture: Option<egui::TextureHandle>,
+    pub(crate) white_texture: Option<egui::TextureHandle>,
     pub(crate) width_pt: f32,
     pub(crate) height_pt: f32,
     pub(crate) error: Option<String>,
@@ -2356,7 +2359,7 @@ impl MarkerApp {
             let bytes = render
                 .preview
                 .as_ref()
-                .map(|image| image.width as usize * image.height as usize * 4);
+                .map(|image| image.width as usize * image.height as usize * 8);
             if let Some(ready) = self.math_cache.ready_mut(&render.key) {
                 if let Some(image) = render.preview.as_ref() {
                     let pixels = egui::ColorImage::from_rgba_premultiplied(
@@ -2368,6 +2371,19 @@ impl MarkerApp {
                     } else {
                         let stamp = render.span_key.unwrap_or(0);
                         ready.texture = Some(upload_preview(
+                            ctx,
+                            render.gen,
+                            render.id ^ stamp,
+                            render.req,
+                            image,
+                        ));
+                    }
+                    let white_pixels = white_preview_image(image);
+                    if let Some(texture) = ready.white_texture.as_mut() {
+                        texture.set(white_pixels, egui::TextureOptions::LINEAR);
+                    } else {
+                        let stamp = render.span_key.unwrap_or(0);
+                        ready.white_texture = Some(upload_white_preview(
                             ctx,
                             render.gen,
                             render.id ^ stamp,
@@ -2403,11 +2419,15 @@ impl MarkerApp {
         let bytes = render
             .preview
             .as_ref()
-            .map(|image| image.width as usize * image.height as usize * 4)
+            .map(|image| image.width as usize * image.height as usize * 8)
             .unwrap_or(0);
         let texture = render.preview.as_ref().map(|image| {
             let stamp = render.span_key.unwrap_or(0);
             upload_preview(ctx, render.gen, render.id ^ stamp, render.req, image)
+        });
+        let white_texture = render.preview.as_ref().map(|image| {
+            let stamp = render.span_key.unwrap_or(0);
+            upload_white_preview(ctx, render.gen, render.id ^ stamp, render.req, image)
         });
         self.remember_good(&render);
         self.math_cache.insert_ready(
@@ -2415,6 +2435,7 @@ impl MarkerApp {
             InlineReady {
                 svg: render.svg.unwrap_or_default(),
                 texture,
+                white_texture,
                 raster_scale: render.raster_scale,
                 w_pt: render.width_pt,
                 h_pt: render.height_pt,
@@ -3061,6 +3082,7 @@ impl MarkerApp {
             EntryKind::Ready { value, .. } => Some(InlinePreview {
                 pending: false,
                 texture: value.texture.clone(),
+                white_texture: value.white_texture.clone(),
                 width_pt: value.w_pt,
                 height_pt: value.h_pt,
                 error: None,
@@ -3081,6 +3103,7 @@ impl MarkerApp {
             EntryKind::Pending { .. } => Some(InlinePreview {
                 pending: true,
                 texture: None,
+                white_texture: None,
                 width_pt: 0.0,
                 height_pt: 0.0,
                 error: None,
@@ -3088,6 +3111,7 @@ impl MarkerApp {
             EntryKind::Error { message } => Some(InlinePreview {
                 pending: false,
                 texture: None,
+                white_texture: None,
                 width_pt: 0.0,
                 height_pt: 0.0,
                 error: Some(message.clone()),
@@ -3095,6 +3119,7 @@ impl MarkerApp {
             EntryKind::Ready { value, .. } => Some(InlinePreview {
                 pending: false,
                 texture: value.texture.clone(),
+                white_texture: value.white_texture.clone(),
                 width_pt: value.w_pt,
                 height_pt: value.h_pt,
                 error: None,
@@ -4822,6 +4847,34 @@ fn upload_preview(
     ctx.load_texture(
         format!("math-{gen}-{id}-{req}"),
         pixels,
+        egui::TextureOptions::LINEAR,
+    )
+}
+
+fn white_preview_image(image: &RgbaImage) -> egui::ColorImage {
+    let mut pixels = image.pixels.clone();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = pixel[3];
+        pixel[0] = alpha;
+        pixel[1] = alpha;
+        pixel[2] = alpha;
+    }
+    egui::ColorImage::from_rgba_premultiplied(
+        [image.width as usize, image.height as usize],
+        &pixels,
+    )
+}
+
+fn upload_white_preview(
+    ctx: &egui::Context,
+    gen: u64,
+    id: u64,
+    req: u64,
+    image: &RgbaImage,
+) -> egui::TextureHandle {
+    ctx.load_texture(
+        format!("math-white-{gen}-{id}-{req}"),
+        white_preview_image(image),
         egui::TextureOptions::LINEAR,
     )
 }

@@ -2717,6 +2717,7 @@ fn edit_text_annot(
         .constrain(false)
         .show(ctx, |ui| {
             ui.set_max_width(screen.width().max(24.0));
+            ui.visuals_mut().text_cursor.stroke = Stroke::new(2.0, Color32::BLACK);
             let font_px = (size * scale).max(8.0);
             let style = math_edit_style(color.to_color32(), font_px);
             let autosnippets = app.settings.math_autosnippets;
@@ -2905,6 +2906,23 @@ fn ready_texture(
         EntryKind::Ready { value, .. } => {
             value.texture.clone().map(|texture| (texture, value.w_pt, value.h_pt))
         }
+        EntryKind::Pending { .. } | EntryKind::Error { .. } => None,
+    }
+}
+
+fn ready_white_texture(
+    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    inner: &str,
+    display: bool,
+    size_pt: f32,
+    color: crate::geom::Rgb,
+) -> Option<(egui::TextureHandle, f32, f32)> {
+    let key = MathKey::new(inner, display, size_pt, color);
+    match cache.get(&key)? {
+        EntryKind::Ready { value, .. } => value
+            .white_texture
+            .clone()
+            .map(|texture| (texture, value.w_pt, value.h_pt)),
         EntryKind::Pending { .. } | EntryKind::Error { .. } => None,
     }
 }
@@ -3419,7 +3437,7 @@ fn bubble_plan(
     Some(BubblePlan {
         anchor: span_screen_rect(&output.galley, output.galley_pos, &char_span_of(&span, content)),
         state,
-        current: ready_texture(cache, inner, span.display, size_pt, color),
+        current: ready_white_texture(cache, inner, span.display, size_pt, color),
         ordinal: span.index,
         idle_secs,
     })
@@ -3449,7 +3467,9 @@ fn paint_math_bubble(
     scale: f32,
 ) {
     let last = app.last_good_inline(id, plan.ordinal);
-    let has_last = last.as_ref().is_some_and(|preview| preview.texture.is_some());
+    let has_last = last
+        .as_ref()
+        .is_some_and(|preview| preview.white_texture.is_some());
     let bubble = preview_bubble(&plan.state, has_last, plan.idle_secs);
     if bubble.image == BubbleImage::None && bubble.error.is_none() {
         return;
@@ -3459,7 +3479,7 @@ fn paint_math_bubble(
             (texture, w, h, Color32::WHITE)
         }),
         BubbleImage::LastGoodDimmed => last.and_then(|preview| {
-            preview.texture.map(|texture| {
+            preview.white_texture.map(|texture| {
                 (
                     texture,
                     preview.width_pt,
@@ -3492,26 +3512,30 @@ fn paint_math_bubble(
         .constrain(false)
         .interactable(false)
         .show(ctx, |ui| {
-            egui::Frame::popup(ui.style()).show(ui, |ui| {
-                if let Some((texture, w, h, tint)) = shown {
-                    let nat = Vec2::new(w * scale, h * scale);
-                    let fit = (240.0 / nat.x.max(1.0)).min(72.0 / nat.y.max(1.0)).min(1.0);
-                    let (rect, _) = ui.allocate_exact_size(nat * fit, Sense::hover());
-                    ui.painter().image(
-                        texture.id(),
-                        rect,
-                        Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
-                        tint,
-                    );
-                }
-                if let Some(error) = &bubble.error {
-                    ui.label(
-                        egui::RichText::new(error)
-                            .color(Color32::from_rgb(210, 70, 60))
-                            .size(12.0),
-                    );
-                }
-            });
+            egui::Frame::popup(ui.style())
+                .fill(Color32::BLACK)
+                .show(ui, |ui| {
+                    if let Some((texture, w, h, tint)) = shown {
+                        let nat = Vec2::new(w * scale, h * scale);
+                        let fit = (240.0 / nat.x.max(1.0))
+                            .min(72.0 / nat.y.max(1.0))
+                            .min(1.0);
+                        let (rect, _) = ui.allocate_exact_size(nat * fit, Sense::hover());
+                        ui.painter().image(
+                            texture.id(),
+                            rect,
+                            Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                            tint,
+                        );
+                    }
+                    if let Some(error) = &bubble.error {
+                        ui.label(
+                            egui::RichText::new(error)
+                                .color(Color32::from_rgb(210, 70, 60))
+                                .size(12.0),
+                        );
+                    }
+                });
         });
 }
 

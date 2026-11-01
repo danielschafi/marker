@@ -11,13 +11,53 @@ pub const HIGHLIGHT_OPACITY: f32 = 0.45;
 pub const NOTE_SIZE: f32 = 24.0;
 
 /// One selectable glyph. Highlights snap to these instead of whole words.
+///
+/// Line extents live in a side table ([`PageGlyphs::line_bounds`]) so each
+/// glyph stays ~28 bytes instead of repeating the same line rect.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {
     pub ch: char,
     pub bounds: PdfRect,
-    pub line_bounds: PdfRect,
     pub line: u32,
     pub word: u32,
+}
+
+impl Glyph {
+    /// Line bounds for this glyph from a table indexed by [`Glyph::line`].
+    pub fn line_bounds(self, table: &[PdfRect]) -> PdfRect {
+        table
+            .get(self.line as usize)
+            .copied()
+            .unwrap_or(self.bounds)
+    }
+}
+
+/// Glyphs for one page plus a line-bounds table keyed by [`Glyph::line`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PageGlyphs {
+    glyphs: Vec<Glyph>,
+    line_bounds: Vec<PdfRect>,
+}
+
+impl PageGlyphs {
+    pub fn new(glyphs: Vec<Glyph>, line_bounds: Vec<PdfRect>) -> Self {
+        Self {
+            glyphs,
+            line_bounds,
+        }
+    }
+
+    pub fn line_bounds(&self) -> &[PdfRect] {
+        &self.line_bounds
+    }
+}
+
+impl std::ops::Deref for PageGlyphs {
+    type Target = [Glyph];
+
+    fn deref(&self) -> &[Glyph] {
+        &self.glyphs
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -456,7 +496,9 @@ pub fn click_glyph_range(glyphs: &[Glyph], index: usize, whole_word: bool) -> Op
 }
 
 /// Merge selected glyphs into one quad per line so highlights read as a marker stroke.
-pub fn highlight_quads(glyphs: &[Glyph], a: usize, b: usize) -> Vec<PdfRect> {
+pub fn highlight_quads(page: &PageGlyphs, a: usize, b: usize) -> Vec<PdfRect> {
+    let glyphs: &[Glyph] = page;
+    let table = page.line_bounds();
     if glyphs.is_empty() || a >= glyphs.len() || b >= glyphs.len() {
         return Vec::new();
     }
@@ -467,14 +509,16 @@ pub fn highlight_quads(glyphs: &[Glyph], a: usize, b: usize) -> Vec<PdfRect> {
         let line = glyphs[i].line;
         let mut x0 = glyphs[i].bounds.x0;
         let mut x1 = glyphs[i].bounds.x1;
-        let mut y0 = glyphs[i].line_bounds.y0;
-        let mut y1 = glyphs[i].line_bounds.y1;
+        let lb = glyphs[i].line_bounds(table);
+        let mut y0 = lb.y0;
+        let mut y1 = lb.y1;
         i += 1;
         while i <= hi && glyphs[i].line == line {
             x0 = x0.min(glyphs[i].bounds.x0);
             x1 = x1.max(glyphs[i].bounds.x1);
-            y0 = y0.min(glyphs[i].line_bounds.y0);
-            y1 = y1.max(glyphs[i].line_bounds.y1);
+            let lb = glyphs[i].line_bounds(table);
+            y0 = y0.min(lb.y0);
+            y1 = y1.max(lb.y1);
             i += 1;
         }
         quads.push(PdfRect::new(x0, y0, x1, y1));
@@ -578,20 +622,40 @@ mod tests {
         Glyph {
             ch,
             bounds: PdfRect::new(x, 10.0, x + 6.0, 20.0),
-            line_bounds: PdfRect::new(0.0, 8.0, 200.0, 22.0),
             line,
             word,
         }
     }
 
+    fn page_glyphs(glyphs: Vec<Glyph>) -> PageGlyphs {
+        let mut line_bounds = Vec::new();
+        for g in &glyphs {
+            let idx = g.line as usize;
+            if line_bounds.len() <= idx {
+                line_bounds.resize(idx + 1, PdfRect::new(0.0, 8.0, 200.0, 22.0));
+            }
+            line_bounds[idx] = PdfRect::new(0.0, 8.0, 200.0, 22.0);
+        }
+        PageGlyphs::new(glyphs, line_bounds)
+    }
+
+    #[test]
+    fn glyph_is_about_28_bytes() {
+        assert!(
+            std::mem::size_of::<Glyph>() <= 32,
+            "Glyph grew to {} bytes",
+            std::mem::size_of::<Glyph>()
+        );
+    }
+
     #[test]
     fn highlights_merge_into_one_quad_per_line() {
-        let glyphs = vec![
+        let glyphs = page_glyphs(vec![
             glyph('a', 0.0, 0, 1),
             glyph('b', 6.0, 0, 1),
             glyph('c', 14.0, 0, 2),
             glyph('d', 0.0, 1, 3),
-        ];
+        ]);
         let quads = highlight_quads(&glyphs, 0, 3);
         assert_eq!(quads.len(), 2);
         assert!((quads[0].x0 - 0.0).abs() < f32::EPSILON);

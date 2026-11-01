@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use crate::app::TileKey;
 
-use crate::annot::{Annotation, Glyph};
+use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
 
 use super::engine::{
@@ -110,7 +110,7 @@ pub enum PdfReply {
     Glyphs {
         gen: u64,
         page: usize,
-        glyphs: Vec<Glyph>,
+        glyphs: PageGlyphs,
     },
     Crop {
         gen: u64,

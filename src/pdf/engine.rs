@@ -14,7 +14,8 @@ use mupdf::{
 };
 
 use crate::annot::{
-    AnnotKind, Annotation, ForeignKind, Glyph, MarkupStyle, ShapeKind, HIGHLIGHT_OPACITY,
+    AnnotKind, Annotation, ForeignKind, Glyph, MarkupStyle, PageGlyphs, ShapeKind,
+    HIGHLIGHT_OPACITY,
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use egui::Color32;
@@ -163,7 +164,14 @@ impl DocumentEngine {
         &self.outline
     }
 
-    pub fn glyphs(&self, page: usize) -> Result<Vec<Glyph>, String> {
+    pub fn glyphs(&self, page: usize) -> Result<PageGlyphs, String> {
+        // Prefer a cached display list so we do not load the page again.
+        if let Some(list) = self.lists.get(&page) {
+            let text = list
+                .to_text_page(TextPageFlags::ACCURATE_BBOXES)
+                .map_err(show)?;
+            return Ok(glyphs_from_structured(&text.structured()));
+        }
         let pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
         let text = pdf_page
             .to_text_page(TextPageFlags::ACCURATE_BBOXES)
@@ -731,8 +739,9 @@ fn from_rect(rect: Rect) -> PdfRect {
     PdfRect::new(rect.x0, rect.y0, rect.x1, rect.y1)
 }
 
-fn glyphs_from_structured(text: &StructuredText) -> Vec<Glyph> {
+fn glyphs_from_structured(text: &StructuredText) -> PageGlyphs {
     let mut glyphs = Vec::new();
+    let mut line_bounds = Vec::new();
     let mut line_id = 0u32;
     let mut word_id = 0u32;
     for block in &text.blocks {
@@ -740,7 +749,7 @@ fn glyphs_from_structured(text: &StructuredText) -> Vec<Glyph> {
             continue;
         };
         for line in lines {
-            let line_bounds = from_rect(line.bounds);
+            line_bounds.push(from_rect(line.bounds));
             let mut in_word = false;
             for ch in &line.chars {
                 if ch.ch.is_whitespace() {
@@ -754,7 +763,6 @@ fn glyphs_from_structured(text: &StructuredText) -> Vec<Glyph> {
                 glyphs.push(Glyph {
                     ch: ch.ch,
                     bounds: quad_bounds(ch.quad.clone()),
-                    line_bounds,
                     line: line_id,
                     word: word_id,
                 });
@@ -762,7 +770,7 @@ fn glyphs_from_structured(text: &StructuredText) -> Vec<Glyph> {
             line_id = line_id.saturating_add(1);
         }
     }
-    glyphs
+    PageGlyphs::new(glyphs, line_bounds)
 }
 
 fn to_point(point: PdfPoint) -> Point {

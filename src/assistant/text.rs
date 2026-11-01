@@ -64,7 +64,6 @@ mod tests {
         Glyph {
             ch,
             bounds: PdfRect::new(x, 0.0, x + 5.0, 10.0),
-            line_bounds: PdfRect::new(0.0, 0.0, 100.0, 10.0),
             line,
             word,
         }

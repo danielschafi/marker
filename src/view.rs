@@ -489,7 +489,7 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
                 current: point,
             });
         }
-        Tool::Text | Tool::Math => {
+        Tool::Text | Tool::Note | Tool::Math => {
             if let Some((id, handle)) =
                 resize_target(&tab.doc, tab.primary_selected(), tool, pos, view)
             {
@@ -510,6 +510,7 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
             if let Some(id) = tab.doc.session.hit_test(page, point, 4.0 / tab.doc.scale) {
                 let matches_tool = tab.doc.session.get(id).is_some_and(|annot| match tool {
                     Tool::Text => matches!(annot.kind, AnnotKind::Text { .. }),
+                    Tool::Note => matches!(annot.kind, AnnotKind::Note { .. }),
                     Tool::Math => matches!(annot.kind, AnnotKind::Math { .. }),
                     _ => false,
                 });
@@ -531,10 +532,10 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
                 page,
                 origin: point,
                 current: point,
-                kind: if tool == Tool::Math {
-                    CreateKind::Math
-                } else {
-                    CreateKind::Text
+                kind: match tool {
+                    Tool::Math => CreateKind::Math,
+                    Tool::Note => CreateKind::Note,
+                    _ => CreateKind::Text,
                 },
             });
         }
@@ -1147,6 +1148,31 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 place_box(app, page, point, None, CreateKind::Text);
             }
         }
+        Tool::Note => {
+            let note = hit.filter(|id| {
+                app.tab().is_some_and(|tab| {
+                    matches!(
+                        tab.doc.session.get(*id).map(|annot| &annot.kind),
+                        Some(AnnotKind::Note { .. })
+                    )
+                })
+            });
+            if let Some(id) = note {
+                app.begin_edit_undo(id);
+                if let Some(tab) = app.tab_mut() {
+                    tab.select_only(id);
+                    tab.assistant.learning = None;
+                    tab.editing = Some(id);
+                    tab.focus_edit = true;
+                }
+            } else {
+                if hit.is_none() {
+                    app.clear_page_selection();
+                }
+                // Click places a default-size note; notes are not drag-to-size.
+                place_box(app, page, point, None, CreateKind::Note);
+            }
+        }
         Tool::Math => {
             let math = hit.filter(|id| {
                 app.tab().is_some_and(|tab| {
@@ -1502,9 +1528,15 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             current,
             kind,
         } => {
-            let rect = PdfRect::from_points(origin, current);
-            let sized = rect.width() >= 12.0 && rect.height() >= 8.0;
-            place_box(app, page, origin, sized.then_some(rect), kind);
+            // Notes are click-placed at a fixed icon size; ignore drag extent.
+            let rect = if kind == CreateKind::Note {
+                None
+            } else {
+                let rect = PdfRect::from_points(origin, current);
+                let sized = rect.width() >= 12.0 && rect.height() >= 8.0;
+                sized.then_some(rect)
+            };
+            place_box(app, page, origin, rect, kind);
         }
         Drag::Move {
             ids,
@@ -1595,17 +1627,26 @@ fn place_box_tab(
 ) {
     let size = settings.text_size;
     let color = settings.text_color;
-    let rect = rect.unwrap_or_else(|| match kind {
-        CreateKind::Text => PdfRect::new(
+    let rect = match kind {
+        // Sticky notes always use the icon size; drag extent is ignored.
+        CreateKind::Note => PdfRect::new(
             point.x,
             point.y,
-            point.x + 200.0,
-            point.y + size * 1.8 + 4.0,
+            point.x + crate::annot::NOTE_SIZE,
+            point.y + crate::annot::NOTE_SIZE,
         ),
-        CreateKind::Math => {
+        CreateKind::Text => rect.unwrap_or_else(|| {
+            PdfRect::new(
+                point.x,
+                point.y,
+                point.x + 200.0,
+                point.y + size * 1.8 + 4.0,
+            )
+        }),
+        CreateKind::Math => rect.unwrap_or_else(|| {
             PdfRect::new(point.x, point.y, point.x + 88.0, point.y + size * 1.6 + 8.0)
-        }
-    });
+        }),
+    };
     let id = match kind {
         CreateKind::Text => tab.doc.session.insert(
             page,
@@ -1613,6 +1654,14 @@ fn place_box_tab(
                 rect,
                 content: String::new(),
                 size,
+                color,
+            },
+        ),
+        CreateKind::Note => tab.doc.session.insert(
+            page,
+            AnnotKind::Note {
+                rect,
+                content: String::new(),
                 color,
             },
         ),
@@ -1666,7 +1715,14 @@ fn resize_target(
                 | AnnotKind::Image { .. }
                 | AnnotKind::Shape { .. }
         ),
-        _ => false,
+        Tool::Note
+        | Tool::Highlight
+        | Tool::Underline
+        | Tool::StrikeOut
+        | Tool::Squiggly
+        | Tool::Rect
+        | Tool::Ellipse
+        | Tool::Line => false,
     };
     let radius = 16.0;
     if let Some(id) = selected {

@@ -1787,6 +1787,17 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 color,
             );
         }
+        Tool::Note => {
+            let note = Rect::from_center_size(rect.center(), Vec2::splat(11.0));
+            painter.rect_filled(note, 2.0, color.gamma_multiply(0.85));
+            painter.text(
+                note.center(),
+                Align2::CENTER_CENTER,
+                "✎",
+                FontId::new(9.0, FontFamily::Proportional),
+                Color32::from_rgb(40, 40, 40),
+            );
+        }
         Tool::Rect => {
             painter.rect_stroke(rect.shrink(1.5), 2.0, stroke, StrokeKind::Inside);
         }
@@ -2566,6 +2577,7 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
         Tool::StrikeOut => "Strikeout tool",
         Tool::Squiggly => "Squiggly tool",
         Tool::Text => "Text tool",
+        Tool::Note => "Note tool",
         Tool::Rect => "Rectangle tool",
         Tool::Ellipse => "Ellipse tool",
         Tool::Line => "Line tool",
@@ -2576,9 +2588,13 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
 pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
     match tool {
         Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => &HIGHLIGHT_COLORS,
-        Tool::Select | Tool::Text | Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Math => {
-            &INK_COLORS
-        }
+        Tool::Select
+        | Tool::Text
+        | Tool::Note
+        | Tool::Rect
+        | Tool::Ellipse
+        | Tool::Line
+        | Tool::Math => &INK_COLORS,
     }
 }
 

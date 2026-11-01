@@ -7,6 +7,9 @@ use crate::geom::{dist_to_segment, PdfPoint, PdfRect, Rgb};
 /// readable in both places.
 pub const HIGHLIGHT_OPACITY: f32 = 0.45;
 
+/// Default sticky-note icon size in PDF points (square).
+pub const NOTE_SIZE: f32 = 24.0;
+
 /// One selectable glyph. Highlights snap to these instead of whole words.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Glyph {

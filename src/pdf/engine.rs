@@ -1506,6 +1506,9 @@ fn apply_shape(
     annot.set_border_width(width.max(0.25))?;
     if let Some(fill) = fill {
         annot.set_interior_color(rgb_color(fill))?;
+    } else {
+        // Drop /IC so toggling fill off does not leave a stale interior color.
+        let _ = annot.object().dict_delete("IC");
     }
     match kind {
         ShapeKind::Line => annot.set_line(to_point(start), to_point(end))?,
@@ -2152,6 +2155,139 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn empty_note_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-note-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let color = Rgb::new(255, 196, 0);
+        let rect = PdfRect::new(120.0, 90.0, 120.0 + 24.0, 90.0 + 24.0);
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Note {
+                rect,
+                content: String::new(),
+                color,
+            },
+        );
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+
+        let again = DocumentEngine::open(&path).unwrap();
+        let notes: Vec<_> = again
+            .annotations
+            .iter()
+            .filter_map(|annot| match &annot.kind {
+                AnnotKind::Note {
+                    content,
+                    color: c,
+                    rect: r,
+                } => Some((content.clone(), *c, *r)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].0, "");
+        assert_eq!(notes[0].1, color);
+        assert!((notes[0].2.x0 - rect.x0).abs() < 0.5);
+        assert!((notes[0].2.y0 - rect.y0).abs() < 0.5);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shape_fill_roundtrip() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-fill-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+
+        let loaded = DocumentEngine::open(&path).unwrap();
+        let mut engine = loaded.engine;
+        let stroke = Rgb::new(28, 78, 186);
+        let fill = Rgb::new(28, 78, 186);
+        let mut session = crate::annot::Session::from_imported(loaded.annotations);
+        session.insert(
+            0,
+            AnnotKind::Shape {
+                kind: ShapeKind::Rect,
+                rect: PdfRect::new(72.0, 200.0, 160.0, 260.0),
+                start: PdfPoint::new(72.0, 200.0),
+                end: PdfPoint::new(160.0, 260.0),
+                stroke,
+                fill: Some(fill),
+                width: 1.5,
+            },
+        );
+        session.insert(
+            0,
+            AnnotKind::Shape {
+                kind: ShapeKind::Rect,
+                rect: PdfRect::new(180.0, 200.0, 268.0, 260.0),
+                start: PdfPoint::new(180.0, 200.0),
+                end: PdfPoint::new(268.0, 260.0),
+                stroke,
+                fill: None,
+                width: 1.5,
+            },
+        );
+        engine
+            .save(&SaveSnapshot {
+                upserts: session.annotations.clone(),
+                deletes: Vec::new(),
+                math_pdfs: HashMap::new(),
+                inline_math: Vec::new(),
+                rich_text_parents: Vec::new(),
+            })
+            .unwrap();
+
+        let again = DocumentEngine::open(&path).unwrap();
+        let mut fills: Vec<Option<Rgb>> = again
+            .annotations
+            .iter()
+            .filter_map(|annot| match &annot.kind {
+                AnnotKind::Shape {
+                    kind: ShapeKind::Rect,
+                    fill,
+                    ..
+                } => Some(*fill),
+                _ => None,
+            })
+            .collect();
+        fills.sort_by_key(|f| f.is_some());
+        assert_eq!(fills, [None, Some(fill)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+
+
+
 
     fn count_yellow(pixels: &[u8]) -> usize {
         pixels

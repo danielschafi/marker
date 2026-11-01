@@ -461,6 +461,7 @@ pub(crate) enum Tool {
     StrikeOut,
     Squiggly,
     Text,
+    Note,
     Rect,
     Ellipse,
     Line,
@@ -468,13 +469,14 @@ pub(crate) enum Tool {
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 10] = [
+    pub(crate) const ALL: [Tool; 11] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
         Tool::StrikeOut,
         Tool::Squiggly,
         Tool::Text,
+        Tool::Note,
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
@@ -482,7 +484,7 @@ impl Tool {
     ];
 
     /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
-    /// Underline is `U`, strikeout is `X`, squiggly is `W`.
+    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`.
     pub(crate) fn shortcut(self) -> Key {
         match self {
             Tool::Select => Key::S,
@@ -491,6 +493,7 @@ impl Tool {
             Tool::StrikeOut => Key::X,
             Tool::Squiggly => Key::W,
             Tool::Text => Key::T,
+            Tool::Note => Key::N,
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
             Tool::Line => Key::I,
@@ -506,6 +509,7 @@ impl Tool {
             Tool::StrikeOut => "Strike through text",
             Tool::Squiggly => "Squiggly underline",
             Tool::Text => "Write on the page",
+            Tool::Note => "Sticky note",
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
@@ -522,6 +526,7 @@ impl Tool {
             Tool::Select
             | Tool::Highlight
             | Tool::Text
+            | Tool::Note
             | Tool::Rect
             | Tool::Ellipse
             | Tool::Line
@@ -548,6 +553,7 @@ enum ColorTarget {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CreateKind {
     Text,
+    Note,
     Math,
 }
 
@@ -1904,6 +1910,11 @@ pub(crate) const SHORTCUTS: &[ShortcutEntry] = &[
         section: ShortcutSection::Tools,
         keys: "T",
         action: "Text",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "N",
+        action: "Note",
     },
     ShortcutEntry {
         section: ShortcutSection::Tools,
@@ -4770,6 +4781,7 @@ impl MarkerApp {
     /// Compact icon row for annotation color/size. Returns true if Delete was chosen.
     pub(crate) fn style_bar_contents(&mut self, ui: &mut egui::Ui, show_delete: bool) -> bool {
         let (show_hl, show_ink, show_size, show_stroke) = self.selection_style_flags();
+        let show_fill = self.selected_has_fillable_shape();
 
         ui.spacing_mut().item_spacing = egui::vec2(3.0, 0.0);
         // Shared multi-select options: highlight color and/or text/ink color (#28).
@@ -4835,6 +4847,20 @@ impl MarkerApp {
                 width = (width + 0.25).min(12.0);
                 self.seal_then_arm();
                 self.apply_stroke(width);
+                self.seal_undo();
+            }
+        }
+        if show_fill {
+            let filled = self.selected_shape_filled();
+            let tip = if filled {
+                "Remove shape fill"
+            } else {
+                "Fill shape"
+            };
+            let label = if filled { "▣" } else { "□" };
+            if style_step(ui, label, tip).clicked() {
+                self.seal_then_arm();
+                self.apply_shape_fill(!filled);
                 self.seal_undo();
             }
         }
@@ -4910,7 +4936,7 @@ impl MarkerApp {
                 self.settings.highlight_color
             }
             Tool::Rect | Tool::Ellipse | Tool::Line => self.settings.shape_color,
-            Tool::Select | Tool::Text | Tool::Math => self.settings.text_color,
+            Tool::Select | Tool::Text | Tool::Note | Tool::Math => self.settings.text_color,
         }
     }
 
@@ -5013,9 +5039,12 @@ impl MarkerApp {
                 Some(AnnotKind::Highlight { .. } | AnnotKind::Markup { .. }) => {
                     highlight = true;
                 }
-                Some(AnnotKind::Text { .. } | AnnotKind::Math { .. } | AnnotKind::Note { .. }) => {
+                Some(AnnotKind::Text { .. } | AnnotKind::Math { .. }) => {
                     ink = true;
                     size = true;
+                }
+                Some(AnnotKind::Note { .. }) => {
+                    ink = true;
                 }
                 Some(AnnotKind::Shape { .. }) => {
                     ink = true;
@@ -5062,8 +5091,11 @@ impl MarkerApp {
                                 math_ids.push(id);
                             }
                         }
-                        (AnnotKind::Shape { stroke, .. }, ColorTarget::Ink) => {
+                        (AnnotKind::Shape { stroke, fill, .. }, ColorTarget::Ink) => {
                             *stroke = color;
+                            if fill.is_some() {
+                                *fill = Some(color);
+                            }
                             touched = Some(2);
                         }
                         _ => {}
@@ -5165,6 +5197,77 @@ impl MarkerApp {
         }
         self.settings.shape_width = width;
         self.settings.save();
+    }
+
+    fn selected_has_fillable_shape(&self) -> bool {
+        self.tab().is_some_and(|tab| {
+            tab.selected.iter().any(|id| {
+                matches!(
+                    tab.doc.session.get(*id).map(|a| &a.kind),
+                    Some(AnnotKind::Shape {
+                        kind: ShapeKind::Rect | ShapeKind::Ellipse,
+                        ..
+                    })
+                )
+            })
+        })
+    }
+
+    /// True when every selected fillable shape already has a fill.
+    fn selected_shape_filled(&self) -> bool {
+        let Some(tab) = self.tab() else {
+            return false;
+        };
+        let mut any = false;
+        for id in &tab.selected {
+            if let Some(AnnotKind::Shape {
+                kind: ShapeKind::Rect | ShapeKind::Ellipse,
+                fill,
+                ..
+            }) = tab.doc.session.get(*id).map(|a| &a.kind)
+            {
+                any = true;
+                if fill.is_none() {
+                    return false;
+                }
+            }
+        }
+        any
+    }
+
+    fn apply_shape_fill(&mut self, filled: bool) {
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
+        if let Some(tab) = self.tab_mut() {
+            for id in ids {
+                let mut changed = false;
+                if let Some(annot) = tab.doc.session.get_mut(id) {
+                    if let AnnotKind::Shape {
+                        kind: ShapeKind::Rect | ShapeKind::Ellipse,
+                        stroke,
+                        fill,
+                        ..
+                    } = &mut annot.kind
+                    {
+                        let next = filled.then_some(*stroke);
+                        if *fill != next {
+                            *fill = next;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    tab.doc.session.mark_dirty(id);
+                    if !matches!(tab.save, SaveState::Saving) {
+                        tab.save = SaveState::Dirty {
+                            since: Instant::now(),
+                        };
+                    }
+                }
+            }
+        }
     }
 
     fn set_title(&mut self, ctx: &egui::Context) {
@@ -5633,5 +5736,6 @@ mod shortcut_tests {
         assert!(SHORTCUTS.iter().any(|row| row.keys == "U"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "X"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "W"));
+        assert!(SHORTCUTS.iter().any(|row| row.keys == "N"));
     }
 }

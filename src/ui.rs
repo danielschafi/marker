@@ -9,7 +9,8 @@ use egui::{
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{
-    AnnotFilterKind, MarkerApp, SaveState, SplitDropZone, SplitState, Tab, TabListState, Tool,
+    AnnotFilterKind, MarkerApp, SaveState, ShortcutSection, SplitDropZone, SplitState, Tab,
+    TabListState, Tool, SHORTCUTS,
 };
 use crate::assistant::{
     assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
@@ -41,6 +42,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     paint_tab_list(app, ctx, show_chrome);
     // Menu must paint even in zen (tab list still opens there).
     paint_tab_menu(app, ctx);
+    cheatsheet_window(app, ctx);
 }
 
 const TAB_BAR_H: f32 = 32.0;
@@ -908,6 +910,60 @@ fn cluster_drag(ui: &mut egui::Ui, drag: DragValue<'_>, width: f32) -> egui::Res
         ui.add_sized(Vec2::new(width, CONTROL_H), drag)
     })
     .inner
+}
+
+fn cheatsheet_window(app: &mut MarkerApp, ctx: &egui::Context) {
+    if !app.cheatsheet_open {
+        return;
+    }
+    let colors = p(ctx);
+    let mut open = app.cheatsheet_open;
+    egui::Window::new("Keyboard shortcuts")
+        .id(Id::new("marker-cheatsheet"))
+        .open(&mut open)
+        .resizable(true)
+        .default_size(Vec2::new(420.0, 520.0))
+        .min_width(320.0)
+        .min_height(240.0)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome_raised)
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
+                .corner_radius(8.0)
+                .inner_margin(12.0),
+        )
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new("Press ? again or Esc to close")
+                    .weak()
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+            ScrollArea::vertical()
+                .id_salt("cheatsheet-scroll")
+                .show(ui, |ui| {
+                    for section in ShortcutSection::ALL {
+                        ui.label(RichText::new(section.label()).strong().size(13.0));
+                        ui.add_space(4.0);
+                        for row in SHORTCUTS.iter().filter(|row| row.section == section) {
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    Vec2::new(168.0, 18.0),
+                                    egui::Label::new(
+                                        RichText::new(row.keys)
+                                            .monospace()
+                                            .size(12.0)
+                                            .color(colors.accent),
+                                    ),
+                                );
+                                ui.label(RichText::new(row.action).size(12.0));
+                            });
+                        }
+                        ui.add_space(10.0);
+                    }
+                });
+        });
+    app.cheatsheet_open = open;
 }
 
 fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
@@ -2255,7 +2311,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                     ui.add_space(12.0);
                     ui.label(
                         RichText::new(
-                            "Ctrl+O  ·  Ctrl+F search  ·  Ctrl+Shift+V paste image  ·  pinch zoom",
+                            "Ctrl+O  ·  Ctrl+F search  ·  Ctrl+Shift+V paste image  ·  ? shortcuts",
                         )
                         .weak()
                         .size(12.0),

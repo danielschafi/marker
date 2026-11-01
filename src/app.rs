@@ -60,6 +60,8 @@ pub(crate) struct MarkerApp {
     pub(crate) capture: CaptureMode,
     /// Shared cache for assistant Markdown rendering (issue #26).
     pub(crate) assistant_md_cache: CommonMarkCache,
+    /// `?` shortcut cheat sheet window.
+    pub(crate) cheatsheet_open: bool,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
@@ -677,6 +679,7 @@ impl MarkerApp {
             assistant_open: false,
             capture: CaptureMode::None,
             assistant_md_cache: CommonMarkCache::default(),
+            cheatsheet_open: false,
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(egui_ctx.clone(), Arc::clone(&tile_wanted)),
@@ -1547,6 +1550,60 @@ impl MarkerApp {
         }
     }
 
+    /// Page-sized scroll used by PageDown/PageUp and Space / Shift+Space.
+    fn page_scroll(&mut self, down: bool) {
+        let height = self.view_rect.height();
+        let view = self.view_rect;
+        if let Some(doc) = self.doc_mut() {
+            let delta = height * 0.9;
+            if down {
+                doc.scroll_y += delta;
+            } else {
+                doc.scroll_y -= delta;
+            }
+            doc.clamp_scroll(view);
+        }
+    }
+
+    fn jump_doc_start(&mut self) {
+        self.queue_jump(0, Some(0.0));
+    }
+
+    fn jump_doc_end(&mut self) {
+        let last = self
+            .doc()
+            .map(|doc| doc.pages.len().saturating_sub(1))
+            .unwrap_or(0);
+        self.queue_jump(last, Some(0.0));
+    }
+
+    /// Nudge selected annotations in PDF space (screen pixels ÷ scale).
+    fn nudge_selected(&mut self, dx_screen: f32, dy_screen: f32) {
+        let scale = self.doc().map(|doc| doc.scale).unwrap_or(1.0).max(0.01);
+        let dx = dx_screen / scale;
+        let dy = dy_screen / scale;
+        let ids = self
+            .tab()
+            .map(|tab| tab.selected.clone())
+            .unwrap_or_default();
+        if ids.is_empty() {
+            return;
+        }
+        self.seal_then_arm();
+        if let Some(tab) = self.tab_mut() {
+            for id in &ids {
+                if let Some(annot) = tab.doc.session.get_mut(*id) {
+                    annot.kind.translate(dx, dy);
+                }
+            }
+        }
+        self.seal_undo();
+    }
+
+    pub(crate) fn toggle_cheatsheet(&mut self) {
+        self.cheatsheet_open = !self.cheatsheet_open;
+    }
+
     /// Vim-style navigation. Returns true when the key should not also switch tools.
     fn handle_vim(&mut self, input: &egui::InputState) -> bool {
         if self.doc().is_none() {
@@ -1608,7 +1665,8 @@ impl MarkerApp {
             self.nudge(0.0, -step * n);
             return true;
         }
-        // `H` is Highlight; vim horizontal pan uses `L` for right only (left: Shift+L via count).
+        // `H` is Highlight; vim `l` pans right. Shift+L pans left (stand-in for vim `h`).
+        // Directions match the old H/L pair: L → +scroll_x (right), Shift+L → −scroll_x (left).
         if input.key_pressed(Key::L) && !input.modifiers.command {
             let n = self.take_count();
             self.vim_g = false;
@@ -1635,6 +1693,10 @@ impl MarkerApp {
         let mut seal = false;
         if self.capture != CaptureMode::None {
             self.cancel_capture();
+            return;
+        }
+        if self.cheatsheet_open {
+            self.cheatsheet_open = false;
             return;
         }
         if self.tab_list.take().is_some() {
@@ -1733,6 +1795,283 @@ fn vim_digit(input: &egui::InputState) -> Option<u32> {
         .find(|(key, _)| input.key_pressed(*key))
         .map(|(_, digit)| digit)
 }
+
+/// Cheat-sheet section. Order matches the `?` window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ShortcutSection {
+    Tools,
+    Navigate,
+    Edit,
+    View,
+    Assistant,
+}
+
+impl ShortcutSection {
+    pub(crate) const ALL: [ShortcutSection; 5] = [
+        ShortcutSection::Tools,
+        ShortcutSection::Navigate,
+        ShortcutSection::Edit,
+        ShortcutSection::View,
+        ShortcutSection::Assistant,
+    ];
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Tools => "Tools",
+            Self::Navigate => "Navigate",
+            Self::Edit => "Edit",
+            Self::View => "View",
+            Self::Assistant => "Assistant",
+        }
+    }
+}
+
+/// One row in the `?` cheat sheet. Source of truth until RF9b's keymap table.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ShortcutEntry {
+    pub section: ShortcutSection,
+    pub keys: &'static str,
+    pub action: &'static str,
+}
+
+/// Every chord `handle_keys` / vim / tools already handle, including FT5 marks.
+pub(crate) const SHORTCUTS: &[ShortcutEntry] = &[
+    // Tools
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "S",
+        action: "Select",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "H",
+        action: "Highlight",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "U",
+        action: "Underline",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "X",
+        action: "Strike out",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "W",
+        action: "Squiggly underline",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "T",
+        action: "Text",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "R",
+        action: "Rectangle",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "E",
+        action: "Ellipse",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "I",
+        action: "Line",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Tools,
+        keys: "M",
+        action: "Math",
+    },
+    // Navigate
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "J / K",
+        action: "Pan down / up",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "L / Shift+L",
+        action: "Pan right / left",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "← → ↑ ↓",
+        action: "Scroll, or nudge selection",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Home / End",
+        action: "First / last page",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Space / Shift+Space",
+        action: "Page down / up",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "PageDown / PageUp",
+        action: "Page down / up",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+D / Ctrl+U",
+        action: "Half-page down / up",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "gg / G",
+        action: "First / last page",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+G",
+        action: "Jump to page",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+Tab",
+        action: "Next tab",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+Shift+Tab",
+        action: "Previous tab",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+\\",
+        action: "Split side-by-side",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+Shift+\\",
+        action: "Split stacked",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Navigate,
+        keys: "Ctrl+Alt+\\",
+        action: "Focus other pane",
+    },
+    // Edit
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+Z",
+        action: "Undo",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+Y / Ctrl+Shift+Z",
+        action: "Redo",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Delete / Backspace",
+        action: "Delete selection",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+C",
+        action: "Copy selection",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+Shift+V",
+        action: "Paste image",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+S",
+        action: "Save",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+Shift+Enter",
+        action: "Insert blank page",
+    },
+    // View
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+O",
+        action: "Open PDF",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+W",
+        action: "Close tab",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+F / /",
+        action: "Search",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "N / Shift+N",
+        action: "Next / previous search hit",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+= / Ctrl+-",
+        action: "Zoom in / out",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+0",
+        action: "Fit width, then height",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Ctrl+Shift+B",
+        action: "Toggle tools strip",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "F11",
+        action: "Zen mode",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "?",
+        action: "Shortcut cheat sheet",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::View,
+        keys: "Esc",
+        action: "Dismiss / leave edit",
+    },
+    // Assistant
+    ShortcutEntry {
+        section: ShortcutSection::Assistant,
+        keys: "Ctrl+Alt+I",
+        action: "Toggle assistant",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Assistant,
+        keys: "Ctrl+Shift+A",
+        action: "Attach / select text",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Assistant,
+        keys: "Ctrl+Alt+S",
+        action: "Capture region",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Assistant,
+        keys: "Ctrl+Alt+E",
+        action: "Explain selection",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Assistant,
+        keys: "Ctrl+.",
+        action: "Stop assistant",
+    },
+];
 
 impl eframe::App for MarkerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -3354,8 +3693,21 @@ impl MarkerApp {
         let mut zoom = None;
         let mut search_delta = None;
         let mut delete_selected = false;
+        let mut page_down = false;
+        let mut page_up = false;
+        let mut jump_start = false;
+        let mut jump_end = false;
+        let mut toggle_help = false;
+        let mut arrow_dx = 0.0_f32;
+        let mut arrow_dy = 0.0_f32;
         let vim = ctx.input(|input| self.handle_vim(input));
         let mut escaped = false;
+        let has_selection = self
+            .tab()
+            .is_some_and(|tab| !tab.selected.is_empty());
+        // Style bar owns Left/Right for color cycling when a selection is active.
+        let style_bar_open = self.tab().is_some_and(|tab| tab.style_bar.is_some());
+        let step = (self.view_rect.height() * 0.045).clamp(28.0, 72.0);
         ctx.input(|input| {
             if input.key_pressed(Key::Escape) {
                 escaped = true;
@@ -3372,7 +3724,11 @@ impl MarkerApp {
                     self.redo();
                 }
             }
-            if input.key_pressed(Key::Slash) {
+            if input.key_pressed(Key::Questionmark)
+                || (input.key_pressed(Key::Slash) && input.modifiers.shift)
+            {
+                toggle_help = true;
+            } else if input.key_pressed(Key::Slash) {
                 self.open_search();
             }
             if !vim && !input.modifiers.command {
@@ -3411,19 +3767,37 @@ impl MarkerApp {
                 fit = true;
             }
             if input.key_pressed(Key::PageDown) {
-                let height = self.view_rect.height();
-                let view = self.view_rect;
-                if let Some(doc) = self.doc_mut() {
-                    doc.scroll_y += height * 0.9;
-                    doc.clamp_scroll(view);
-                }
+                page_down = true;
             }
             if input.key_pressed(Key::PageUp) {
-                let height = self.view_rect.height();
-                let view = self.view_rect;
-                if let Some(doc) = self.doc_mut() {
-                    doc.scroll_y -= height * 0.9;
-                    doc.clamp_scroll(view);
+                page_up = true;
+            }
+            if !editing && !input.modifiers.command {
+                if input.key_pressed(Key::Space) {
+                    if input.modifiers.shift {
+                        page_up = true;
+                    } else {
+                        page_down = true;
+                    }
+                }
+                if input.key_pressed(Key::Home) {
+                    jump_start = true;
+                }
+                if input.key_pressed(Key::End) {
+                    jump_end = true;
+                }
+                let allow_horizontal = !has_selection || !style_bar_open;
+                if input.key_pressed(Key::ArrowDown) {
+                    arrow_dy += step;
+                }
+                if input.key_pressed(Key::ArrowUp) {
+                    arrow_dy -= step;
+                }
+                if allow_horizontal && input.key_pressed(Key::ArrowRight) {
+                    arrow_dx += step;
+                }
+                if allow_horizontal && input.key_pressed(Key::ArrowLeft) {
+                    arrow_dx -= step;
                 }
             }
         });
@@ -3434,6 +3808,9 @@ impl MarkerApp {
                 self.leave_typing();
                 self.sync_zen_viewport(ctx);
             }
+        }
+        if toggle_help {
+            self.toggle_cheatsheet();
         }
         if delete_selected {
             self.delete_selected();
@@ -3448,6 +3825,25 @@ impl MarkerApp {
         }
         if let Some(factor) = zoom {
             self.zoom_by(factor);
+        }
+        if page_down {
+            self.page_scroll(true);
+        }
+        if page_up {
+            self.page_scroll(false);
+        }
+        if jump_start {
+            self.jump_doc_start();
+        }
+        if jump_end {
+            self.jump_doc_end();
+        }
+        if (arrow_dx != 0.0 || arrow_dy != 0.0) && !editing {
+            if has_selection {
+                self.nudge_selected(arrow_dx, arrow_dy);
+            } else {
+                self.nudge(arrow_dx, arrow_dy);
+            }
         }
     }
 
@@ -5042,4 +5438,25 @@ fn style_step(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
         egui::Color32::from_rgb(232, 232, 236),
     );
     response.on_hover_text(tip)
+}
+
+#[cfg(test)]
+mod shortcut_tests {
+    use super::*;
+
+    #[test]
+    fn shortcuts_cover_every_section() {
+        for section in ShortcutSection::ALL {
+            assert!(
+                SHORTCUTS.iter().any(|row| row.section == section),
+                "missing shortcuts for {:?}",
+                section
+            );
+        }
+        assert!(SHORTCUTS.iter().any(|row| row.keys.contains('?')));
+        assert!(SHORTCUTS.iter().any(|row| row.keys.contains("Space")));
+        assert!(SHORTCUTS.iter().any(|row| row.keys == "U"));
+        assert!(SHORTCUTS.iter().any(|row| row.keys == "X"));
+        assert!(SHORTCUTS.iter().any(|row| row.keys == "W"));
+    }
 }

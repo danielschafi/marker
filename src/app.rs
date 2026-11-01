@@ -26,7 +26,7 @@ use crate::pdf::{
     InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot,
 };
 use crate::settings::Settings;
-use crate::ui::{self, color_dot, palette_for};
+use crate::ui::{self, color_dot, highlight_color_name, ink_color_name, palette_for};
 use crate::view::{self, viewport};
 
 pub(crate) struct MarkerApp {
@@ -62,6 +62,8 @@ pub(crate) struct MarkerApp {
     pub(crate) assistant_md_cache: CommonMarkCache,
     /// `?` shortcut cheat sheet window.
     pub(crate) cheatsheet_open: bool,
+    /// Named highlight preset editor (Colors chrome button).
+    pub(crate) preset_editor_open: bool,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
@@ -692,6 +694,7 @@ impl MarkerApp {
             capture: CaptureMode::None,
             assistant_md_cache: CommonMarkCache::default(),
             cheatsheet_open: false,
+            preset_editor_open: false,
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(egui_ctx.clone(), Arc::clone(&tile_wanted)),
@@ -1648,6 +1651,10 @@ impl MarkerApp {
         self.cheatsheet_open = !self.cheatsheet_open;
     }
 
+    pub(crate) fn toggle_preset_editor(&mut self) {
+        self.preset_editor_open = !self.preset_editor_open;
+    }
+
     /// Vim-style navigation. Returns true when the key should not also switch tools.
     fn handle_vim(&mut self, input: &egui::InputState) -> bool {
         if self.doc().is_none() {
@@ -1737,6 +1744,10 @@ impl MarkerApp {
         let mut seal = false;
         if self.capture != CaptureMode::None {
             self.cancel_capture();
+            return;
+        }
+        if self.preset_editor_open {
+            self.preset_editor_open = false;
             return;
         }
         if self.cheatsheet_open {
@@ -4229,25 +4240,19 @@ impl MarkerApp {
         let has_sel = self.tab().is_some_and(|tab| !tab.selected.is_empty());
         let (show_hl, show_ink, _, _) = self.selection_style_flags();
         // Select tool: palette follows the selection (highlight vs ink); images alone hide it.
-        let (colors, target) = if self.tool == Tool::Select && has_sel {
+        let target = if self.tool == Tool::Select && has_sel {
             if show_hl && !show_ink {
-                (
-                    &crate::geom::HIGHLIGHT_COLORS[..],
-                    ColorTarget::Highlights,
-                )
+                ColorTarget::Highlights
             } else if show_ink {
                 // Mixed or ink-only: toolbar shows ink / text color.
-                (&crate::geom::INK_COLORS[..], ColorTarget::Ink)
+                ColorTarget::Ink
             } else {
                 return;
             }
         } else if self.tool.is_text_mark() {
-            (
-                palette_for(self.tool),
-                ColorTarget::Highlights,
-            )
+            ColorTarget::Highlights
         } else {
-            (palette_for(self.tool), ColorTarget::Ink)
+            ColorTarget::Ink
         };
         let current = match target {
             ColorTarget::Highlights => self
@@ -4258,9 +4263,37 @@ impl MarkerApp {
                 .unwrap_or(self.active_color()),
         };
         let mut picked = None;
-        for color in colors {
-            if color_dot(ui, *color, *color == current) {
-                picked = Some(*color);
+        match target {
+            ColorTarget::Highlights => {
+                let presets = self.settings.highlight_presets.clone();
+                let mut matched = false;
+                for preset in &presets {
+                    let on = preset.rgb == current;
+                    matched |= on;
+                    if color_dot(ui, preset.rgb, on, &preset.name) {
+                        picked = Some(preset.rgb);
+                    }
+                }
+                if !matched {
+                    let name = self
+                        .settings
+                        .highlight_name_for(current)
+                        .unwrap_or("Custom");
+                    let _ = color_dot(ui, current, true, name);
+                }
+            }
+            ColorTarget::Ink => {
+                let mut matched = false;
+                for color in palette_for(Tool::Text) {
+                    let on = *color == current;
+                    matched |= on;
+                    if color_dot(ui, *color, on, ink_color_name(*color)) {
+                        picked = Some(*color);
+                    }
+                }
+                if !matched {
+                    let _ = color_dot(ui, current, true, "Custom");
+                }
             }
         }
         if let Some(color) = picked {
@@ -4788,23 +4821,18 @@ impl MarkerApp {
         // Arrow keys cycle only when a single palette is showing.
         let cycle_ok = show_hl ^ show_ink;
         if show_hl {
-            self.style_palette_row(
-                ui,
-                &crate::geom::HIGHLIGHT_COLORS,
-                ColorTarget::Highlights,
-                self.selected_highlight_color()
-                    .unwrap_or(self.settings.highlight_color),
-                cycle_ok,
-            );
+            let current = self
+                .selected_highlight_color()
+                .unwrap_or(self.settings.highlight_color);
+            let presets = self.settings.highlight_presets.clone();
+            self.style_highlight_palette_row(ui, &presets, current, cycle_ok);
         }
         if show_hl && show_ink {
             ui.separator();
         }
         if show_ink {
-            self.style_palette_row(
+            self.style_ink_palette_row(
                 ui,
-                &crate::geom::INK_COLORS,
-                ColorTarget::Ink,
                 self.selected_ink_color()
                     .unwrap_or(self.settings.text_color),
                 cycle_ok,
@@ -4872,7 +4900,63 @@ impl MarkerApp {
         }
     }
 
-    fn style_palette_row(
+    fn style_highlight_palette_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        presets: &[crate::settings::HighlightPreset],
+        current: Rgb,
+        allow_cycle: bool,
+    ) {
+        let colors: Vec<Rgb> = presets.iter().map(|p| p.rgb).collect();
+        self.cycle_palette_color(ui, &colors, ColorTarget::Highlights, current, allow_cycle);
+        let current = self
+            .selected_highlight_color()
+            .unwrap_or(self.settings.highlight_color);
+        let mut picked = None;
+        let mut matched = false;
+        for preset in presets {
+            let on = preset.rgb == current;
+            matched |= on;
+            if color_dot(ui, preset.rgb, on, &preset.name) {
+                picked = Some(preset.rgb);
+            }
+        }
+        if !matched {
+            let _ = color_dot(ui, current, true, highlight_color_name(presets, current));
+        }
+        if let Some(color) = picked {
+            self.seal_then_arm();
+            self.apply_color_to(color, ColorTarget::Highlights);
+            self.seal_undo();
+        }
+    }
+
+    fn style_ink_palette_row(&mut self, ui: &mut egui::Ui, current: Rgb, allow_cycle: bool) {
+        let colors = crate::geom::INK_COLORS;
+        self.cycle_palette_color(ui, &colors, ColorTarget::Ink, current, allow_cycle);
+        let current = self
+            .selected_ink_color()
+            .unwrap_or(self.settings.text_color);
+        let mut picked = None;
+        let mut matched = false;
+        for color in &colors {
+            let on = *color == current;
+            matched |= on;
+            if color_dot(ui, *color, on, ink_color_name(*color)) {
+                picked = Some(*color);
+            }
+        }
+        if !matched {
+            let _ = color_dot(ui, current, true, "Custom");
+        }
+        if let Some(color) = picked {
+            self.seal_then_arm();
+            self.apply_color_to(color, ColorTarget::Ink);
+            self.seal_undo();
+        }
+    }
+
+    fn cycle_palette_color(
         &mut self,
         ui: &mut egui::Ui,
         colors: &[Rgb],
@@ -4881,18 +4965,19 @@ impl MarkerApp {
         allow_cycle: bool,
     ) {
         // Left / Right cycles the focused palette while the style strip is open.
-        let cycle = allow_cycle.then(|| {
-            ui.ctx().input(|input| {
-                if input.key_pressed(Key::ArrowRight) {
-                    Some(1isize)
-                } else if input.key_pressed(Key::ArrowLeft) {
-                    Some(-1isize)
-                } else {
-                    None
-                }
+        let cycle = allow_cycle
+            .then(|| {
+                ui.ctx().input(|input| {
+                    if input.key_pressed(Key::ArrowRight) {
+                        Some(1isize)
+                    } else if input.key_pressed(Key::ArrowLeft) {
+                        Some(-1isize)
+                    } else {
+                        None
+                    }
+                })
             })
-        })
-        .flatten();
+            .flatten();
         if let Some(delta) = cycle {
             if let Some(idx) = colors.iter().position(|c| *c == current) {
                 let next = (idx as isize + delta).rem_euclid(colors.len() as isize) as usize;
@@ -4905,25 +4990,6 @@ impl MarkerApp {
                 self.apply_color_to(*color, target);
                 self.seal_undo();
             }
-        }
-        let current = match target {
-            ColorTarget::Highlights => self
-                .selected_highlight_color()
-                .unwrap_or(self.settings.highlight_color),
-            ColorTarget::Ink => self
-                .selected_ink_color()
-                .unwrap_or(self.settings.text_color),
-        };
-        let mut picked = None;
-        for color in colors {
-            if color_dot(ui, *color, *color == current) {
-                picked = Some(*color);
-            }
-        }
-        if let Some(color) = picked {
-            self.seal_then_arm();
-            self.apply_color_to(color, target);
-            self.seal_undo();
         }
     }
 

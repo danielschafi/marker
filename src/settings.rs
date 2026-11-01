@@ -3,9 +3,18 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::geom::Rgb;
+use crate::geom::{Rgb, HIGHLIGHT_COLORS};
 
 pub const RECENT_LIMIT: usize = 15;
+
+/// Maximum editable highlight presets (toolbar / style bar / sidebar).
+pub const MAX_HIGHLIGHT_PRESETS: usize = 8;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HighlightPreset {
+    pub name: String,
+    pub rgb: Rgb,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
@@ -23,12 +32,40 @@ pub struct Settings {
     /// Opt-in LaTeX autosnippets inside text boxes (`//` → `\frac`, `mk`, `dm`).
     #[serde(default)]
     pub math_autosnippets: bool,
+    /// Named highlight colors used by the toolbar, style bar, and sidebar filter.
+    #[serde(default = "default_highlight_presets")]
+    pub highlight_presets: Vec<HighlightPreset>,
     #[serde(default)]
     pub recent: Vec<PathBuf>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+pub fn default_highlight_presets() -> Vec<HighlightPreset> {
+    vec![
+        HighlightPreset {
+            name: "Key idea".into(),
+            rgb: HIGHLIGHT_COLORS[0],
+        },
+        HighlightPreset {
+            name: "Definition".into(),
+            rgb: HIGHLIGHT_COLORS[1],
+        },
+        HighlightPreset {
+            name: "Example".into(),
+            rgb: HIGHLIGHT_COLORS[2],
+        },
+        HighlightPreset {
+            name: "Question".into(),
+            rgb: HIGHLIGHT_COLORS[3],
+        },
+        HighlightPreset {
+            name: "Orange".into(),
+            rgb: HIGHLIGHT_COLORS[4],
+        },
+    ]
 }
 
 impl Default for Settings {
@@ -42,6 +79,7 @@ impl Default for Settings {
             toolbar_visible: true,
             sepia: false,
             math_autosnippets: false,
+            highlight_presets: default_highlight_presets(),
             recent: Vec::new(),
         }
     }
@@ -62,6 +100,7 @@ impl Settings {
         match toml::from_str::<Settings>(&text) {
             Ok(mut settings) => {
                 settings.recent.truncate(RECENT_LIMIT);
+                settings.clamp_highlight_presets();
                 settings
             }
             Err(err) => {
@@ -94,6 +133,26 @@ impl Settings {
             return;
         }
         let _ = fs::rename(&tmp, path);
+    }
+
+    /// Exact RGB match → preset name. Unknown colors are custom (no rewrite of annot bytes).
+    pub fn highlight_name_for(&self, color: Rgb) -> Option<&str> {
+        self.highlight_presets
+            .iter()
+            .find(|preset| preset.rgb == color)
+            .map(|preset| preset.name.as_str())
+    }
+
+    pub fn reset_highlight_presets(&mut self) {
+        self.highlight_presets = default_highlight_presets();
+    }
+
+    fn clamp_highlight_presets(&mut self) {
+        if self.highlight_presets.is_empty() {
+            self.highlight_presets = default_highlight_presets();
+            return;
+        }
+        self.highlight_presets.truncate(MAX_HIGHLIGHT_PRESETS);
     }
 
     /// Move `path` to the front of the recent list and persist.
@@ -225,6 +284,71 @@ mod tests {
         fs::write(&path, without).expect("write");
         let loaded = Settings::load_from(&path);
         assert!(!loaded.math_autosnippets);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn missing_highlight_presets_loads_defaults() {
+        let defaults = default_highlight_presets();
+        assert_eq!(defaults.len(), 5);
+        assert_eq!(defaults[0].name, "Key idea");
+        assert_eq!(defaults[0].rgb, HIGHLIGHT_COLORS[0]);
+        assert_eq!(defaults[1].name, "Definition");
+        assert_eq!(defaults[2].name, "Example");
+        assert_eq!(defaults[3].name, "Question");
+        assert_eq!(defaults[4].name, "Orange");
+        assert_eq!(defaults[4].rgb, HIGHLIGHT_COLORS[4]);
+
+        let (dir, path) = test_config_path("presets-missing");
+        Settings::default().save_to(&path);
+        let text = fs::read_to_string(&path).expect("read");
+        let mut value: toml::Value = toml::from_str(&text).expect("parse toml");
+        value
+            .as_table_mut()
+            .expect("table")
+            .remove("highlight_presets");
+        fs::write(&path, toml::to_string_pretty(&value).expect("serialize")).expect("write");
+
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.highlight_presets, defaults);
+        assert_eq!(
+            loaded.highlight_name_for(HIGHLIGHT_COLORS[0]),
+            Some("Key idea")
+        );
+        assert_eq!(loaded.highlight_name_for(Rgb::new(1, 2, 3)), None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn highlight_presets_round_trip_and_cap() {
+        let (dir, path) = test_config_path("presets-round-trip");
+        let mut presets = default_highlight_presets();
+        presets[0].name = "Thesis".into();
+        presets.push(HighlightPreset {
+            name: "Extra".into(),
+            rgb: Rgb::new(10, 20, 30),
+        });
+        let settings = Settings {
+            highlight_presets: presets.clone(),
+            ..Settings::default()
+        };
+        settings.save_to(&path);
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.highlight_presets, presets);
+        assert_eq!(loaded.highlight_name_for(Rgb::new(10, 20, 30)), Some("Extra"));
+
+        let oversized = Settings {
+            highlight_presets: (0..12)
+                .map(|i| HighlightPreset {
+                    name: format!("P{i}"),
+                    rgb: Rgb::new(i as u8, 0, 0),
+                })
+                .collect(),
+            ..Settings::default()
+        };
+        oversized.save_to(&path);
+        let capped = Settings::load_from(&path);
+        assert_eq!(capped.highlight_presets.len(), MAX_HIGHLIGHT_PRESETS);
         cleanup(&dir);
     }
 }

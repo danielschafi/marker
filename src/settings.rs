@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +10,19 @@ pub const RECENT_LIMIT: usize = 15;
 
 /// Maximum editable highlight presets (toolbar / style bar / sidebar).
 pub const MAX_HIGHLIGHT_PRESETS: usize = 8;
+
+/// Live case flag for the PDF reader thread. `dispatch_search` in `app.rs` cannot
+/// take a new argument this wave (FP9 owns that file), so the worker reads here.
+static SEARCH_CASE_SENSITIVE: AtomicBool = AtomicBool::new(false);
+
+/// Case sensitivity currently used by in-flight / next search jobs.
+pub fn live_search_case_sensitive() -> bool {
+    SEARCH_CASE_SENSITIVE.load(Ordering::Relaxed)
+}
+
+fn sync_search_case_flag(value: bool) {
+    SEARCH_CASE_SENSITIVE.store(value, Ordering::Relaxed);
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HighlightPreset {
@@ -32,6 +46,10 @@ pub struct Settings {
     /// Opt-in LaTeX autosnippets inside text boxes (`//` → `\frac`, `mk`, `dm`).
     #[serde(default)]
     pub math_autosnippets: bool,
+    /// When true, Find matches the query's letter case. Default false matches
+    /// MuPDF's case-insensitive `TextPage::search`.
+    #[serde(default)]
+    pub search_case_sensitive: bool,
     /// Named highlight colors used by the toolbar, style bar, and sidebar filter.
     #[serde(default = "default_highlight_presets")]
     pub highlight_presets: Vec<HighlightPreset>,
@@ -79,6 +97,7 @@ impl Default for Settings {
             toolbar_visible: true,
             sepia: false,
             math_autosnippets: false,
+            search_case_sensitive: false,
             highlight_presets: default_highlight_presets(),
             recent: Vec::new(),
         }
@@ -88,7 +107,9 @@ impl Default for Settings {
 impl Settings {
     pub fn load() -> Self {
         let Some(path) = config_path() else {
-            return Self::default();
+            let settings = Self::default();
+            sync_search_case_flag(settings.search_case_sensitive);
+            return settings;
         };
         Self::load_from(&path)
     }
@@ -101,6 +122,7 @@ impl Settings {
             Ok(mut settings) => {
                 settings.recent.truncate(RECENT_LIMIT);
                 settings.clamp_highlight_presets();
+                sync_search_case_flag(settings.search_case_sensitive);
                 settings
             }
             Err(err) => {
@@ -109,7 +131,9 @@ impl Settings {
                     path.display()
                 );
                 backup_invalid_config(path);
-                Self::default()
+                let settings = Self::default();
+                sync_search_case_flag(settings.search_case_sensitive);
+                settings
             }
         }
     }
@@ -122,6 +146,7 @@ impl Settings {
     }
 
     fn save_to(&self, path: &Path) {
+        sync_search_case_flag(self.search_case_sensitive);
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -133,6 +158,13 @@ impl Settings {
             return;
         }
         let _ = fs::rename(&tmp, path);
+    }
+
+    /// Persist and publish the Find case-sensitivity flag for the reader thread.
+    pub fn set_search_case_sensitive(&mut self, value: bool) {
+        self.search_case_sensitive = value;
+        sync_search_case_flag(value);
+        self.save();
     }
 
     /// Exact RGB match → preset name. Unknown colors are custom (no rewrite of annot bytes).
@@ -284,6 +316,32 @@ mod tests {
         fs::write(&path, without).expect("write");
         let loaded = Settings::load_from(&path);
         assert!(!loaded.math_autosnippets);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn search_case_sensitive_defaults_false_and_round_trips() {
+        assert!(!Settings::default().search_case_sensitive);
+        let (dir, path) = test_config_path("search-case");
+        Settings::default().save_to(&path);
+        let text = fs::read_to_string(&path).expect("read");
+        let without: String = text
+            .lines()
+            .filter(|line| !line.contains("search_case_sensitive"))
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        fs::write(&path, without).expect("write");
+        let loaded = Settings::load_from(&path);
+        assert!(!loaded.search_case_sensitive);
+
+        let on = Settings {
+            search_case_sensitive: true,
+            ..Settings::default()
+        };
+        on.save_to(&path);
+        let again = Settings::load_from(&path);
+        assert!(again.search_case_sensitive);
+        assert!(live_search_case_sensitive());
         cleanup(&dir);
     }
 

@@ -4458,6 +4458,32 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
         widget.corner_radius,
         visuals.extreme_bg_color.gamma_multiply(background_opacity * show_t),
     );
+
+    // Small tick marks for pages that have a Find hit (FT12). Skip when the
+    // search UI is closed so the bar stays clean while browsing.
+    if tab.search.open && !tab.search.hits.is_empty() && height > 1.0 {
+        let tick = Color32::from_rgba_unmultiplied(255, 170, 60, (150.0 * show_t) as u8);
+        let mut marked = Vec::new();
+        for (page, _) in &tab.search.hits {
+            if marked.contains(page) {
+                continue;
+            }
+            marked.push(*page);
+            let Some(top) = tab.doc.tops.get(*page).copied() else {
+                continue;
+            };
+            let y = bar_rect.top()
+                + ((top * tab.doc.scale) / height).clamp(0.0, 1.0) * bar_rect.height();
+            ui.painter().line_segment(
+                [
+                    Pos2::new(bar_rect.left(), y),
+                    Pos2::new(bar_rect.right(), y),
+                ],
+                Stroke::new(1.0_f32, tick),
+            );
+        }
+    }
+
     ui.painter().rect_filled(
         thumb,
         widget.corner_radius,

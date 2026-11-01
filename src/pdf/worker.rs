@@ -85,6 +85,7 @@ enum ReadJob {
         seq: u64,
         needle: String,
         from: usize,
+        case_sensitive: bool,
     },
     Glyphs {
         gen: u64,
@@ -241,11 +242,14 @@ impl PdfWorker {
     }
 
     pub fn search(&self, gen: u64, seq: u64, needle: String) {
+        // Case flag lives in Settings; app.rs cannot pass it this wave (FP9).
+        let case_sensitive = crate::settings::live_search_case_sensitive();
         let _ = self.reads.send(ReadJob::Search {
             gen,
             seq,
             needle,
             from: 0,
+            case_sensitive,
         });
     }
 
@@ -848,8 +852,9 @@ fn handle_read(
             seq,
             needle,
             from,
+            case_sensitive,
         } => {
-            handle_search(io, state, gen, seq, needle, from);
+            handle_search(io, state, gen, seq, needle, from, case_sensitive);
             false
         }
     }
@@ -872,6 +877,7 @@ fn handle_search(
     seq: u64,
     needle: String,
     from: usize,
+    case_sensitive: bool,
 ) {
     if from == 0 {
         state.latest_search.insert(gen, seq);
@@ -887,7 +893,7 @@ fn handle_search(
     let mut hits = Vec::new();
     let mut failed = None;
     for page in from..end {
-        match engine.search_page(page, &needle) {
+        match engine.search_page(page, &needle, case_sensitive) {
             Ok(quads) if !quads.is_empty() => hits.push((page, quads)),
             Ok(_) => {}
             Err(err) => {
@@ -917,6 +923,7 @@ fn handle_search(
             seq,
             needle,
             from: end,
+            case_sensitive,
         });
     }
 }

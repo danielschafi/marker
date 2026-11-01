@@ -2058,6 +2058,7 @@ fn paint_annotations(
                             *size,
                             *color,
                             tab.doc.scale,
+                            tab.doc.last_zoom,
                         );
                     } else {
                         paint_wrapped(
@@ -2067,6 +2068,7 @@ fn paint_annotations(
                             content,
                             *size * tab.doc.scale,
                             color.to_color32(),
+                            tab.doc.last_zoom,
                         );
                     }
                 }
@@ -2147,6 +2149,7 @@ fn paint_annotations(
                             source,
                             13.0,
                             Color32::from_rgb(40, 40, 40),
+                            tab.doc.last_zoom,
                         );
                     }
                 } else if !source.is_empty() && !editing {
@@ -2157,6 +2160,7 @@ fn paint_annotations(
                         source,
                         13.0,
                         Color32::from_rgb(40, 40, 40),
+                        tab.doc.last_zoom,
                     );
                 }
             }
@@ -2499,6 +2503,20 @@ fn pdf_rect_screen(doc: &DocState, page: usize, rect: PdfRect, view: Rect) -> Re
     Rect::from_min_max(min, max)
 }
 
+/// While a zoom gesture is active, snap paint font sizes to a coarse step so
+/// egui does not rasterize a new glyph atlas entry every frame. Exact size
+/// returns once `last_zoom` ages past the interacting window in `update`.
+const ZOOM_FONT_STEP_PX: f32 = 2.0;
+const ZOOM_FONT_COARSE_MS: u128 = 150;
+
+fn paint_font_px(size_px: f32, last_zoom: Instant) -> f32 {
+    if last_zoom.elapsed().as_millis() < ZOOM_FONT_COARSE_MS {
+        (size_px / ZOOM_FONT_STEP_PX).round() * ZOOM_FONT_STEP_PX
+    } else {
+        size_px
+    }
+}
+
 fn paint_wrapped(
     painter: &egui::Painter,
     ctx: &egui::Context,
@@ -2506,10 +2524,12 @@ fn paint_wrapped(
     text: &str,
     size_px: f32,
     color: Color32,
+    last_zoom: Instant,
 ) {
     if text.is_empty() || rect.width() < 2.0 {
         return;
     }
+    let size_px = paint_font_px(size_px, last_zoom);
     let galley = ctx.fonts_mut(|fonts| {
         fonts.layout(
             text.to_owned(),
@@ -2604,10 +2624,13 @@ fn paint_rich_text(
     size_pt: f32,
     color: crate::geom::Rgb,
     scale: f32,
+    last_zoom: Instant,
 ) {
     let ink = color.to_color32();
     let scale = scale.max(1e-3);
-    let font_px = size_pt * scale;
+    // Layout stays in PDF points (shared with save). Only the paint FontId is
+    // coarsened while zooming so glyph atlas churn stays bounded mid-gesture.
+    let font_px = paint_font_px(size_pt * scale, last_zoom);
     let measure = EguiMeasure { ctx };
     let width_pt = screen.width() / scale;
     let runs = rich_text::layout_rich_text(content, size_pt, width_pt, &measure, &|inner, display| {
@@ -2663,7 +2686,15 @@ fn paint_rich_text(
                 } else {
                     format!("${inner}$")
                 };
-                paint_wrapped(painter, ctx, dest, &fallback, font_px.max(0.5) * 0.85, ink);
+                paint_wrapped(
+                    painter,
+                    ctx,
+                    dest,
+                    &fallback,
+                    font_px.max(0.5) * 0.85,
+                    ink,
+                    last_zoom,
+                );
             }
         }
     }

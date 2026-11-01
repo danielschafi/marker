@@ -42,6 +42,11 @@ pub enum PdfJob {
         gen: u64,
         snapshot: SaveSnapshot,
     },
+    SaveAs {
+        gen: u64,
+        path: PathBuf,
+        snapshot: SaveSnapshot,
+    },
     InsertPage {
         gen: u64,
         after: usize,
@@ -120,6 +125,12 @@ pub enum PdfReply {
     },
     Saved {
         gen: u64,
+        result: Result<Vec<SavedXref>, String>,
+    },
+    /// Successful Save As retargets the open document onto `path`.
+    SavedAs {
+        gen: u64,
+        path: PathBuf,
         result: Result<Vec<SavedXref>, String>,
     },
     PageInserted {
@@ -242,6 +253,14 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::Save { gen, snapshot });
     }
 
+    pub fn save_as(&self, gen: u64, path: PathBuf, snapshot: SaveSnapshot) {
+        let _ = self.jobs.send(PdfJob::SaveAs {
+            gen,
+            path,
+            snapshot,
+        });
+    }
+
     pub fn insert_page(&self, gen: u64, after: usize) {
         let _ = self.jobs.send(PdfJob::InsertPage { gen, after });
     }
@@ -278,6 +297,7 @@ fn job_sort_key(job: &PdfJob) -> (u8, u32) {
         | PdfJob::Open { .. }
         | PdfJob::Close { .. }
         | PdfJob::Save { .. }
+        | PdfJob::SaveAs { .. }
         | PdfJob::InsertPage { .. }
         | PdfJob::InsertPageAt { .. }
         | PdfJob::DeletePage { .. } => (0, 0),
@@ -429,6 +449,36 @@ fn handle_save(ctx: &mut WorkerCtx<'_>, gen: u64, snapshot: SaveSnapshot) {
     ctx.send(reply);
 }
 
+fn handle_save_as(
+    ctx: &mut WorkerCtx<'_>,
+    gen: u64,
+    path: PathBuf,
+    snapshot: SaveSnapshot,
+) {
+    release_reader(ctx.reads, gen);
+    let reply = match engine_mut(ctx.engines, gen) {
+        Ok(engine) => {
+            let result = engine.save_as(&snapshot, &path);
+            // Reader still holds the old path; retarget while suspended so reopen
+            // loads the copy we just wrote.
+            if result.is_ok() {
+                let _ = ctx.reads.send(ReadJob::Open {
+                    gen,
+                    path: path.clone(),
+                });
+            }
+            PdfReply::SavedAs { gen, path, result }
+        }
+        Err(_) => PdfReply::SavedAs {
+            gen,
+            path,
+            result: Err("No document is open.".into()),
+        },
+    };
+    reopen_reader(ctx.reads, gen);
+    ctx.send(reply);
+}
+
 fn handle_insert_page(ctx: &mut WorkerCtx<'_>, gen: u64, after: usize) {
     release_reader(ctx.reads, gen);
     let reply = match engine_mut(ctx.engines, gen) {
@@ -507,6 +557,14 @@ fn handle_job(
         }
         PdfJob::Save { gen, snapshot } => {
             handle_save(ctx, gen, snapshot);
+            false
+        }
+        PdfJob::SaveAs {
+            gen,
+            path,
+            snapshot,
+        } => {
+            handle_save_as(ctx, gen, path, snapshot);
             false
         }
         PdfJob::InsertPage { gen, after } => {

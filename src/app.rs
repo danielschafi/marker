@@ -79,8 +79,8 @@ pub(crate) struct MarkerApp {
     /// Last prepare_visible_math scan: gen → (epoch, cache rev, first, last, zoom×ppp bits).
     math_scan: HashMap<u64, (u64, u64, usize, usize, u32)>,
     next_gen: u64,
-    dialog_tx: Sender<Option<PathBuf>>,
-    dialog_rx: Receiver<Option<PathBuf>>,
+    dialog_tx: Sender<DialogReply>,
+    dialog_rx: Receiver<DialogReply>,
     dialog_busy: bool,
     /// External opens forwarded from secondary Marker processes (single-instance).
     ipc: Option<IpcInbox>,
@@ -646,6 +646,12 @@ pub(crate) enum SaveState {
     Failed { message: String, at: Instant },
 }
 
+/// Result of an `rfd` file dialog spawned off the UI thread.
+enum DialogReply {
+    Open(Option<PathBuf>),
+    SaveAs { gen: u64, path: Option<PathBuf> },
+}
+
 impl MarkerApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
@@ -784,7 +790,39 @@ impl MarkerApp {
             let path = rfd::FileDialog::new()
                 .add_filter("PDF", &["pdf"])
                 .pick_file();
-            let _ = tx.send(path);
+            let _ = tx.send(DialogReply::Open(path));
+            ctx.request_repaint();
+        });
+    }
+
+    /// Save As: pick a path, write a full copy, then switch this tab onto the copy.
+    pub(crate) fn save_as_dialog(&mut self) {
+        if self.dialog_busy {
+            return;
+        }
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        if matches!(tab.save, SaveState::Saving) {
+            return;
+        }
+        let gen = tab.doc.gen;
+        let suggested = tab
+            .doc
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("document.pdf")
+            .to_owned();
+        self.dialog_busy = true;
+        let tx = self.dialog_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        thread::spawn(move || {
+            let path = rfd::FileDialog::new()
+                .add_filter("PDF", &["pdf"])
+                .set_file_name(&suggested)
+                .save_file();
+            let _ = tx.send(DialogReply::SaveAs { gen, path });
             ctx.request_repaint();
         });
     }
@@ -1991,6 +2029,11 @@ pub(crate) const SHORTCUTS: &[ShortcutEntry] = &[
     },
     ShortcutEntry {
         section: ShortcutSection::Edit,
+        keys: "Ctrl+Shift+S",
+        action: "Save As",
+    },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
         keys: "Ctrl+Shift+Enter",
         action: "Insert blank page",
     },
@@ -2161,11 +2204,16 @@ impl eframe::App for MarkerApp {
 impl MarkerApp {
     fn poll_dialog(&mut self) {
         match self.dialog_rx.try_recv() {
-            Ok(Some(path)) => {
+            Ok(DialogReply::Open(Some(path))) => {
                 self.dialog_busy = false;
                 self.open_path(path);
             }
-            Ok(None) => self.dialog_busy = false,
+            Ok(DialogReply::Open(None)) => self.dialog_busy = false,
+            Ok(DialogReply::SaveAs { gen, path: Some(path) }) => {
+                self.dialog_busy = false;
+                self.start_save_as(gen, path);
+            }
+            Ok(DialogReply::SaveAs { path: None, .. }) => self.dialog_busy = false,
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.dialog_busy = false,
         }
@@ -2381,6 +2429,7 @@ impl MarkerApp {
                 }
             }
             PdfReply::Saved { gen, result } => self.on_saved(gen, result),
+            PdfReply::SavedAs { gen, path, result } => self.on_saved_as(gen, path, result),
             PdfReply::Crop { gen, seq, result } => self.on_crop(ctx, gen, seq, result),
             PdfReply::PageInserted { gen, index, pages } => {
                 self.on_page_inserted(gen, index, pages);
@@ -2569,6 +2618,55 @@ impl MarkerApp {
                 } else if close {
                     self.drop_tab(index);
                 }
+            }
+            Err(message) => {
+                self.tabs[index].save = SaveState::Failed {
+                    message,
+                    at: Instant::now(),
+                };
+            }
+        }
+    }
+
+    fn on_saved_as(
+        &mut self,
+        gen: u64,
+        path: PathBuf,
+        result: Result<Vec<crate::pdf::SavedXref>, String>,
+    ) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) else {
+            return;
+        };
+        match result {
+            Ok(saved) => {
+                let epoch = self.tabs[index].save_epoch;
+                let sent = std::mem::take(&mut self.tabs[index].save_deletes);
+                {
+                    let tab = &mut self.tabs[index];
+                    tab.doc.path = path.clone();
+                    tab.doc
+                        .session
+                        .pending_deletes
+                        .retain(|item| !sent.contains(item));
+                    for item in saved {
+                        if let Some(annot) = tab.doc.session.get_mut(item.id) {
+                            annot.xref = Some(item.xref);
+                            if annot.revision <= epoch {
+                                annot.dirty = false;
+                            }
+                        } else {
+                            tab.doc.session.pending_deletes.push((item.page, item.xref));
+                        }
+                    }
+                    if tab.doc.session.is_dirty() || tab.force_save {
+                        tab.save = SaveState::Dirty {
+                            since: Instant::now() - Duration::from_secs(2),
+                        };
+                    } else {
+                        tab.save = SaveState::Clean;
+                    }
+                }
+                self.settings.remember_open(&path);
             }
             Err(message) => {
                 self.tabs[index].save = SaveState::Failed {
@@ -3561,7 +3659,17 @@ impl MarkerApp {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        if ctx.input(|input| input.key_pressed(Key::S) && input.modifiers.command) {
+        if ctx.input(|input| {
+            input.key_pressed(Key::S)
+                && input.modifiers.command
+                && input.modifiers.shift
+        }) {
+            self.save_as_dialog();
+        } else if ctx.input(|input| {
+            input.key_pressed(Key::S)
+                && input.modifiers.command
+                && !input.modifiers.shift
+        }) {
             if let Some(tab) = self.tab_mut() {
                 tab.force_save = true;
             }
@@ -4037,6 +4145,73 @@ impl MarkerApp {
                 self.drop_tab(index);
             }
         }
+    }
+
+    /// Write a full copy to `path` and switch the tab onto it (FT9).
+    fn start_save_as(&mut self, gen: u64, mut path: PathBuf) {
+        if !self.tabs.iter().any(|tab| tab.doc.gen == gen) {
+            return;
+        }
+        if path.extension().is_none() {
+            path.set_extension("pdf");
+        }
+        let dirty = self
+            .tabs
+            .iter()
+            .find(|tab| tab.doc.gen == gen)
+            .is_some_and(|tab| tab.doc.session.is_dirty());
+        if dirty && !self.ensure_math_for_save(gen) {
+            // Dialog path is already chosen; wait briefly like quit flush.
+            let ctx = self.egui_ctx.clone();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline && !self.ensure_math_for_save(gen) {
+                self.poll(&ctx);
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.gen == gen) else {
+            return;
+        };
+        if matches!(tab.save, SaveState::Saving) {
+            return;
+        }
+        let epoch = tab.doc.session.epoch;
+        let upserts: Vec<Annotation> = tab
+            .doc
+            .session
+            .annotations
+            .iter()
+            .filter(|annot| annot.dirty)
+            .cloned()
+            .collect();
+        let deletes = tab.doc.session.pending_deletes.clone();
+        let mut math_pdfs = HashMap::new();
+        for annot in &upserts {
+            if let AnnotKind::Math { .. } = annot.kind {
+                if let Some(pdf) = tab
+                    .previews
+                    .get(&annot.id)
+                    .and_then(|preview| preview.pdf.clone())
+                {
+                    math_pdfs.insert(annot.id, pdf);
+                }
+            }
+        }
+        let (inline_math, rich_text_parents) =
+            collect_inline_math_saves(&upserts, &self.egui_ctx, &self.math_cache);
+        tab.save_epoch = epoch;
+        tab.save_deletes = deletes.clone();
+        tab.save = SaveState::Saving;
+        tab.save_when_math_ready = false;
+        tab.force_save = false;
+        let snapshot = SaveSnapshot {
+            upserts,
+            deletes,
+            math_pdfs,
+            inline_math,
+            rich_text_parents,
+        };
+        self.worker.save_as(gen, path, snapshot);
     }
 
     pub(crate) fn color_controls(&mut self, ui: &mut egui::Ui) {

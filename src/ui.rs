@@ -108,6 +108,13 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         app.open_dialog();
     }
+    if app.tab().is_some()
+        && chrome_button(ui, "Save As", false)
+            .on_hover_text("Save a copy and switch to it (Ctrl+Shift+S)")
+            .clicked()
+    {
+        app.save_as_dialog();
+    }
     let outline_on = app.tab().map(|tab| tab.outline_open).unwrap_or(false);
     if app.tab().is_some()
         && chrome_button(ui, "Outline", outline_on)

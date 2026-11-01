@@ -112,6 +112,8 @@ pub struct DocumentEngine {
     list_order: VecDeque<usize>,
     /// Byte length at open, reset after a compacting rewrite.
     opened_len: u64,
+    /// Whether this open already attempted a `.bak` of the pristine file.
+    bak_ensured: bool,
 }
 
 impl DocumentEngine {
@@ -147,6 +149,7 @@ impl DocumentEngine {
                 lists: HashMap::new(),
                 list_order: VecDeque::new(),
                 opened_len,
+                bak_ensured: false,
             },
             annotations,
         })
@@ -296,6 +299,41 @@ impl DocumentEngine {
         saved
     }
 
+    /// Full write to `new_path`, then switch this engine onto that file.
+    ///
+    /// Never writes the open path unless `new_path` is the same file. On failure the
+    /// engine is reloaded from the previous path so a half-applied Save As does not
+    /// leave the tab pointing at a new file that was not written.
+    pub fn save_as(
+        &mut self,
+        snapshot: &SaveSnapshot,
+        new_path: &Path,
+    ) -> Result<Vec<SavedXref>, String> {
+        let old_path = self.path.clone();
+        let same = paths_equal(&old_path, new_path);
+        let saved = (|| {
+            let xrefs = self.apply(snapshot)?;
+            if same {
+                self.ensure_bak()?;
+            }
+            self.rewrite_all(new_path)?;
+            if !same {
+                self.path = new_path.to_path_buf();
+                self.bak_ensured = false;
+            }
+            if let Ok(meta) = std::fs::metadata(new_path) {
+                self.opened_len = meta.len();
+            }
+            Ok(xrefs)
+        })();
+        if saved.is_err() {
+            if let Ok(reloaded) = Self::open(&old_path) {
+                *self = reloaded.engine;
+            }
+        }
+        saved
+    }
+
     /// Insert a blank page after `after` (0-based). Returns the new page index.
     /// Size matches `after` when present, otherwise the first page / A4.
     pub fn insert_blank_page(&mut self, after: usize) -> Result<(usize, Vec<PageInfo>), String> {
@@ -416,6 +454,7 @@ impl DocumentEngine {
 
     /// `Ok(true)` when a compacting rewrite ran and annotation xrefs may have moved.
     fn persist(&mut self) -> Result<bool, String> {
+        self.ensure_bak()?;
         let path = self.path.clone();
         let Some(path_str) = path.to_str() else {
             return Err("The PDF path is not valid UTF-8.".into());
@@ -431,6 +470,20 @@ impl DocumentEngine {
             self.rewrite_all(&path)?;
         }
         self.maybe_compact()
+    }
+
+    /// Once per open: if `path.bak` is missing, copy the pristine on-disk bytes there
+    /// before the first in-place write. Does not rotate or overwrite an existing bak.
+    fn ensure_bak(&mut self) -> Result<(), String> {
+        if self.bak_ensured {
+            return Ok(());
+        }
+        let bak = bak_path(&self.path);
+        if !bak.exists() {
+            std::fs::copy(&self.path, &bak).map_err(|err| err.to_string())?;
+        }
+        self.bak_ensured = true;
+        Ok(())
     }
 
     /// Full rewrite with garbage collection when incremental updates have grown
@@ -515,6 +568,25 @@ fn temp_path(path: &Path) -> PathBuf {
         .unwrap_or("document.pdf");
     tmp.set_file_name(format!("{name}.marker-tmp"));
     tmp
+}
+
+/// `name.pdf.bak` — append `.bak` to the file name, not a replaced extension.
+fn bak_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("document.pdf");
+    path.with_file_name(format!("{name}.bak"))
+}
+
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
 }
 
 fn tile_device_rect(info: PageInfo, scale: f32, col: i32, row: i32) -> (i32, i32, i32, i32) {
@@ -1876,6 +1948,78 @@ mod tests {
             result,
             Err(message) if message == "This PDF has no readable pages. It may be damaged."
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_persist_copies_pristine_bytes_to_bak() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-bak-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+        let original = std::fs::read(&path).unwrap();
+        let bak = bak_path(&path);
+
+        let mut engine = DocumentEngine::open(&path).unwrap().engine;
+        let empty = SaveSnapshot {
+            upserts: Vec::new(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
+        };
+        engine.save(&empty).unwrap();
+        assert!(bak.exists(), "expected {}.bak after first save", path.display());
+        assert_eq!(std::fs::read(&bak).unwrap(), original);
+
+        // Second save must not rotate or rewrite an existing bak.
+        std::fs::write(&bak, b"frozen-bak").unwrap();
+        engine.save(&empty).unwrap();
+        assert_eq!(std::fs::read(&bak).unwrap(), b"frozen-bak");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_as_writes_copy_and_retargets_without_touching_original() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-saveas-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        let copy = dir.join("copy.pdf");
+        sample_pdf(&path);
+        let original = std::fs::read(&path).unwrap();
+        let mtime_before = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let mut engine = DocumentEngine::open(&path).unwrap().engine;
+        let empty = SaveSnapshot {
+            upserts: Vec::new(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
+        };
+        engine.save_as(&empty, &copy).unwrap();
+        assert!(copy.exists());
+        assert_eq!(engine.path, copy);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
+        assert_eq!(mtime_before, mtime_after);
+        assert!(!bak_path(&path).exists(), "Save As must not bak the original");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

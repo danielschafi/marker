@@ -18,6 +18,7 @@ use crate::assistant::{
 };
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 use crate::pdf::OutlineNode;
+use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
 use crate::view::viewport_tab;
 
@@ -43,6 +44,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     // Menu must paint even in zen (tab list still opens there).
     paint_tab_menu(app, ctx);
     cheatsheet_window(app, ctx);
+    preset_editor_window(app, ctx);
 }
 
 const TAB_BAR_H: f32 = 32.0;
@@ -142,6 +144,12 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
             .clicked()
         {
             app.toggle_toolbar();
+        }
+        if chrome_button(ui, "Colors", app.preset_editor_open)
+            .on_hover_text("Edit named highlight color presets")
+            .clicked()
+        {
+            app.toggle_preset_editor();
         }
         if chrome_button(ui, "Zen", app.zen)
             .on_hover_text(
@@ -973,6 +981,154 @@ fn cheatsheet_window(app: &mut MarkerApp, ctx: &egui::Context) {
     app.cheatsheet_open = open;
 }
 
+fn preset_editor_window(app: &mut MarkerApp, ctx: &egui::Context) {
+    if !app.preset_editor_open {
+        return;
+    }
+    let colors = p(ctx);
+    let mut open = app.preset_editor_open;
+    let mut dirty = false;
+    let mut reset = false;
+    let mut add = false;
+    let mut remove: Option<usize> = None;
+    egui::Window::new("Highlight presets")
+        .id(Id::new("marker-highlight-presets"))
+        .open(&mut open)
+        .resizable(true)
+        .default_size(Vec2::new(420.0, 320.0))
+        .min_width(340.0)
+        .min_height(200.0)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome_raised)
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
+                .corner_radius(8.0)
+                .inner_margin(12.0),
+        )
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new("Exact RGB match names highlights. Unknown colors stay Custom.")
+                    .weak()
+                    .size(12.0),
+            );
+            ui.add_space(8.0);
+            let can_add = app.settings.highlight_presets.len() < MAX_HIGHLIGHT_PRESETS;
+            let can_remove = app.settings.highlight_presets.len() > 1;
+            ScrollArea::vertical()
+                .id_salt("highlight-preset-scroll")
+                .show(ui, |ui| {
+                    for i in 0..app.settings.highlight_presets.len() {
+                        ui.horizontal(|ui| {
+                            let preset = &mut app.settings.highlight_presets[i];
+                            let swatch = ui.allocate_exact_size(Vec2::splat(18.0), Sense::hover());
+                            ui.painter().circle_filled(
+                                swatch.0.center(),
+                                7.0,
+                                preset.rgb.to_color32(),
+                            );
+                            let name_edit = ui.add(
+                                TextEdit::singleline(&mut preset.name)
+                                    .desired_width(140.0)
+                                    .hint_text("Name"),
+                            );
+                            if name_edit.changed() {
+                                dirty = true;
+                            }
+                            ui.label(RichText::new("R").weak().size(11.0));
+                            let mut r = preset.rgb.r as i32;
+                            if ui
+                                .add(DragValue::new(&mut r).range(0..=255).speed(1.0))
+                                .changed()
+                            {
+                                preset.rgb.r = r as u8;
+                                dirty = true;
+                            }
+                            ui.label(RichText::new("G").weak().size(11.0));
+                            let mut g = preset.rgb.g as i32;
+                            if ui
+                                .add(DragValue::new(&mut g).range(0..=255).speed(1.0))
+                                .changed()
+                            {
+                                preset.rgb.g = g as u8;
+                                dirty = true;
+                            }
+                            ui.label(RichText::new("B").weak().size(11.0));
+                            let mut b = preset.rgb.b as i32;
+                            if ui
+                                .add(DragValue::new(&mut b).range(0..=255).speed(1.0))
+                                .changed()
+                            {
+                                preset.rgb.b = b as u8;
+                                dirty = true;
+                            }
+                            if can_remove
+                                && ui
+                                    .add(
+                                        Button::new(RichText::new("×").size(12.0))
+                                            .fill(Color32::TRANSPARENT)
+                                            .stroke(Stroke::NONE),
+                                    )
+                                    .on_hover_text("Remove preset")
+                                    .clicked()
+                            {
+                                remove = Some(i);
+                            }
+                        });
+                        ui.add_space(4.0);
+                    }
+                });
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(can_add, Button::new("Add"))
+                    .on_hover_text(format!("Up to {MAX_HIGHLIGHT_PRESETS} presets"))
+                    .clicked()
+                {
+                    add = true;
+                }
+                if ui
+                    .button("Reset to defaults")
+                    .on_hover_text("Restore the five built-in named colors")
+                    .clicked()
+                {
+                    reset = true;
+                }
+            });
+        });
+
+    if reset {
+        app.settings.reset_highlight_presets();
+        dirty = true;
+    }
+    if add && app.settings.highlight_presets.len() < MAX_HIGHLIGHT_PRESETS {
+        app.settings.highlight_presets.push(HighlightPreset {
+            name: "Custom".into(),
+            rgb: app.settings.highlight_color,
+        });
+        dirty = true;
+    }
+    if let Some(i) = remove {
+        if app.settings.highlight_presets.len() > 1 && i < app.settings.highlight_presets.len() {
+            app.settings.highlight_presets.remove(i);
+            dirty = true;
+        }
+    }
+    if dirty {
+        if let Some(first) = app.settings.highlight_presets.first() {
+            if !app
+                .settings
+                .highlight_presets
+                .iter()
+                .any(|p| p.rgb == app.settings.highlight_color)
+            {
+                app.settings.highlight_color = first.rgb;
+            }
+        }
+        app.settings.save();
+    }
+    app.preset_editor_open = open;
+}
+
 fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     let colors = p(ctx);
     let Some(tab) = app.tab() else {
@@ -1012,6 +1168,7 @@ fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
 
 fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
     let colors = p(ctx);
+    let presets = app.settings.highlight_presets.clone();
     let Some(tab) = app.tab() else {
         return;
     };
@@ -1080,13 +1237,13 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
             ui.label(RichText::new("Color").weak().size(11.0));
             ui.horizontal_wrapped(|ui| {
                 ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                for color in HIGHLIGHT_COLORS {
-                    let on = color_filters.contains(&color);
-                    if color_dot(ui, color, on) {
+                for preset in &presets {
+                    let on = color_filters.contains(&preset.rgb);
+                    if color_dot(ui, preset.rgb, on, &preset.name) {
                         if on {
-                            color_filters.retain(|c| *c != color);
+                            color_filters.retain(|c| *c != preset.rgb);
                         } else {
-                            color_filters.push(color);
+                            color_filters.push(preset.rgb);
                         }
                     }
                 }
@@ -2526,7 +2683,7 @@ fn chrome_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Respon
     )
 }
 
-pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool) -> bool {
+pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool, name: &str) -> bool {
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::click());
     ui.painter()
         .circle_filled(rect.center(), 5.0, color.to_color32());
@@ -2537,26 +2694,30 @@ pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool) -> bool {
             Stroke::new(1.35, theme::color_dot_selection_ring(ui.ctx())),
         );
     }
-    let name = palette_color_name(color);
     response.widget_info(|| {
         WidgetInfo::selected(WidgetType::ColorButton, ui.is_enabled(), selected, name)
     });
     response.on_hover_text(name).clicked()
 }
 
-fn palette_color_name(color: Rgb) -> &'static str {
+pub(crate) fn ink_color_name(color: Rgb) -> &'static str {
     match color {
-        c if c == HIGHLIGHT_COLORS[0] => "Yellow highlight",
-        c if c == HIGHLIGHT_COLORS[1] => "Green highlight",
-        c if c == HIGHLIGHT_COLORS[2] => "Blue highlight",
-        c if c == HIGHLIGHT_COLORS[3] => "Pink highlight",
-        c if c == HIGHLIGHT_COLORS[4] => "Orange highlight",
         c if c == INK_COLORS[0] => "Black ink",
         c if c == INK_COLORS[1] => "Red ink",
         c if c == INK_COLORS[2] => "Blue ink",
         c if c == INK_COLORS[3] => "Green ink",
         _ => "Color",
     }
+}
+
+/// Exact RGB → preset name; unknown RGB is shown as Custom.
+pub(crate) fn highlight_color_name(presets: &[HighlightPreset], color: Rgb) -> &str {
+    // Same exact-match rule as `Settings::highlight_name_for`.
+    presets
+        .iter()
+        .find(|preset| preset.rgb == color)
+        .map(|preset| preset.name.as_str())
+        .unwrap_or("Custom")
 }
 
 fn cluster_button_name(label: &str) -> &str {
@@ -2585,6 +2746,7 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
     }
 }
 
+/// Static palette fallback (ink always; highlights when settings are unavailable).
 pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
     match tool {
         Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => &HIGHLIGHT_COLORS,
@@ -2657,6 +2819,13 @@ fn vec2(x: f32, y: f32) -> Vec2 {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    #[test]
+    fn highlight_color_name_is_exact_rgb_or_custom() {
+        let presets = crate::settings::default_highlight_presets();
+        assert_eq!(highlight_color_name(&presets, HIGHLIGHT_COLORS[0]), "Key idea");
+        assert_eq!(highlight_color_name(&presets, Rgb::new(1, 2, 3)), "Custom");
+    }
 
     #[test]
     fn one_line_snippet_collapses_and_truncates() {

@@ -129,6 +129,8 @@ impl Rgb {
     }
 }
 
+/// Default highlight RGBs. Named presets live in [`crate::settings::Settings`];
+/// this const stays as a fallback for tests and callers without settings.
 pub const HIGHLIGHT_COLORS: [Rgb; 5] = [
     Rgb::new(255, 214, 0),
     Rgb::new(130, 214, 82),

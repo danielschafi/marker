@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use egui::{DragValue, Key, ViewportCommand};
 
-use crate::annot::{AnnotKind, Annotation, Glyph, Handle, MarkupStyle, Session, ShapeKind};
+use crate::annot::{
+    AnnotKind, Annotation, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind,
+};
 use crate::assistant::{
     absolute_filepath, AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole,
     AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
@@ -286,8 +288,78 @@ pub(crate) struct DocState {
     pub(crate) last_scroll: Instant,
     /// Last Fit action; cleared when zoom changes by other means.
     pub(crate) last_fit: Option<FitKind>,
-    pub(crate) glyphs: HashMap<usize, Vec<Glyph>>,
+    /// Per-page glyphs; bounded by [`GLYPH_CACHE_PAGES`] via [`glyph_order`].
+    pub(crate) glyphs: HashMap<usize, PageGlyphs>,
+    /// LRU order for `glyphs` (oldest at the front).
+    pub(crate) glyph_order: VecDeque<usize>,
     pub(crate) tiles: HashMap<TileKey, CachedTile>,
+}
+
+/// Soft cap on cached glyph pages per tab.
+pub(crate) const GLYPH_CACHE_PAGES: usize = 64;
+
+/// Pages to drop from an LRU key list so at most `cap` remain.
+///
+/// `keys` is oldest-first. Never returns a page in `pinned`. If more than
+/// `cap` pages are pinned, the result may leave the cache above `cap`.
+pub(crate) fn evict(keys: &[usize], pinned: &[usize], cap: usize) -> Vec<usize> {
+    if keys.len() <= cap {
+        return Vec::new();
+    }
+    let pinned: HashSet<usize> = pinned.iter().copied().collect();
+    let mut to_evict = Vec::new();
+    let mut remaining = keys.len();
+    for &page in keys {
+        if remaining <= cap {
+            break;
+        }
+        if pinned.contains(&page) {
+            continue;
+        }
+        to_evict.push(page);
+        remaining -= 1;
+    }
+    to_evict
+}
+
+fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
+    let mut pinned = Vec::new();
+    if let Some(sel) = &tab.text_sel {
+        pinned.push(sel.page);
+    }
+    let drag_page = match &tab.drag {
+        Some(Drag::Highlight { page, .. })
+        | Some(Drag::TextSelect { page, .. })
+        | Some(Drag::LearningSelect { page, .. }) => Some(*page),
+        _ => None,
+    };
+    if let Some(page) = drag_page {
+        if !pinned.contains(&page) {
+            pinned.push(page);
+        }
+    }
+    pinned
+}
+
+impl DocState {
+    fn touch_glyph_page(&mut self, page: usize) {
+        self.glyph_order.retain(|&p| p != page);
+        self.glyph_order.push_back(page);
+    }
+
+    fn insert_glyphs(&mut self, page: usize, glyphs: PageGlyphs) {
+        self.glyphs.insert(page, glyphs);
+        self.touch_glyph_page(page);
+    }
+
+    fn trim_glyph_cache(&mut self, pinned: &[usize]) {
+        let keys: Vec<usize> = self.glyph_order.iter().copied().collect();
+        let drop = evict(&keys, pinned, GLYPH_CACHE_PAGES);
+        for page in drop {
+            self.glyphs.remove(&page);
+            self.glyph_order.retain(|&p| p != page);
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2322,6 +2394,7 @@ impl MarkerApp {
                             last_scroll: Instant::now(),
                             last_fit: None,
                             glyphs: HashMap::new(),
+                            glyph_order: VecDeque::new(),
                             tiles: HashMap::new(),
                         },
                         selected: Vec::new(),
@@ -2427,7 +2500,9 @@ impl MarkerApp {
             PdfReply::Glyphs { gen, page, glyphs } => {
                 if let Some(tab) = self.tab_by_gen_mut(gen) {
                     tab.glyphs_waiting.remove(&page);
-                    tab.doc.glyphs.insert(page, glyphs);
+                    tab.doc.insert_glyphs(page, glyphs);
+                    let pinned = pinned_glyph_pages(tab);
+                    tab.doc.trim_glyph_cache(&pinned);
                 }
             }
             PdfReply::Search {
@@ -2514,10 +2589,18 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
+        let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
+        tab.doc.glyph_order.clear();
         for (page, list) in glyphs {
             let page = if page >= index { page + 1 } else { page };
             tab.doc.glyphs.insert(page, list);
+        }
+        for page in order {
+            let page = if page >= index { page + 1 } else { page };
+            if tab.doc.glyphs.contains_key(&page) {
+                tab.doc.glyph_order.push_back(page);
+            }
         }
         for (page, _) in &mut tab.search.hits {
             if *page >= index {
@@ -2553,13 +2636,24 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
+        let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
+        tab.doc.glyph_order.clear();
         for (page, list) in glyphs {
             if page == index {
                 continue;
             }
             let page = if page > index { page - 1 } else { page };
             tab.doc.glyphs.insert(page, list);
+        }
+        for page in order {
+            if page == index {
+                continue;
+            }
+            let page = if page > index { page - 1 } else { page };
+            if tab.doc.glyphs.contains_key(&page) {
+                tab.doc.glyph_order.push_back(page);
+            }
         }
         tab.search.hits.retain(|(page, _)| *page != index);
         for (page, _) in &mut tab.search.hits {
@@ -5803,5 +5897,24 @@ mod shortcut_tests {
         assert!(SHORTCUTS.iter().any(|row| row.keys == "X"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "W"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "N"));
+    }
+}
+
+#[cfg(test)]
+mod glyph_cache_tests {
+    use super::{evict, GLYPH_CACHE_PAGES};
+
+    #[test]
+    fn evict_drops_oldest_unpinned_to_cap() {
+        let keys: Vec<usize> = (0..10).collect();
+        assert_eq!(evict(&keys, &[], 4), vec![0, 1, 2, 3, 4, 5]);
+        assert_eq!(evict(&keys, &[0, 1], 4), vec![2, 3, 4, 5, 6, 7]);
+        assert!(evict(&keys, &[], 10).is_empty());
+        assert!(evict(&keys, &[], 64).is_empty());
+        // Pinned oldest pages are skipped; newer unpinned pages go instead.
+        assert_eq!(evict(&keys, &[0, 1, 2, 3], 4), vec![4, 5, 6, 7, 8, 9]);
+        // More pinned than cap: never evict pinned, even if over capacity.
+        assert!(evict(&[1, 2, 3], &[1, 2, 3], 1).is_empty());
+        assert_eq!(GLYPH_CACHE_PAGES, 64);
     }
 }

@@ -179,7 +179,12 @@ impl DocumentEngine {
         Ok(glyphs_from_structured(&text.structured()))
     }
 
-    pub fn search_page(&self, page: usize, needle: &str) -> Result<Vec<PdfRect>, String> {
+    pub fn search_page(
+        &self,
+        page: usize,
+        needle: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<PdfRect>, String> {
         if needle.is_empty() || page >= self.pages.len() {
             return Ok(Vec::new());
         }
@@ -187,6 +192,10 @@ impl DocumentEngine {
         let text = pdf_page
             .to_text_page(TextPageFlags::empty())
             .map_err(show)?;
+        if case_sensitive {
+            return Ok(search_structured_exact(&text.structured(), needle));
+        }
+        // MuPDF's TextPage::search folds case (FZ_SEARCH_IGNORE_CASE).
         Ok(text
             .search(needle)
             .map_err(show)?
@@ -771,6 +780,51 @@ fn glyphs_from_structured(text: &StructuredText) -> PageGlyphs {
         }
     }
     PageGlyphs::new(glyphs, line_bounds)
+}
+
+/// Exact (case-sensitive) substring search over structured page text.
+///
+/// MuPDF's Rust `TextPage::search` always ignores case; this walks chars in
+/// reading order and unions each match's glyph quads into one hit rect.
+fn search_structured_exact(text: &StructuredText, needle: &str) -> Vec<PdfRect> {
+    let needle: Vec<char> = needle.chars().collect();
+    if needle.is_empty() {
+        return Vec::new();
+    }
+    let mut haystack: Vec<(char, PdfRect)> = Vec::new();
+    for block in &text.blocks {
+        let TextBlockContent::Text { lines } = &block.content else {
+            continue;
+        };
+        for line in lines {
+            for ch in &line.chars {
+                haystack.push((ch.ch, quad_bounds(ch.quad.clone())));
+            }
+        }
+    }
+    let n = needle.len();
+    let mut hits = Vec::new();
+    if haystack.len() < n {
+        return hits;
+    }
+    for start in 0..=(haystack.len() - n) {
+        if haystack[start..start + n]
+            .iter()
+            .zip(needle.iter())
+            .all(|((ch, _), want)| ch == want)
+        {
+            let mut xs = Vec::with_capacity(n * 2);
+            let mut ys = Vec::with_capacity(n * 2);
+            for (_, rect) in &haystack[start..start + n] {
+                xs.push(rect.x0);
+                xs.push(rect.x1);
+                ys.push(rect.y0);
+                ys.push(rect.y1);
+            }
+            hits.push(PdfRect::from_minmax(xs, ys));
+        }
+    }
+    hits
 }
 
 fn to_point(point: PdfPoint) -> Point {
@@ -1959,6 +2013,43 @@ mod tests {
             result,
             Err(message) if message == "This PDF has no readable pages. It may be damaged."
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_page_respects_case_flag_on_sample() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-search-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+        let engine = DocumentEngine::open(&path).unwrap().engine;
+
+        let insensitive = engine.search_page(0, "hello", false).unwrap();
+        assert!(
+            !insensitive.is_empty(),
+            "case-insensitive search should match Hello"
+        );
+
+        let wrong_case = engine.search_page(0, "hello", true).unwrap();
+        assert!(
+            wrong_case.is_empty(),
+            "case-sensitive search must not match Hello for needle hello"
+        );
+
+        let exact = engine.search_page(0, "Hello", true).unwrap();
+        assert!(!exact.is_empty(), "exact case Hello should hit");
+        assert!(
+            (exact[0].y0 - insensitive[0].y0).abs() < 1.0,
+            "exact and insensitive hits should share a y"
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

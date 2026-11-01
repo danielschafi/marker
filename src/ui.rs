@@ -50,6 +50,8 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
 const TAB_BAR_H: f32 = 32.0;
 const TOOL_BAR_H: f32 = 28.0;
 const SEARCH_BAR_H: f32 = 32.0;
+const SEARCH_HIT_ROW_H: f32 = 22.0;
+const SEARCH_HIT_MAX_ROWS: usize = 6;
 const TAB_PILL_H: f32 = 20.0;
 const TOOL_CHIP: Vec2 = Vec2::new(24.0, 22.0);
 
@@ -592,6 +594,9 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
     let mut close = false;
     let mut next = false;
     let mut prev = false;
+    let mut jump = None;
+    let mut case_flag = app.settings.search_case_sensitive;
+    let mut case_changed = false;
     {
         let Some(tab) = app.tab_mut() else {
             return;
@@ -600,8 +605,14 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
             return;
         }
         let mut query_changed = false;
+        let hit_rows = tab.search.hits.len().min(SEARCH_HIT_MAX_ROWS);
+        let list_h = if hit_rows > 0 {
+            hit_rows as f32 * SEARCH_HIT_ROW_H + 6.0
+        } else {
+            0.0
+        };
         TopBottomPanel::top("search")
-            .exact_height(SEARCH_BAR_H)
+            .exact_height(SEARCH_BAR_H + list_h)
             .show_separator_line(false)
             .frame(
                 egui::Frame::new()
@@ -610,54 +621,117 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                     .inner_margin(egui::Margin::symmetric(10, 4)),
             )
             .show(ctx, |ui| {
-                ui.horizontal_centered(|ui| {
-                    ui.label(RichText::new("Find").strong());
-                    let edit = ui.add(
-                        TextEdit::singleline(&mut tab.search.query)
-                            .desired_width(280.0)
-                            .hint_text("Search this PDF"),
-                    );
-                    if tab.search.focus {
-                        edit.request_focus();
-                        tab.search.focus = false;
-                    }
-                    if edit.changed() {
-                        query_changed = true;
-                    }
-                    let count = tab.search.hits.len();
-                    let label = if tab.search.query.is_empty() {
-                        String::new()
-                    } else if count == 0 {
-                        if tab.search.pending {
-                            "searching…".into()
-                        } else {
-                            "no matches".into()
+                // Fixed-height find row so the hit list below keeps room
+                // (horizontal_centered would eat the whole panel height).
+                ui.allocate_ui_with_layout(
+                    Vec2::new(ui.available_width(), SEARCH_BAR_H - 8.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.label(RichText::new("Find").strong());
+                        let edit = ui.add(
+                            TextEdit::singleline(&mut tab.search.query)
+                                .desired_width(280.0)
+                                .hint_text("Search this PDF"),
+                        );
+                        if tab.search.focus {
+                            edit.request_focus();
+                            tab.search.focus = false;
                         }
-                    } else {
-                        format!("{} / {}", tab.search.current + 1, count)
-                    };
-                    ui.label(RichText::new(label).weak().size(12.0));
-                    if chrome_button(ui, "Prev", false).clicked() {
-                        prev = true;
-                    }
-                    if chrome_button(ui, "Next", false).clicked() {
-                        next = true;
-                    }
-                    if chrome_button(ui, "×", false).clicked() {
-                        close = true;
-                    }
-                    if edit.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
-                        if ui.input(|input| input.modifiers.shift) {
-                            prev = true;
+                        if edit.changed() {
+                            query_changed = true;
+                        }
+                        if ui
+                            .checkbox(&mut case_flag, "Case")
+                            .on_hover_text("Match letter case")
+                            .changed()
+                        {
+                            case_changed = true;
+                        }
+                        let count = tab.search.hits.len();
+                        let label = if tab.search.query.is_empty() {
+                            String::new()
+                        } else if count == 0 {
+                            if tab.search.pending {
+                                "searching…".into()
+                            } else {
+                                "no matches".into()
+                            }
                         } else {
+                            format!("{} / {}", tab.search.current + 1, count)
+                        };
+                        ui.label(RichText::new(label).weak().size(12.0));
+                        if chrome_button(ui, "Prev", false).clicked() {
+                            prev = true;
+                        }
+                        if chrome_button(ui, "Next", false).clicked() {
                             next = true;
                         }
-                    }
-                    if edit.has_focus() && ui.input(|input| input.key_pressed(Key::Escape)) {
-                        close = true;
-                    }
-                });
+                        if chrome_button(ui, "×", false).clicked() {
+                            close = true;
+                        }
+                        if edit.lost_focus() && ui.input(|input| input.key_pressed(Key::Enter)) {
+                            if ui.input(|input| input.modifiers.shift) {
+                                prev = true;
+                            } else {
+                                next = true;
+                            }
+                        }
+                        if edit.has_focus() && ui.input(|input| input.key_pressed(Key::Escape)) {
+                            close = true;
+                        }
+                    },
+                );
+                if !tab.search.hits.is_empty() {
+                    ui.add_space(2.0);
+                    let query = tab.search.query.clone();
+                    let current = tab.search.current;
+                    let hits: Vec<(usize, Option<f32>)> = tab
+                        .search
+                        .hits
+                        .iter()
+                        .map(|(page, quads)| (*page, quads.first().map(|q| q.y0)))
+                        .collect();
+                    ScrollArea::vertical()
+                        .max_height(SEARCH_HIT_MAX_ROWS as f32 * SEARCH_HIT_ROW_H)
+                        .show(ui, |ui| {
+                            for (index, (page, y)) in hits.iter().enumerate() {
+                                let selected = index == current;
+                                let label = if query.is_empty() {
+                                    format!("page {}", page + 1)
+                                } else {
+                                    format!("page {} · {query}", page + 1)
+                                };
+                                let fill = if selected {
+                                    accent_fill(ui.ctx(), 36)
+                                } else {
+                                    Color32::TRANSPARENT
+                                };
+                                let text = if selected {
+                                    colors.accent
+                                } else {
+                                    colors.text
+                                };
+                                let response = ui.add(
+                                    Button::new(RichText::new(label).size(12.0).color(text))
+                                        .fill(fill)
+                                        .stroke(Stroke::NONE)
+                                        .corner_radius(4.0)
+                                        .min_size(Vec2::new(ui.available_width(), SEARCH_HIT_ROW_H)),
+                                );
+                                if response.clicked() {
+                                    tab.search.current = index;
+                                    jump = Some((*page, *y));
+                                }
+                            }
+                        });
+                }
             });
+        if case_changed {
+            tab.search.current = 0;
+            tab.search.hits.clear();
+            tab.search.pending = !tab.search.query.trim().is_empty();
+            tab.search.last_sent.clear();
+        }
         if query_changed {
             tab.search.current = 0;
             tab.search.last_sent.clear();
@@ -668,6 +742,12 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
             tab.search.query.clear();
             tab.search.last_sent.clear();
         }
+    }
+    if case_changed {
+        app.settings.set_search_case_sensitive(case_flag);
+    }
+    if let Some((page, y)) = jump {
+        app.queue_jump(page, y);
     }
     if next {
         app.search_step(1);

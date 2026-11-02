@@ -514,6 +514,13 @@ pub(crate) struct MathPreview {
     pub(crate) error: Option<String>,
 }
 
+impl MathPreview {
+    /// True when the block preview has a final PDF or a terminal error.
+    pub(crate) fn is_settled(&self) -> bool {
+        !self.pending && (self.pdf.is_some() || self.error.is_some())
+    }
+}
+
 /// Ready payload for [`MathCache`]. The SVG stays so a later zoom can re-raster.
 pub(crate) struct InlineReady {
     /// SVG stays so a later zoom can re-raster without asking Typst again.
@@ -877,6 +884,33 @@ pub(crate) enum SaveState {
     Dirty { since: Instant },
     Saving,
     Failed { message: String, at: Instant },
+}
+
+impl SaveState {
+    /// Mark dirty unless a save is already in flight.
+    pub(crate) fn touch(&mut self) {
+        if !matches!(self, Self::Saving) {
+            *self = SaveState::Dirty {
+                since: Instant::now(),
+            };
+        }
+    }
+
+    /// After a finished save, re-arm dirty with a backdated stamp so autosave retries soon.
+    pub(crate) fn redirty_soon(&mut self) {
+        *self = Self::Dirty {
+            since: Instant::now() - Duration::from_secs(2),
+        };
+    }
+
+    /// Whether the debounce has elapsed (or a prior failure should retry).
+    pub(crate) fn autosave_due(&self) -> bool {
+        match self {
+            Self::Dirty { since } => since.elapsed() >= Duration::from_millis(1500),
+            Self::Failed { .. } => true,
+            Self::Clean | Self::Saving => false,
+        }
+    }
 }
 
 /// Which highlight export is waiting on glyph loads (ST1 / ST3).
@@ -1891,11 +1925,7 @@ impl MarkerApp {
             tab.undo.remove(0);
         }
         tab.redo.clear();
-        if !matches!(tab.save, SaveState::Saving) {
-            tab.save = SaveState::Dirty {
-                since: Instant::now(),
-            };
-        }
+        tab.save.touch();
     }
 
     pub(crate) fn seal_then_arm(&mut self) {
@@ -1954,11 +1984,7 @@ impl MarkerApp {
                 tab.menu = None;
                 tab.style_bar = None;
                 tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
-                if !matches!(tab.save, SaveState::Saving) {
-                    tab.save = SaveState::Dirty {
-                        since: Instant::now(),
-                    };
-                }
+                tab.save.touch();
             }
             UndoEntry::InsertPage { index } => {
                 let gen = self.tab().map(|tab| tab.doc.gen);
@@ -2017,11 +2043,7 @@ impl MarkerApp {
                 tab.menu = None;
                 tab.style_bar = None;
                 tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
-                if !matches!(tab.save, SaveState::Saving) {
-                    tab.save = SaveState::Dirty {
-                        since: Instant::now(),
-                    };
-                }
+                tab.save.touch();
             }
             UndoEntry::InsertPage { index } => {
                 let gen = self.tab().map(|tab| tab.doc.gen);
@@ -3405,9 +3427,7 @@ impl MarkerApp {
                         }
                     }
                     if tab.doc.session.is_dirty() || tab.force_save {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now() - Duration::from_secs(2),
-                        };
+                        tab.save.redirty_soon();
                     } else {
                         tab.save = SaveState::Clean;
                     }
@@ -3463,9 +3483,7 @@ impl MarkerApp {
                         }
                     }
                     if tab.doc.session.is_dirty() || tab.force_save {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now() - Duration::from_secs(2),
-                        };
+                        tab.save.redirty_soon();
                     } else {
                         tab.save = SaveState::Clean;
                     }
@@ -3569,11 +3587,7 @@ impl MarkerApp {
                         }
                     }
                     tab.doc.session.mark_dirty(render.id);
-                    if !matches!(tab.save, SaveState::Saving) {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }
@@ -4170,11 +4184,7 @@ impl MarkerApp {
             let Some(preview) = tab.previews.get(&id) else {
                 return;
             };
-            if preview.pending
-                || preview.pdf_pending
-                || preview.pdf.is_some()
-                || preview.error.is_some()
-            {
+            if preview.pending || preview.pdf_pending || preview.is_settled() {
                 return;
             }
             (
@@ -4238,7 +4248,7 @@ impl MarkerApp {
                         continue;
                     }
                     match tab.previews.get(&annot.id) {
-                        Some(preview) if preview.error.is_some() || preview.pdf.is_some() => {}
+                        Some(preview) if preview.is_settled() => {}
                         Some(preview) if preview.pending || preview.pdf_pending => waiting = true,
                         Some(preview)
                             if !preview.pending
@@ -4591,11 +4601,7 @@ impl MarkerApp {
         }
         for file in ctx.input(|input| input.raw.dropped_files.clone()) {
             if let Some(path) = file.path {
-                if path
-                    .extension()
-                    .and_then(|ext| ext.to_str())
-                    .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
-                {
+                if instance::is_pdf(&path) {
                     self.open_path(path);
                 }
             }
@@ -4816,14 +4822,7 @@ impl MarkerApp {
                         continue;
                     }
                 }
-                tab.force_save
-                    || match tab.save {
-                        SaveState::Dirty { since } => {
-                            since.elapsed() >= Duration::from_millis(1500)
-                        }
-                        SaveState::Failed { .. } => true,
-                        _ => false,
-                    }
+                tab.force_save || tab.save.autosave_due()
             };
             if !due {
                 continue;
@@ -6156,11 +6155,7 @@ impl MarkerApp {
                 if let Some(bucket) = touched {
                     kind_bucket = Some(bucket);
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, SaveState::Saving) {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }
@@ -6207,11 +6202,7 @@ impl MarkerApp {
                 }
                 if changed {
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, SaveState::Saving) {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }
@@ -6239,11 +6230,7 @@ impl MarkerApp {
                 }
                 if changed {
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, SaveState::Saving) {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }
@@ -6312,11 +6299,7 @@ impl MarkerApp {
                 }
                 if changed {
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, SaveState::Saving) {
-                        tab.save = SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }

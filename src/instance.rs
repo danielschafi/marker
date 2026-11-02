@@ -335,7 +335,7 @@ fn runtime_uid() -> u32 {
     }
 }
 
-fn is_pdf(path: &Path) -> bool {
+pub(crate) fn is_pdf(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))

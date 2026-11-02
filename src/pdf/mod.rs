@@ -1,4 +1,9 @@
+mod annot_read;
+mod annot_write;
+mod appearance;
+mod convert;
 mod engine;
+mod raster;
 mod worker;
 
 /// Identity of one open document slot (UI ↔ PDF worker).

@@ -14,6 +14,9 @@ use super::convert::{
     convert_outline, glyphs_from_structured, quad_bounds, search_structured_exact,
 };
 use super::raster::{premultiplied_tile_pixels_from_pixmap, tile_device_rect};
+use super::repair::{
+    is_repaired_sidecar, pdfunite_available, repaired_sidecar_path, write_poppler_repaired_copy,
+};
 
 pub const TILE_PX: i32 = 1024;
 /// Target width in device pixels for page thumbnails (FT10). Separate from
@@ -35,6 +38,9 @@ pub enum Error {
     PageOutOfRange { page: usize, count: usize },
     #[error("image encode failed")]
     Encode,
+    /// MuPDF reported no pages (and Poppler repair was unavailable or also failed).
+    #[error("This PDF has no readable pages. It may be damaged.")]
+    NoReadablePages,
     #[error("{0}")]
     Message(String),
 }
@@ -131,6 +137,8 @@ pub struct SavedXref {
 pub struct LoadedPdf {
     pub engine: DocumentEngine,
     pub annotations: Vec<Annotation>,
+    /// When set, `engine` was opened from a Poppler-repaired sidecar of this path.
+    pub repaired_from: Option<PathBuf>,
 }
 
 pub struct DocumentEngine {
@@ -147,14 +155,36 @@ pub struct DocumentEngine {
 }
 
 impl DocumentEngine {
+    /// Open `path` with MuPDF. When MuPDF reports zero pages, attempt a Poppler
+    /// (`pdfunite`) structural rewrite into a sibling `*.marker-repaired.pdf`
+    /// and open that copy instead. The original file is never overwritten.
     pub fn open(path: &Path) -> Result<LoadedPdf, Error> {
+        match Self::open_mupdf(path) {
+            Ok(loaded) => Ok(loaded),
+            Err(Error::NoReadablePages) => Self::open_via_poppler_repair(path),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn open_via_poppler_repair(path: &Path) -> Result<LoadedPdf, Error> {
+        if is_repaired_sidecar(path) || !pdfunite_available() {
+            return Err(Error::NoReadablePages);
+        }
+        let sidecar = repaired_sidecar_path(path);
+        write_poppler_repaired_copy(path, &sidecar)?;
+        let mut loaded = Self::open_mupdf(&sidecar)?;
+        loaded.repaired_from = Some(path.to_path_buf());
+        Ok(loaded)
+    }
+
+    fn open_mupdf(path: &Path) -> Result<LoadedPdf, Error> {
         let doc = PdfDocument::open(path)?;
         if doc.needs_password().unwrap_or(false) {
             return Err("This PDF is password protected.".into());
         }
         let count = doc.page_count()?;
         if count <= 0 {
-            return Err("This PDF has no readable pages. It may be damaged.".into());
+            return Err(Error::NoReadablePages);
         }
         let mut pages = Vec::with_capacity(count as usize);
         for index in 0..count {
@@ -182,7 +212,12 @@ impl DocumentEngine {
                 bak_ensured: false,
             },
             annotations,
+            repaired_from: None,
         })
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     pub fn pages(&self) -> &[PageInfo] {

@@ -4,6 +4,7 @@ mod appearance;
 mod convert;
 mod engine;
 mod raster;
+mod repair;
 mod worker;
 
 /// Identity of one open document slot (UI ↔ PDF worker).
@@ -31,4 +32,5 @@ pub use engine::{
     Error, InlineMathSave, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage,
     TILE_PX,
 };
+pub use repair::repaired_sidecar_path as repaired_sidecar_for;
 pub use worker::{OpenedDoc, PdfReply, PdfWorker};

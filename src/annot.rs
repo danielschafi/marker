@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::geom::{dist_to_segment, PdfPoint, PdfRect, Rgb};
 
 /// Marker-tint opacity for highlights (~0.45).
@@ -272,7 +274,8 @@ impl AnnotKind {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Session {
-    pub annotations: Vec<Annotation>,
+    /// Shared so undo entries keep unchanged annotations without deep copies.
+    pub annotations: Vec<Arc<Annotation>>,
     pub next_id: u64,
     pub epoch: u64,
     pub pending_deletes: Vec<(usize, i32)>,
@@ -292,34 +295,46 @@ impl Session {
     pub fn from_imported(annotations: Vec<Annotation>) -> Self {
         let next_id = annotations.iter().map(|a| a.id).max().unwrap_or(0) + 1;
         Self {
-            annotations,
+            annotations: annotations.into_iter().map(Arc::new).collect(),
             next_id,
             epoch: 0,
             pending_deletes: Vec::new(),
         }
     }
 
+    /// Owned copies for save snapshots (and callers that need `Vec<Annotation>`).
+    pub fn cloned_annotations(&self) -> Vec<Annotation> {
+        self.annotations
+            .iter()
+            .map(|annot| annot.as_ref().clone())
+            .collect()
+    }
+
     pub fn insert(&mut self, page: usize, kind: AnnotKind) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.epoch += 1;
-        self.annotations.push(Annotation {
+        self.annotations.push(Arc::new(Annotation {
             id,
             page,
             xref: None,
             dirty: true,
             revision: self.epoch,
             kind,
-        });
+        }));
         id
     }
 
     pub fn get(&self, id: u64) -> Option<&Annotation> {
-        self.annotations.iter().find(|a| a.id == id)
+        self.annotations
+            .iter()
+            .find(|a| a.id == id)
+            .map(|a| a.as_ref())
     }
 
     pub fn get_mut(&mut self, id: u64) -> Option<&mut Annotation> {
-        self.annotations.iter_mut().find(|a| a.id == id)
+        let annot = self.annotations.iter_mut().find(|a| a.id == id)?;
+        Some(Arc::make_mut(annot))
     }
 
     pub fn mark_dirty(&mut self, id: u64) {
@@ -369,11 +384,40 @@ impl Session {
         !self.pending_deletes.is_empty() || self.annotations.iter().any(|a| a.dirty)
     }
 
+    /// Undo-seal equality: Arc pointer identity for unchanged rows, deep `==`
+    /// only for dirty ids (and when pointers differ on a dirty annotation).
+    pub fn eq_for_undo(&self, other: &Session) -> bool {
+        if self.next_id != other.next_id
+            || self.epoch != other.epoch
+            || self.pending_deletes != other.pending_deletes
+            || self.annotations.len() != other.annotations.len()
+        {
+            return false;
+        }
+        for (left, right) in self.annotations.iter().zip(&other.annotations) {
+            if left.id != right.id {
+                return false;
+            }
+            if Arc::ptr_eq(left, right) {
+                continue;
+            }
+            // Different allocation: deep-compare dirty ids only.
+            if left.dirty || right.dirty {
+                if left.as_ref() != right.as_ref() {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
+    }
+
     /// After a blank page is inserted at `at`, bump later page indices.
     pub fn shift_pages_from(&mut self, at: usize) {
         for annot in &mut self.annotations {
             if annot.page >= at {
-                annot.page += 1;
+                Arc::make_mut(annot).page += 1;
             }
         }
         for (page, _) in &mut self.pending_deletes {
@@ -390,7 +434,7 @@ impl Session {
         self.annotations.retain(|annot| annot.page != at);
         for annot in &mut self.annotations {
             if annot.page > at {
-                annot.page -= 1;
+                Arc::make_mut(annot).page -= 1;
             }
         }
         self.pending_deletes.retain(|(page, _)| *page != at);
@@ -416,12 +460,13 @@ pub fn restore_session(current: &Session, mut snap: Session) -> Session {
     for annot in &mut snap.annotations {
         match current.annotations.iter().find(|item| item.id == annot.id) {
             Some(live) => {
+                let annot = Arc::make_mut(annot);
                 annot.xref = live.xref.or(annot.xref);
                 if live.kind != annot.kind || live.page != annot.page {
                     annot.dirty = true;
                 }
             }
-            None => annot.dirty = true,
+            None => Arc::make_mut(annot).dirty = true,
         }
     }
     snap.epoch = snap.epoch.max(current.epoch).saturating_add(1);

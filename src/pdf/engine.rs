@@ -2294,7 +2294,7 @@ mod tests {
         );
 
         let snapshot = SaveSnapshot {
-            upserts: session.annotations.clone(),
+            upserts: session.cloned_annotations(),
             deletes: Vec::new(),
             math_pdfs: HashMap::new(),
             inline_math: Vec::new(),
@@ -2372,7 +2372,7 @@ mod tests {
         );
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2446,7 +2446,7 @@ mod tests {
         );
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2515,7 +2515,7 @@ mod tests {
             },
         );
         let snapshot = SaveSnapshot {
-            upserts: session.annotations.clone(),
+            upserts: session.cloned_annotations(),
             deletes: Vec::new(),
             math_pdfs: HashMap::new(),
             inline_math: Vec::new(),
@@ -2592,7 +2592,7 @@ mod tests {
         );
         let xrefs = engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2609,7 +2609,7 @@ mod tests {
         let before = std::fs::metadata(&path).unwrap().len();
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2708,7 +2708,7 @@ mod tests {
         );
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2790,7 +2790,7 @@ mod tests {
         );
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -2838,9 +2838,9 @@ mod tests {
         // Editing the color rewrites the same annotation instead of leaving it foreign.
         let mut session = crate::annot::Session::from_imported(again.annotations);
         let edited = Rgb::new(10, 20, 30);
-        let underline = session
+        let underline_id = session
             .annotations
-            .iter_mut()
+            .iter()
             .find(|annot| {
                 matches!(
                     annot.kind,
@@ -2850,15 +2850,18 @@ mod tests {
                     }
                 )
             })
+            .map(|annot| annot.id)
             .unwrap();
+        let underline = session.get_mut(underline_id).unwrap();
         if let AnnotKind::Markup { color, .. } = &mut underline.kind {
             *color = edited;
         }
         underline.dirty = true;
+        let underline = underline.clone();
         let mut engine = again.engine;
         engine
             .save(&SaveSnapshot {
-                upserts: vec![underline.clone()],
+                upserts: vec![underline],
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),
@@ -3018,7 +3021,7 @@ mod tests {
         );
         engine
             .save(&SaveSnapshot {
-                upserts: session.annotations.clone(),
+                upserts: session.cloned_annotations(),
                 deletes: Vec::new(),
                 math_pdfs: HashMap::new(),
                 inline_math: Vec::new(),

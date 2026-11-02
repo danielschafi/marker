@@ -11,6 +11,7 @@ mod pdf;
 mod settings;
 mod theme;
 mod ui;
+mod undo;
 mod view;
 
 fn main() -> eframe::Result<()> {

@@ -1456,89 +1456,75 @@ fn brand_family() -> FontFamily {
     FontFamily::Name(BRAND_FAMILY.into())
 }
 
-/// Vector brand mark (hex marker at 60°), matching `packaging/marker.svg`.
+/// Document + yellow highlight mark matching `packaging/marker.svg` (512 viewBox).
 pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let painter = ui.painter();
-    let radius = (size * 0.22).clamp(6.0, 18.0);
-    let chassis = match ui.ctx().theme() {
-        egui::Theme::Dark => Color32::from_rgb(26, 26, 30),
-        egui::Theme::Light => Color32::from_rgb(32, 32, 38),
+    let inverted = matches!(ui.ctx().theme(), egui::Theme::Light);
+    // Colors from logo-icon-512.svg / logo-icon-512-inverted.svg.
+    let (chassis, page, fold, lines, highlight, ink) = if inverted {
+        (
+            Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+            Color32::from_rgb(0x55, 0x55, 0x5C),
+            Color32::from_rgb(0x6A, 0x6A, 0x72),
+            Color32::from_rgb(0xFF, 0xC9, 0x3C),
+            Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        )
+    } else {
+        (
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+            Color32::WHITE,
+            Color32::from_rgb(0xD6, 0xD6, 0xDB),
+            Color32::from_rgb(0xB8, 0xB8, 0xBF),
+            Color32::from_rgb(0xFF, 0xC9, 0x3C),
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+        )
     };
-    painter.rect_filled(rect, CornerRadius::same(radius as u8), chassis);
 
-    // Yellowish stroke capsule the tip rests on.
-    let stroke = Rect::from_min_size(
-        Pos2::new(rect.left() + size * 0.14, rect.top() + size * 0.84),
-        Vec2::new(size * 0.44, size * 0.095),
-    );
-    painter.rect_filled(
-        stroke,
-        CornerRadius::same((size * 0.048).clamp(2.0, 6.0) as u8),
-        Color32::from_rgb(235, 184, 60),
-    );
-
-    // Hex barrel at ~60° (tip down-left → eraser up-right): three facet bands.
-    let facet = |a: Pos2, b: Pos2, c: Pos2, d: Pos2, color: Color32| {
-        painter.add(egui::Shape::convex_polygon(
-            vec![a, b, c, d],
-            color,
-            Stroke::NONE,
-        ));
+    let scale = size / 512.0;
+    let p = |x: f32, y: f32| Pos2::new(rect.left() + x * scale, rect.top() + y * scale);
+    let r = |x: f32, y: f32, w: f32, h: f32| {
+        Rect::from_min_size(p(x, y), Vec2::new(w * scale, h * scale))
     };
-    let o = rect.min;
-    let s = size;
-    // Mid facet (main)
-    facet(
-        Pos2::new(o.x + s * 0.30, o.y + s * 0.62),
-        Pos2::new(o.x + s * 0.62, o.y + s * 0.28),
-        Pos2::new(o.x + s * 0.70, o.y + s * 0.36),
-        Pos2::new(o.x + s * 0.38, o.y + s * 0.70),
-        Color32::from_rgb(242, 196, 60),
-    );
-    // Top facet (lighter)
-    facet(
-        Pos2::new(o.x + s * 0.34, o.y + s * 0.56),
-        Pos2::new(o.x + s * 0.66, o.y + s * 0.22),
-        Pos2::new(o.x + s * 0.70, o.y + s * 0.28),
-        Pos2::new(o.x + s * 0.38, o.y + s * 0.62),
-        Color32::from_rgb(255, 232, 145),
-    );
-    // Bottom facet (darker)
-    facet(
-        Pos2::new(o.x + s * 0.30, o.y + s * 0.70),
-        Pos2::new(o.x + s * 0.62, o.y + s * 0.36),
-        Pos2::new(o.x + s * 0.66, o.y + s * 0.42),
-        Pos2::new(o.x + s * 0.34, o.y + s * 0.76),
-        Color32::from_rgb(184, 120, 28),
-    );
+    let rr = |v: f32| CornerRadius::same((v * scale).round().clamp(1.0, 255.0) as u8);
 
-    // Symmetric tip
+    painter.rect_filled(rect, rr(116.0), chassis);
+
+    // Dog-eared document body (path M152 96H300L376 172V400… approximated).
     painter.add(egui::Shape::convex_polygon(
         vec![
-            Pos2::new(o.x + s * 0.30, o.y + s * 0.58),
-            Pos2::new(o.x + s * 0.18, o.y + s * 0.84),
-            Pos2::new(o.x + s * 0.36, o.y + s * 0.74),
+            p(152.0, 96.0),
+            p(300.0, 96.0),
+            p(300.0, 172.0),
+            p(376.0, 172.0),
+            p(376.0, 400.0),
+            p(152.0, 400.0),
         ],
-        Color32::from_rgb(184, 130, 36),
+        page,
+        Stroke::NONE,
+    ));
+    // Soft bottom/side roundness via overlays is skipped; fold triangle:
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(300.0, 96.0), p(376.0, 172.0), p(300.0, 172.0)],
+        fold,
         Stroke::NONE,
     ));
 
-    // Ferrule + cream eraser
-    facet(
-        Pos2::new(o.x + s * 0.64, o.y + s * 0.22),
-        Pos2::new(o.x + s * 0.68, o.y + s * 0.18),
-        Pos2::new(o.x + s * 0.76, o.y + s * 0.26),
-        Pos2::new(o.x + s * 0.72, o.y + s * 0.30),
-        Color32::from_rgb(214, 194, 150),
-    );
-    facet(
-        Pos2::new(o.x + s * 0.68, o.y + s * 0.14),
-        Pos2::new(o.x + s * 0.80, o.y + s * 0.08),
-        Pos2::new(o.x + s * 0.88, o.y + s * 0.20),
-        Pos2::new(o.x + s * 0.76, o.y + s * 0.28),
-        Color32::from_rgb(255, 250, 240),
-    );
+    if size >= 48.0 {
+        // Top text line omitted below ~64px per brand sheet.
+        if size >= 72.0 {
+            painter.rect_filled(r(176.0, 204.0, 104.0, 14.0), rr(7.0), lines);
+        }
+        painter.rect_filled(r(176.0, 330.0, 176.0, 14.0), rr(7.0), lines);
+        painter.rect_filled(r(176.0, 364.0, 108.0, 14.0), rr(7.0), lines);
+        painter.rect_filled(r(148.0, 250.0, 256.0, 48.0), rr(14.0), highlight);
+        painter.rect_filled(r(176.0, 266.0, 164.0, 16.0), rr(8.0), ink);
+    } else {
+        // ≤32px: document + thicker highlight only.
+        painter.rect_filled(r(140.0, 236.0, 272.0, 72.0), rr(18.0), highlight);
+        painter.rect_filled(r(168.0, 260.0, 180.0, 24.0), rr(12.0), ink);
+    }
 }
 
 pub(crate) fn brand_wordmark(ui: &mut egui::Ui) {

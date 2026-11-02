@@ -2,7 +2,7 @@
 
 use egui::IconData;
 
-/// 256×256 RGBA window icon (rasterized from `packaging/marker.svg`).
+/// 256×256 RGBA window icon (document + yellow highlight from `packaging/marker.svg`).
 pub(crate) fn window_icon() -> IconData {
     let image = image::load_from_memory(include_bytes!("../assets/icons/marker-256.png"))
         .expect("embedded marker icon must decode")

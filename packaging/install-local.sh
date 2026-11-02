@@ -31,8 +31,8 @@ install -m 755 "$binary" "$bin_dir/marker"
 install -m 644 "$root/packaging/marker.desktop" "$app_dir/marker.desktop"
 install -m 644 "$root/packaging/marker.svg" "$icon_dir/marker.svg"
 
-# Fixed-size PNGs (rasterized from packaging/marker.svg) for DEs that prefer them.
-for size in 16 32 48 256; do
+# Fixed-size PNGs (rasterized from packaging/marker.svg; 32/64 use tuned variants).
+for size in 16 32 48 64 128 256 512; do
   png_dir="$hicolor/${size}x${size}/apps"
   install -d "$png_dir"
   install -m 644 "$root/assets/icons/marker-${size}.png" "$png_dir/marker.png"

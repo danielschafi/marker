@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::annot::AnnotKind;
-use crate::math::MathCache;
+use crate::math::{EntryKind, InlineReady, MathCache, MathKey};
 use crate::math_spans;
 use crate::pdf::{DocId, InlineMathSave, SaveSnapshot};
 use crate::view;
@@ -66,7 +66,7 @@ impl MarkerApp {
 
     pub(crate) fn flush_on_exit(&mut self) {
         const WAIT: Duration = Duration::from_secs(2);
-        self.math_deadlines.clear();
+        self.math.clear_deadlines();
         self.flush_math();
         let ctx = self.egui_ctx.clone();
         let doc_ids: Vec<DocId> = self
@@ -162,7 +162,7 @@ impl MarkerApp {
                     }
                 }
                 let (inline_math, rich_text_parents) =
-                    collect_inline_math_saves(&upserts, &self.egui_ctx, &self.math_cache);
+                    collect_inline_math_saves(&upserts, &self.egui_ctx, &self.math.cache);
                 tab.save_epoch = epoch;
                 tab.save_deletes = deletes.clone();
                 tab.save = SaveState::Saving;
@@ -247,7 +247,7 @@ impl MarkerApp {
             }
         }
         let (inline_math, rich_text_parents) =
-            collect_inline_math_saves(&upserts, &self.egui_ctx, &self.math_cache);
+            collect_inline_math_saves(&upserts, &self.egui_ctx, &self.math.cache);
         tab.save_epoch = epoch;
         tab.save_deletes = deletes.clone();
         tab.save = SaveState::Saving;

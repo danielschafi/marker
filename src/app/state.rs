@@ -101,7 +101,6 @@ impl Tab {
     /// Build a tab from a freshly opened document. Defaults match the former `on_pdf` literal.
     pub(crate) fn new(id: TabId, opened: OpenedDoc) -> Self {
         let tops = DocState::rebuild_tops(&opened.pages);
-        let has_outline = !opened.outline.is_empty();
         Self {
             id,
             doc: DocState {
@@ -143,7 +142,7 @@ impl Tab {
             save_when_math_ready: false,
             close_after_save: false,
             detach_after_save: false,
-            outline_open: has_outline,
+            outline_open: false,
             thumbs_open: false,
             annots_open: false,
             review_open: false,

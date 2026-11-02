@@ -105,7 +105,7 @@ enum ReadJob {
 /// module converts via [`Display`](std::fmt::Display) at the send boundary so
 /// `app.rs` (owned by RF5) does not need to change yet.
 pub enum PdfReply {
-    Opened(OpenedDoc),
+    Opened(Box<OpenedDoc>),
     /// `tile.pixels` are premultiplied RGBA8 (see [`TileImage::pixels`]).
     Tile {
         doc_id: DocId,
@@ -172,6 +172,8 @@ pub struct OpenedDoc {
     pub pages: Vec<PageInfo>,
     pub outline: Vec<OutlineNode>,
     pub annotations: Vec<Annotation>,
+    /// Present when `path` is a Poppler-repaired sidecar of this original file.
+    pub repaired_from: Option<PathBuf>,
 }
 
 pub struct PdfWorker {
@@ -371,16 +373,21 @@ impl WorkerCtx<'_> {
 fn handle_open(ctx: &mut WorkerCtx<'_>, doc_id: DocId, path: PathBuf) {
     match DocumentEngine::open(&path) {
         Ok(loaded) => {
+            let open_path = loaded.engine.path().to_path_buf();
             let opened = OpenedDoc {
                 doc_id,
-                path: path.clone(),
+                path: open_path.clone(),
                 pages: loaded.engine.pages().to_vec(),
                 outline: loaded.engine.outline().to_vec(),
                 annotations: loaded.annotations,
+                repaired_from: loaded.repaired_from,
             };
             ctx.engines.insert(doc_id, loaded.engine);
-            let _ = ctx.reads.send(ReadJob::Open { doc_id, path });
-            ctx.send(PdfReply::Opened(opened));
+            let _ = ctx.reads.send(ReadJob::Open {
+                doc_id,
+                path: open_path,
+            });
+            ctx.send(PdfReply::Opened(Box::new(opened)));
         }
         Err(err) => ctx.send(PdfReply::failed(doc_id, err)),
     }

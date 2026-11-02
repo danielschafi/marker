@@ -12,7 +12,12 @@ use super::*;
 
 impl MarkerApp {
     pub(crate) fn open_path(&mut self, path: PathBuf) {
-        if let Some(tab) = self.tabs.iter().find(|tab| tab.doc.path == path) {
+        let repaired = crate::pdf::repaired_sidecar_for(&path);
+        if let Some(tab) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.doc.path == path || tab.doc.path == repaired)
+        {
             let id = tab.id;
             if self.active != id {
                 self.activate_tab(id);

@@ -91,7 +91,9 @@ impl MarkerApp {
     pub(crate) fn on_pdf(&mut self, ctx: &egui::Context, reply: PdfReply) {
         match reply {
             PdfReply::Opened(opened) => {
+                let opened = *opened;
                 self.opening.remove(&opened.doc_id);
+                let repaired_from = opened.repaired_from.clone();
                 if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
                     self.worker.close(opened.doc_id);
                     if let Some(tab) = self.tabs.iter().find(|tab| tab.doc.path == opened.path) {
@@ -111,6 +113,15 @@ impl MarkerApp {
                 if self.tabs.len() > 1 {
                     self.pulse_tab_list();
                 }
+                self.error = repaired_from.map(|original| {
+                    format!(
+                        "Opened a Poppler-repaired copy; original left unchanged ({})",
+                        original
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("document.pdf")
+                    )
+                });
             }
             PdfReply::Tile { doc_id, tile } => {
                 let key = tile_key(&tile);

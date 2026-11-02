@@ -76,6 +76,11 @@ sudo apt install build-essential pkg-config libclang-dev \
 
 Package names vary on other distributions.
 
+Optional runtime helper for damaged PDFs: install `poppler-utils` so Marker can
+structurally rewrite cyclic/malformed xref tables via `pdfunite` into a sibling
+`*.marker-repaired.pdf` (the original file is never overwritten). Without
+Poppler, such files still fail to open instead of crashing.
+
 ## Usage
 
 Open a PDF with `Ctrl+O`, by dropping it onto the window, or by passing its

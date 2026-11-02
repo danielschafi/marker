@@ -41,11 +41,109 @@ fn open_rejects_pdf_without_readable_pages() {
 
     let result = DocumentEngine::open(&path);
 
-    assert!(matches!(
-        result,
-        Err(Error::Message(ref message))
-            if message == "This PDF has no readable pages. It may be damaged."
+    assert!(
+        matches!(result, Err(Error::NoReadablePages)),
+        "empty PDF must stay an open error"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Build a one-page PDF whose trailer `/Prev` points at its own xref (Poppler:
+/// "Infinite loop in xref table"; MuPDF: zero pages).
+fn write_cyclic_prev_xref_pdf(path: &Path) {
+    let objs = [
+        "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+        "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+        "3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> /Annots [6 0 R] >>\nendobj\n",
+        "4 0 obj\n<< /Length 44 >>\nstream\nBT /F1 24 Tf 72 720 Td (Hello) Tj ET\nendstream\nendobj\n",
+        "5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\n",
+        "6 0 obj\n<< /Type /Annot /Subtype /Highlight /Rect [70 710 140 740] /QuadPoints [70 740 140 740 70 710 140 710] /C [1 1 0] /CA 0.5 /Contents (note) /NM (marker:1) >>\nendobj\n",
+    ];
+    let header = b"%PDF-1.4\n";
+    let mut body = Vec::new();
+    let mut offsets = vec![0_usize];
+    let mut pos = header.len();
+    for obj in objs {
+        offsets.push(pos);
+        let bytes = obj.as_bytes();
+        body.extend_from_slice(bytes);
+        pos += bytes.len();
+    }
+    let xref_start = pos;
+    let mut xref = format!("xref\n0 {}\n0000000000 65535 f \n", offsets.len());
+    for &off in &offsets[1..] {
+        xref.push_str(&format!("{off:010} 00000 n \n"));
+    }
+    let trailer = format!(
+        "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_start}\n%%EOF\n",
+        offsets.len()
+    );
+    let mut base = Vec::new();
+    base.extend_from_slice(header);
+    base.extend_from_slice(&body);
+    base.extend_from_slice(xref.as_bytes());
+    base.extend_from_slice(trailer.as_bytes());
+
+    let inc = b"7 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n";
+    let new_xref_start = base.len() + inc.len();
+    let xref2 = format!(
+        "xref\n0 1\n0000000000 65535 f \n7 1\n{:010} 00000 n \ntrailer\n<< /Size 8 /Root 7 0 R /Prev {new_xref_start} >>\nstartxref\n{new_xref_start}\n%%EOF\n",
+        base.len()
+    );
+    let mut out = base;
+    out.extend_from_slice(inc);
+    out.extend_from_slice(xref2.as_bytes());
+    std::fs::write(path, out).unwrap();
+}
+
+#[test]
+fn open_recovers_cyclic_xref_via_poppler_without_overwriting_original() {
+    if !super::super::repair::pdfunite_available() {
+        eprintln!("skipping: pdfunite (poppler-utils) not on PATH");
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!(
+        "marker-xref-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("cyclic.pdf");
+    write_cyclic_prev_xref_pdf(&path);
+    let original = std::fs::read(&path).unwrap();
+
+    let mupdf_pages = PdfDocument::open(path.to_str().unwrap())
+        .unwrap()
+        .page_count()
+        .unwrap();
+    assert_eq!(mupdf_pages, 0, "fixture must reproduce MuPDF zero-page open");
+
+    let loaded = DocumentEngine::open(&path).expect("Poppler repair should open the PDF");
+    assert_eq!(loaded.engine.pages().len(), 1);
+    assert_eq!(loaded.annotations.len(), 1);
+    assert_eq!(
+        loaded.repaired_from.as_deref(),
+        Some(path.as_path()),
+        "engine should remember the unrepaired original"
+    );
+    assert_ne!(loaded.engine.path(), path.as_path());
+    assert!(
+        loaded
+            .engine
+            .path()
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(".marker-repaired.pdf"))
+    );
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "original bytes must stay untouched"
+    );
+
     let _ = std::fs::remove_dir_all(&dir);
 }
 

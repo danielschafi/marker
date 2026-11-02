@@ -1456,8 +1456,69 @@ fn brand_family() -> FontFamily {
     FontFamily::Name(BRAND_FAMILY.into())
 }
 
+/// Vector brand mark (page + highlighter), matching `packaging/marker.svg`.
+pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
+    let colors = palette(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let radius = (size * 0.22).clamp(6.0, 18.0);
+    let chassis = match ui.ctx().theme() {
+        egui::Theme::Dark => Color32::from_rgb(26, 26, 30),
+        egui::Theme::Light => Color32::from_rgb(32, 32, 38),
+    };
+    painter.rect_filled(rect, CornerRadius::same(radius as u8), chassis);
+
+    let page = Rect::from_min_max(
+        Pos2::new(rect.left() + size * 0.27, rect.top() + size * 0.17),
+        Pos2::new(rect.left() + size * 0.73, rect.top() + size * 0.83),
+    );
+    painter.rect_filled(
+        page,
+        CornerRadius::same((size * 0.05).clamp(2.0, 6.0) as u8),
+        Color32::from_rgb(251, 250, 246),
+    );
+
+    // Accent dog-ear / tab.
+    let accent = [
+        Pos2::new(page.left() - size * 0.04, page.top() + size * 0.04),
+        Pos2::new(page.left() + size * 0.14, page.top() + size * 0.04),
+        Pos2::new(page.left() - size * 0.04, page.top() + size * 0.22),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        accent.to_vec(),
+        colors.accent,
+        Stroke::NONE,
+    ));
+
+    // Highlighter stroke across the page.
+    let mark = [
+        Pos2::new(rect.left() + size * 0.20, rect.top() + size * 0.70),
+        Pos2::new(rect.left() + size * 0.72, rect.top() + size * 0.36),
+        Pos2::new(rect.left() + size * 0.80, rect.top() + size * 0.44),
+        Pos2::new(rect.left() + size * 0.28, rect.top() + size * 0.78),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        mark.to_vec(),
+        Color32::from_rgb(240, 191, 58),
+        Stroke::NONE,
+    ));
+    let tip = [
+        Pos2::new(rect.left() + size * 0.70, rect.top() + size * 0.33),
+        Pos2::new(rect.left() + size * 0.82, rect.top() + size * 0.42),
+        Pos2::new(rect.left() + size * 0.77, rect.top() + size * 0.47),
+        Pos2::new(rect.left() + size * 0.65, rect.top() + size * 0.38),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        tip.to_vec(),
+        Color32::from_rgb(255, 246, 210),
+        Stroke::NONE,
+    ));
+}
+
 pub(crate) fn brand_wordmark(ui: &mut egui::Ui) {
     let colors = palette(ui.ctx());
+    brand_mark(ui, 64.0);
+    ui.add_space(10.0);
     let font = FontId::new(72.0, brand_family());
     let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap("Marker".to_owned(), font, colors.text));
     let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());

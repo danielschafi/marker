@@ -44,7 +44,10 @@ pub(super) fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                     |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
                         for tool in Tool::ALL {
-                            tool_chip(ui, &mut app.tool, tool);
+                            let already = app.tool == tool;
+                            if tool_chip(ui, &mut app.tool, tool) && already {
+                                app.restore_default_tool_color(tool);
+                            }
                         }
                         vbar(ui);
                         app.color_controls(ui);
@@ -57,7 +60,8 @@ pub(super) fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
         });
 }
 
-fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
+/// Returns `true` when the chip was clicked.
+fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) -> bool {
     let colors = palette(ui.ctx());
     let selected = *current == tool;
     let (rect, response) = ui.allocate_exact_size(TOOL_CHIP, Sense::click());
@@ -86,7 +90,8 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
         FontId::new(8.0, FontFamily::Proportional),
         key_color,
     );
-    if response.clicked() {
+    let clicked = response.clicked();
+    if clicked {
         *current = tool;
     }
     response.widget_info(|| {
@@ -97,7 +102,17 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
             tool_a11y_label(tool),
         )
     });
-    response.on_hover_text(format!("{} ({})", tool.hint(), tool.shortcut().name()));
+    let hover = if tool.is_text_mark() || tool.is_shape() {
+        format!(
+            "{} ({}) — press again for default color",
+            tool.hint(),
+            tool.shortcut().name()
+        )
+    } else {
+        format!("{} ({})", tool.hint(), tool.shortcut().name())
+    };
+    response.on_hover_text(hover);
+    clicked
 }
 
 fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color32) {

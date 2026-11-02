@@ -467,7 +467,9 @@ fn preset_editor_window(app: &mut MarkerApp, ctx: &egui::Context) {
                 }
                 if ui
                     .button("Reset to defaults")
-                    .on_hover_text("Restore the five built-in named colors")
+                    .on_hover_text(
+                        "Restore the five built-in named colors and the default highlight swatch",
+                    )
                     .clicked()
                 {
                     reset = true;

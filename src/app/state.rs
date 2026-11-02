@@ -514,6 +514,10 @@ impl Tool {
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly
         )
     }
+
+    pub(crate) fn is_shape(self) -> bool {
+        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Line)
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CreateKind {

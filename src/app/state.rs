@@ -453,7 +453,7 @@ pub(crate) struct ReviewState {
     pub(crate) revealed: HashSet<u64>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Tool {
     Select,
     Highlight,

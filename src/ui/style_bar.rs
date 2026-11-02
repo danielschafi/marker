@@ -367,11 +367,10 @@ impl MarkerApp {
     fn active_stroke(&self) -> f32 {
         if let Some(tab) = self.tab() {
             for id in &tab.selected {
-                match tab.doc.session.get(*id).map(|a| &a.kind) {
-                    Some(AnnotKind::Shape { width, .. } | AnnotKind::Ink { width, .. }) => {
-                        return *width;
-                    }
-                    _ => {}
+                if let Some(AnnotKind::Shape { width, .. } | AnnotKind::Ink { width, .. }) =
+                    tab.doc.session.get(*id).map(|a| &a.kind)
+                {
+                    return *width;
                 }
             }
         }
@@ -548,12 +547,11 @@ impl MarkerApp {
             for id in ids {
                 let mut changed = false;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
-                    match &mut annot.kind {
-                        AnnotKind::Shape { width: slot, .. } | AnnotKind::Ink { width: slot, .. } => {
-                            *slot = width;
-                            changed = true;
-                        }
-                        _ => {}
+                    if let AnnotKind::Shape { width: slot, .. }
+                    | AnnotKind::Ink { width: slot, .. } = &mut annot.kind
+                    {
+                        *slot = width;
+                        changed = true;
                     }
                 }
                 if changed {

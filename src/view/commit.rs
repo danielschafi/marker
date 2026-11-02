@@ -166,6 +166,7 @@ fn commit_region(
     app.request_crop(page, rect);
 }
 
+#[allow(clippy::too_many_arguments)] // mirrors Drag::Highlight fields
 fn commit_highlight(
     app: &mut MarkerApp,
     pane: PaneCtx,

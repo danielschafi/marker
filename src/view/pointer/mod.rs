@@ -195,6 +195,12 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, space: bool) {
                 current: point,
             });
         }
+        Tool::Draw => {
+            tab.drag = Some(Drag::Ink {
+                page,
+                points: vec![point],
+            });
+        }
         Tool::Text | Tool::Note | Tool::Math => {
             if let Some((id, handle)) =
                 resize_target(&tab.doc, tab.primary_selected(), tool, pos, view)
@@ -552,6 +558,27 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx) {
                 current,
             });
         }
+        Drag::Ink { page, mut points } => {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
+                return;
+            };
+            let Some(point) = tab
+                .doc
+                .screen_to_page(pos, view)
+                .filter(|(hit, _)| *hit == page)
+                .map(|(_, point)| point)
+            else {
+                return;
+            };
+            const MIN_STEP: f32 = 1.0;
+            let far_enough = points.last().is_none_or(|last| {
+                (point.x - last.x).hypot(point.y - last.y) >= MIN_STEP
+            });
+            if far_enough {
+                points.push(point);
+            }
+            tab.drag = Some(Drag::Ink { page, points });
+        }
         Drag::Create {
             page, origin, kind, ..
         } => {
@@ -712,6 +739,17 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, pane: PaneCtx) -> bool {
             let a = tab.doc.page_to_screen(*page, *origin, view);
             let b = tab.doc.page_to_screen(*page, *current, view);
             a.distance(b) > 3.0
+        }
+        Drag::Ink { page, points } => {
+            let Some(first) = points.first() else {
+                return false;
+            };
+            let Some(last) = points.last() else {
+                return false;
+            };
+            let a = tab.doc.page_to_screen(*page, *first, view);
+            let b = tab.doc.page_to_screen(*page, *last, view);
+            points.len() >= 2 && a.distance(b) > 3.0
         }
         Drag::Move { moved, .. } => *moved,
         Drag::Resize { .. } => true,

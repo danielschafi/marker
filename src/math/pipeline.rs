@@ -283,6 +283,7 @@ impl MathPipeline {
                     | AnnotKind::Markup { .. }
                     | AnnotKind::Note { .. }
                     | AnnotKind::Shape { .. }
+                    | AnnotKind::Ink { .. }
                     | AnnotKind::Image { .. }
                     | AnnotKind::Foreign { .. } => {}
                 }
@@ -688,6 +689,7 @@ impl MathPipeline {
                 | AnnotKind::Markup { .. }
                 | AnnotKind::Note { .. }
                 | AnnotKind::Shape { .. }
+                | AnnotKind::Ink { .. }
                 | AnnotKind::Image { .. }
                 | AnnotKind::Foreign { .. } => {}
             }

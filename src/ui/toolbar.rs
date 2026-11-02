@@ -219,6 +219,18 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 stroke,
             );
         }
+        Tool::Draw => {
+            let mut pts = Vec::new();
+            let mut x = origin.x + 1.0;
+            let end = origin.x + 13.5;
+            while x <= end {
+                let t = (x - origin.x) / 13.0;
+                let y = origin.y + 10.5 - 6.5 * (t * std::f32::consts::PI).sin().abs();
+                pts.push(Pos2::new(x, y));
+                x += 1.1;
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.55_f32, color)));
+        }
         Tool::Math => {
             painter.text(
                 rect.center(),
@@ -253,6 +265,7 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
         Tool::Rect => "Rectangle tool",
         Tool::Ellipse => "Ellipse tool",
         Tool::Line => "Line tool",
+        Tool::Draw => "Draw tool",
         Tool::Math => "Equation tool",
     }
 }

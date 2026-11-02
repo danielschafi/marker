@@ -55,6 +55,7 @@ pub(super) fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
             origin,
             current,
         } => commit_shape(app, pane, page, kind, origin, current),
+        Drag::Ink { page, points } => commit_ink(app, pane, page, points),
         Drag::Create {
             page,
             origin,
@@ -264,6 +265,39 @@ fn commit_shape(
     app.open_style_bar(id, true);
 }
 
+fn commit_ink(app: &mut MarkerApp, pane: PaneCtx, page: usize, points: Vec<PdfPoint>) {
+    if points.len() < 2 {
+        return;
+    }
+    let Some(first) = points.first() else {
+        return;
+    };
+    let Some(last) = points.last() else {
+        return;
+    };
+    if (first.x - last.x).hypot(first.y - last.y) < 4.0 && points.len() < 3 {
+        return;
+    }
+    let color = app.settings.shape_color;
+    let width = app.settings.shape_width;
+    app.seal_then_arm();
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
+        return;
+    };
+    let id = tab.doc.session.insert(
+        page,
+        AnnotKind::Ink {
+            strokes: vec![points],
+            color,
+            width,
+        },
+    );
+    tab.select_only(id);
+    tab.save.touch();
+    app.seal_undo();
+    app.open_style_bar(id, true);
+}
+
 fn commit_create(
     app: &mut MarkerApp,
     pane: PaneCtx,
@@ -422,6 +456,7 @@ fn selection_bounds(tab: &Tab) -> Option<(usize, PdfRect)> {
         AnnotKind::Text { .. }
         | AnnotKind::Note { .. }
         | AnnotKind::Shape { .. }
+        | AnnotKind::Ink { .. }
         | AnnotKind::Math { .. }
         | AnnotKind::Image { .. }
         | AnnotKind::Foreign { .. } => annot.bounds().map(|bounds| (annot.page, bounds)),
@@ -574,7 +609,8 @@ pub(super) fn resize_target(
         | Tool::Squiggly
         | Tool::Rect
         | Tool::Ellipse
-        | Tool::Line => false,
+        | Tool::Line
+        | Tool::Draw => false,
     };
     let radius = 16.0;
     if let Some(id) = selected {

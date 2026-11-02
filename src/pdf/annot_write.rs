@@ -224,6 +224,23 @@ pub(crate) fn apply_existing(
             )?;
             annot.update()?;
         }
+        AnnotKind::Ink {
+            strokes,
+            color,
+            width,
+        } => {
+            apply_ink(annot, strokes, *color, *width)?;
+            write_marker(
+                doc,
+                annot,
+                MarkerKind::Ink,
+                source.id,
+                None,
+                Some(*color),
+                None,
+            )?;
+            annot.update()?;
+        }
         AnnotKind::Math {
             rect,
             source: latex,
@@ -322,6 +339,31 @@ pub(crate) fn apply_shape(
     match kind {
         ShapeKind::Line => annot.set_line(to_point(start), to_point(end))?,
         ShapeKind::Rect | ShapeKind::Ellipse => annot.set_rect(to_rect(rect))?,
+    }
+    Ok(())
+}
+
+pub(crate) fn apply_ink(
+    annot: &mut PdfAnnotation,
+    strokes: &[Vec<PdfPoint>],
+    color: Rgb,
+    width: f32,
+) -> Result<(), mupdf::Error> {
+    if annot.r#type()? != PdfAnnotationType::Ink {
+        return Err(mupdf::Error::InvalidArgument("type changed".into()));
+    }
+    if strokes.is_empty() || strokes.iter().all(|stroke| stroke.is_empty()) {
+        return Err(mupdf::Error::InvalidArgument("empty ink".into()));
+    }
+    annot.set_ink_list(
+        strokes
+            .iter()
+            .map(|stroke| stroke.iter().copied().map(to_point)),
+    )?;
+    annot.set_color(rgb_color(color))?;
+    annot.set_border_width(width.max(0.25))?;
+    if let Some(bounds) = crate::annot::ink_bounds(strokes, width) {
+        annot.set_rect(to_rect(bounds))?;
     }
     Ok(())
 }
@@ -450,6 +492,35 @@ pub(crate) fn create_annot(
                 source.id,
                 None,
                 Some(*stroke),
+                None,
+            )?;
+            annot
+        }
+        AnnotKind::Ink {
+            strokes,
+            color,
+            width,
+        } => {
+            if strokes.is_empty() || strokes.iter().all(|stroke| stroke.is_empty()) {
+                return Err("Ink stroke is empty.".into());
+            }
+            let mut annot = page.add_ink_annotation(
+                strokes
+                    .iter()
+                    .map(|stroke| stroke.iter().copied().map(to_point)),
+            )?;
+            annot.set_color(rgb_color(*color))?;
+            annot.set_border_width(width.max(0.25))?;
+            if let Some(bounds) = crate::annot::ink_bounds(strokes, *width) {
+                annot.set_rect(to_rect(bounds))?;
+            }
+            write_marker(
+                doc,
+                &annot,
+                MarkerKind::Ink,
+                source.id,
+                None,
+                Some(*color),
                 None,
             )?;
             annot

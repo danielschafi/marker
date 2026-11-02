@@ -1029,6 +1029,7 @@ impl MarkerApp {
                 | AnnotKind::Note { .. }
                 | AnnotKind::Math { .. }
                 | AnnotKind::Shape { .. }
+                | AnnotKind::Ink { .. }
                 | AnnotKind::Image { .. }
                 | AnnotKind::Foreign { .. } => {}
             }

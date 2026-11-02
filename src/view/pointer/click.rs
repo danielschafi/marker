@@ -175,7 +175,7 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 place_box(app, pane, page, point, None, CreateKind::Math);
             }
         }
-        Tool::Rect | Tool::Ellipse | Tool::Line => {
+        Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw => {
             if hit.is_none() {
                 app.clear_page_selection();
             }

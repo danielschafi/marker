@@ -1572,9 +1572,6 @@ fn apply_existing(
             write_image_marker(doc, annot, source.id, rgba, *width, *height)?;
             install_image_appearance(doc, annot, rgba, *width, *height)?;
         }
-        AnnotKind::Future(_) => {
-            return Err(mupdf::Error::NotYetImplemented("future annotation".into()));
-        }
         // Leave the original object untouched. Rewriting it would drop the other app's annot.
         AnnotKind::Foreign { .. } => {}
     }
@@ -1800,7 +1797,6 @@ fn create_annot(
             annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
             return annot.xref().map_err(show);
         }
-        AnnotKind::Future(_) => return Err("That annotation type is not available yet.".into()),
         AnnotKind::Foreign { .. } => {
             return Err("Foreign annotations are read-only.".into());
         }
@@ -2329,7 +2325,6 @@ mod tests {
                 },
                 AnnotKind::Math { .. } => "math",
                 AnnotKind::Image { .. } => "image",
-                AnnotKind::Future(_) => "future",
                 AnnotKind::Foreign { .. } => "foreign",
             })
             .collect::<Vec<_>>();

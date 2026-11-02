@@ -479,10 +479,6 @@ pub enum LaidRun {
         text: String,
         x: f32,
         y: f32,
-        #[allow(dead_code)]
-        w: f32,
-        #[allow(dead_code)]
-        h: f32,
     },
     Math {
         inner: String,
@@ -536,13 +532,7 @@ pub fn layout_runs(
                     if x > 0.0 && x + pw > max_width {
                         new_line(&mut x, &mut y, &mut row_h);
                     }
-                    runs.push(LaidRun::Prose {
-                        text: piece,
-                        x,
-                        y,
-                        w: pw.min(max_width),
-                        h: ph,
-                    });
+                    runs.push(LaidRun::Prose { text: piece, x, y });
                     x += pw;
                     row_h = row_h.max(ph);
                 }
@@ -937,7 +927,7 @@ mod tests {
         let mut saw_math = false;
         for run in &runs {
             match run {
-                LaidRun::Prose { text, x, y, .. } => {
+                LaidRun::Prose { text, x, y } => {
                     assert!(!text.is_empty());
                     assert!(*x >= 0.0 && *y >= 0.0);
                 }

@@ -101,17 +101,6 @@ pub enum ForeignKind {
     FileAttachment,
 }
 
-/// Reserved for later tools. They are not created by the UI yet.
-#[derive(Clone, Debug, PartialEq)]
-#[allow(dead_code)]
-pub enum FutureKind {
-    Ink {
-        color: Rgb,
-        width: f32,
-        strokes: Vec<Vec<PdfPoint>>,
-    },
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub enum AnnotKind {
     Highlight {
@@ -159,9 +148,6 @@ pub enum AnnotKind {
         width: u32,
         height: u32,
     },
-    /// Ink lands here later without a session rewrite.
-    #[allow(dead_code)]
-    Future(FutureKind),
     /// Read-only import of an annotation Marker does not edit.
     Foreign {
         kind: ForeignKind,
@@ -216,18 +202,6 @@ impl AnnotKind {
                 ..
             } => Some(PdfRect::from_points(*start, *end).inflate(2.0)),
             Self::Shape { rect, .. } => Some(*rect),
-            Self::Future(FutureKind::Ink { strokes, .. }) => {
-                let mut pts = strokes.iter().flatten();
-                let first = *pts.next()?;
-                let mut rect = PdfRect::new(first.x, first.y, first.x, first.y);
-                for p in pts {
-                    rect.x0 = rect.x0.min(p.x);
-                    rect.y0 = rect.y0.min(p.y);
-                    rect.x1 = rect.x1.max(p.x);
-                    rect.y1 = rect.y1.max(p.y);
-                }
-                Some(rect.inflate(2.0))
-            }
         }
     }
 
@@ -262,14 +236,6 @@ impl AnnotKind {
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
             }
-            Self::Future(FutureKind::Ink { strokes, .. }) => {
-                for stroke in strokes {
-                    for p in stroke {
-                        p.x += dx;
-                        p.y += dy;
-                    }
-                }
-            }
             // Foreign annotations stay where the other app put them.
             Self::Foreign { .. } => {}
         }
@@ -287,7 +253,11 @@ impl AnnotKind {
                 end,
                 ..
             } => dist_to_segment(p, *start, *end) <= slop.max(3.0),
-            _ => self
+            Self::Text { .. }
+            | Self::Note { .. }
+            | Self::Math { .. }
+            | Self::Image { .. }
+            | Self::Shape { .. } => self
                 .bounds()
                 .map(|r| r.inflate(slop).contains(p))
                 .unwrap_or(false),
@@ -304,7 +274,7 @@ pub struct Session {
 }
 
 impl Session {
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             annotations: Vec::new(),
@@ -560,7 +530,10 @@ impl AnnotKind {
                     (Handle::Se, PdfPoint::new(rect.x1, rect.y1)),
                 ]
             }
-            _ => Vec::new(),
+            Self::Highlight { .. }
+            | Self::Markup { .. }
+            | Self::Note { .. }
+            | Self::Foreign { .. } => Vec::new(),
         }
     }
 
@@ -577,7 +550,7 @@ impl AnnotKind {
                 match handle {
                     Handle::LineStart => *start = to,
                     Handle::LineEnd => *end = to,
-                    _ => {}
+                    Handle::Nw | Handle::Ne | Handle::Sw | Handle::Se => {}
                 }
                 *rect = PdfRect::from_points(*start, *end);
             }
@@ -613,7 +586,10 @@ impl AnnotKind {
                     *auto_size = false;
                 }
             }
-            _ => {}
+            Self::Highlight { .. }
+            | Self::Markup { .. }
+            | Self::Note { .. }
+            | Self::Foreign { .. } => {}
         }
     }
 }

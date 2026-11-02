@@ -626,7 +626,6 @@ impl AnnotFilterKind {
             AnnotKind::Shape { .. } => Some(Self::Shape),
             AnnotKind::Image { .. } => Some(Self::Image),
             AnnotKind::Foreign { .. } => Some(Self::Foreign),
-            AnnotKind::Future(_) => None,
         }
     }
 }
@@ -2085,7 +2084,12 @@ impl MarkerApp {
                 {
                     return Some(content.clone());
                 }
-                _ => {}
+                AnnotKind::Text { .. }
+                | AnnotKind::Note { .. }
+                | AnnotKind::Math { .. }
+                | AnnotKind::Shape { .. }
+                | AnnotKind::Image { .. }
+                | AnnotKind::Foreign { .. } => {}
             }
         }
         None
@@ -2935,102 +2939,96 @@ impl MarkerApp {
 
     fn on_pdf(&mut self, ctx: &egui::Context, reply: PdfReply) {
         match reply {
-            PdfReply::Opened(result) => match result {
-                Ok(opened) => {
-                    self.opening.remove(&opened.gen);
-                    if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
-                        self.worker.close(opened.gen);
-                        if let Some(index) =
-                            self.tabs.iter().position(|tab| tab.doc.path == opened.path)
-                        {
-                            if self.active != index {
-                                self.active = index;
-                                self.pulse_tab_list();
-                            }
+            PdfReply::Opened(opened) => {
+                self.opening.remove(&opened.gen);
+                if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
+                    self.worker.close(opened.gen);
+                    if let Some(index) =
+                        self.tabs.iter().position(|tab| tab.doc.path == opened.path)
+                    {
+                        if self.active != index {
+                            self.active = index;
+                            self.pulse_tab_list();
                         }
-                        self.settings.remember_open(&opened.path);
-                        return;
                     }
-                    let tops = DocState::rebuild_tops(&opened.pages);
-                    let has_outline = !opened.outline.is_empty();
                     self.settings.remember_open(&opened.path);
-                    self.tabs.push(Tab {
-                        doc: DocState {
-                            path: opened.path,
-                            gen: opened.gen,
-                            pages: opened.pages,
-                            tops,
-                            outline: opened.outline,
-                            session: Session::from_imported(opened.annotations),
-                            scale: 1.0,
-                            scroll_x: 0.0,
-                            scroll_y: 0.0,
-                            scroll_y_prev: 0.0,
-                            fitted: false,
-                            last_zoom: Instant::now(),
-                            last_scroll: Instant::now(),
-                            last_fit: None,
-                            glyphs: HashMap::new(),
-                            glyph_order: VecDeque::new(),
-                            tiles: HashMap::new(),
-                        },
-                        selected: Vec::new(),
-                        text_sel: None,
-                        editing: None,
-                        drag: None,
-                        pending_jump: None,
-                        inflight: HashSet::new(),
-                        glyphs_waiting: HashSet::new(),
-                        pending_study: None,
-                        pending_export: None,
-                        previews: HashMap::new(),
-                        image_textures: HashMap::new(),
-                        pending_text_caret: None,
-                        live_math: None,
-                        save: SaveState::Clean,
-                        save_epoch: 0,
-                        save_deletes: Vec::new(),
-                        force_save: false,
-                        save_when_math_ready: false,
-                        close_after_save: false,
-                        detach_after_save: false,
-                        outline_open: has_outline,
-                        thumbs_open: false,
-                        annots_open: false,
-                        review_open: false,
-                        thumbs: HashMap::new(),
-                        thumb_order: VecDeque::new(),
-                        thumbs_inflight: HashSet::new(),
-                        annot_sidebar: AnnotSidebarState::default(),
-                        review: ReviewState::default(),
-                        assistant: TabAssistant::default(),
-                        search: SearchState::default(),
-                        last_hl: None,
-                        focus_edit: false,
-                        menu: None,
-                        style_bar: None,
-                        pending_undo: None,
-                        undo_edit: None,
-                        undo: Vec::new(),
-                        redo: Vec::new(),
-                        page_op: None,
-                        annot_by_page: Vec::new(),
-                        // Imported sessions start at epoch 0. MAX forces the first index build.
-                        annot_index_epoch: u64::MAX,
-                        image_textures_epoch: 0,
-                        autosave_dirty_epoch: 0,
-                        autosave_dirty: false,
-                    });
-                    self.active = self.tabs.len() - 1;
-                    if self.tabs.len() > 1 {
-                        self.pulse_tab_list();
-                    }
+                    return;
                 }
-                Err(message) => {
-                    self.opening.clear();
-                    self.error = Some(message);
+                let tops = DocState::rebuild_tops(&opened.pages);
+                let has_outline = !opened.outline.is_empty();
+                self.settings.remember_open(&opened.path);
+                self.tabs.push(Tab {
+                    doc: DocState {
+                        path: opened.path,
+                        gen: opened.gen,
+                        pages: opened.pages,
+                        tops,
+                        outline: opened.outline,
+                        session: Session::from_imported(opened.annotations),
+                        scale: 1.0,
+                        scroll_x: 0.0,
+                        scroll_y: 0.0,
+                        scroll_y_prev: 0.0,
+                        fitted: false,
+                        last_zoom: Instant::now(),
+                        last_scroll: Instant::now(),
+                        last_fit: None,
+                        glyphs: HashMap::new(),
+                        glyph_order: VecDeque::new(),
+                        tiles: HashMap::new(),
+                    },
+                    selected: Vec::new(),
+                    text_sel: None,
+                    editing: None,
+                    drag: None,
+                    pending_jump: None,
+                    inflight: HashSet::new(),
+                    glyphs_waiting: HashSet::new(),
+                    pending_study: None,
+                    pending_export: None,
+                    previews: HashMap::new(),
+                    image_textures: HashMap::new(),
+                    pending_text_caret: None,
+                    live_math: None,
+                    save: SaveState::Clean,
+                    save_epoch: 0,
+                    save_deletes: Vec::new(),
+                    force_save: false,
+                    save_when_math_ready: false,
+                    close_after_save: false,
+                    detach_after_save: false,
+                    outline_open: has_outline,
+                    thumbs_open: false,
+                    annots_open: false,
+                    review_open: false,
+                    thumbs: HashMap::new(),
+                    thumb_order: VecDeque::new(),
+                    thumbs_inflight: HashSet::new(),
+                    annot_sidebar: AnnotSidebarState::default(),
+                    review: ReviewState::default(),
+                    assistant: TabAssistant::default(),
+                    search: SearchState::default(),
+                    last_hl: None,
+                    focus_edit: false,
+                    menu: None,
+                    style_bar: None,
+                    pending_undo: None,
+                    undo_edit: None,
+                    undo: Vec::new(),
+                    redo: Vec::new(),
+                    page_op: None,
+                    annot_by_page: Vec::new(),
+                    // Imported sessions start at epoch 0. MAX forces the first index build.
+                    annot_index_epoch: u64::MAX,
+                    image_textures_epoch: 0,
+                    autosave_dirty_epoch: 0,
+                    autosave_dirty: false,
+                });
+                self.active = self.tabs.len() - 1;
+                if self.tabs.len() > 1 {
+                    self.pulse_tab_list();
                 }
-            },
+            }
             PdfReply::Tile { gen, tile } => {
                 let key = tile_key(&tile);
                 let frame = self.tile_frame;
@@ -3861,7 +3859,6 @@ impl MarkerApp {
                     | AnnotKind::Note { .. }
                     | AnnotKind::Shape { .. }
                     | AnnotKind::Image { .. }
-                    | AnnotKind::Future(_)
                     | AnnotKind::Foreign { .. } => {}
                 }
             }
@@ -4301,7 +4298,6 @@ impl MarkerApp {
                 | AnnotKind::Note { .. }
                 | AnnotKind::Shape { .. }
                 | AnnotKind::Image { .. }
-                | AnnotKind::Future(_)
                 | AnnotKind::Foreign { .. } => {}
             }
         }
@@ -5449,12 +5445,7 @@ impl MarkerApp {
         }
         let seq = tab.assistant.bump_crop_seq();
         let gen = tab.doc.gen;
-        tab.assistant.pending_crop = Some(PendingCrop {
-            gen,
-            seq,
-            page,
-            rect,
-        });
+        tab.assistant.pending_crop = Some(PendingCrop { seq });
         tab.assistant.status_line = Some("Rendering screenshot…".into());
         self.worker.crop(gen, seq, page, rect, CROP_DPI);
     }
@@ -6114,10 +6105,7 @@ impl MarkerApp {
                     ink = true;
                     stroke = true;
                 }
-                Some(
-                    AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. },
-                )
-                | None => {}
+                Some(AnnotKind::Image { .. } | AnnotKind::Foreign { .. }) | None => {}
             }
         }
         (highlight, ink, size, stroke)

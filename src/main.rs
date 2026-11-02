@@ -2,6 +2,7 @@ mod annot;
 mod app;
 mod assistant;
 mod cite;
+mod export;
 mod geom;
 mod instance;
 mod math;

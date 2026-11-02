@@ -30,7 +30,6 @@ pub fn reconstruct_text(glyphs: &[Glyph], lo: usize, hi: usize) -> String {
 }
 
 /// Glyphs whose bounds intersect any of the given rectangles.
-#[allow(dead_code)]
 pub fn glyphs_intersecting_rects(glyphs: &[Glyph], rects: &[PdfRect]) -> Vec<usize> {
     glyphs
         .iter()
@@ -40,7 +39,6 @@ pub fn glyphs_intersecting_rects(glyphs: &[Glyph], rects: &[PdfRect]) -> Vec<usi
         .collect()
 }
 
-#[allow(dead_code)]
 fn rects_overlap(a: PdfRect, b: PdfRect) -> bool {
     a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
 }

@@ -168,6 +168,8 @@ pub(crate) struct Tab {
     pub(crate) glyphs_waiting: HashSet<usize>,
     /// Study prompt waiting on a one-shot glyph load for `page` (ST5).
     pub(crate) pending_study: Option<(usize, String)>,
+    /// Markdown export waiting on glyph loads for highlight pages (ST1).
+    pub(crate) pending_export: bool,
     pub(crate) previews: HashMap<u64, MathPreview>,
     pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
     /// After Tab exits a math island, place the TextEdit caret here (bytes).
@@ -324,6 +326,78 @@ pub(crate) fn evict(keys: &[usize], pinned: &[usize], cap: usize) -> Vec<usize> 
     to_evict
 }
 
+/// Pages that still need glyphs before Markdown export can run.
+fn export_missing_glyph_pages(tab: &Tab) -> Vec<usize> {
+    let mut missing = Vec::new();
+    for annot in &tab.doc.session.annotations {
+        if !matches!(
+            annot.kind,
+            AnnotKind::Highlight { .. } | AnnotKind::Markup { .. }
+        ) {
+            continue;
+        }
+        if tab.doc.glyphs.contains_key(&annot.page) {
+            continue;
+        }
+        if !missing.contains(&annot.page) {
+            missing.push(annot.page);
+        }
+    }
+    missing
+}
+
+/// Native highlights and FT5 markup only — skip Foreign.
+fn collect_export_highlights(tab: &Tab) -> Vec<crate::export::ExportHighlight> {
+    use crate::export::{note_is_nearby, ExportHighlight};
+
+    let notes: Vec<(usize, PdfRect, &str)> = tab
+        .doc
+        .session
+        .annotations
+        .iter()
+        .filter_map(|annot| match &annot.kind {
+            AnnotKind::Note { rect, content, .. } => {
+                Some((annot.page, *rect, content.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for annot in &tab.doc.session.annotations {
+        let (quads, color) = match &annot.kind {
+            AnnotKind::Highlight { quads, color } => (quads, *color),
+            AnnotKind::Markup { quads, color, .. } => (quads, *color),
+            _ => continue,
+        };
+        let bounds = annot.bounds();
+        let mut best: Option<(f32, &str)> = None;
+        if let Some(bounds) = bounds {
+            for (page, note_rect, content) in &notes {
+                if *page != annot.page || content.trim().is_empty() {
+                    continue;
+                }
+                if !note_is_nearby(bounds, *note_rect) {
+                    continue;
+                }
+                let c = bounds.center();
+                let n = note_rect.center();
+                let dist = (c.x - n.x).hypot(c.y - n.y);
+                if best.is_none_or(|(d, _)| dist < d) {
+                    best = Some((dist, *content));
+                }
+            }
+        }
+        out.push(ExportHighlight {
+            page: annot.page,
+            quads: quads.clone(),
+            color,
+            note: best.map(|(_, text)| text.to_owned()),
+        });
+    }
+    out
+}
+
 fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
     let mut pinned = Vec::new();
     if let Some(sel) = &tab.text_sel {
@@ -338,6 +412,17 @@ fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
     if let Some(page) = drag_page {
         if !pinned.contains(&page) {
             pinned.push(page);
+        }
+    }
+    if tab.pending_export {
+        for annot in &tab.doc.session.annotations {
+            if matches!(
+                annot.kind,
+                AnnotKind::Highlight { .. } | AnnotKind::Markup { .. }
+            ) && !pinned.contains(&annot.page)
+            {
+                pinned.push(annot.page);
+            }
         }
     }
     pinned
@@ -751,6 +836,7 @@ pub(crate) enum SaveState {
 enum DialogReply {
     Open(Option<PathBuf>),
     SaveAs { gen: u64, path: Option<PathBuf> },
+    ExportMarkdown { gen: u64, path: Option<PathBuf> },
 }
 
 impl MarkerApp {
@@ -849,6 +935,10 @@ impl MarkerApp {
         self.tab_mut().map(|tab| &mut tab.doc)
     }
 
+    fn tab_by_gen(&self, gen: u64) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.doc.gen == gen)
+    }
+
     fn tab_by_gen_mut(&mut self, gen: u64) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.doc.gen == gen)
     }
@@ -927,6 +1017,125 @@ impl MarkerApp {
             let _ = tx.send(DialogReply::SaveAs { gen, path });
             ctx.request_repaint();
         });
+    }
+
+    /// Export native highlights/markup to Markdown (ST1).
+    ///
+    /// If glyph pages are missing, sets `pending_export` and enqueues jobs;
+    /// `check_pending_export` / glyph replies finish without freezing the UI.
+    pub(crate) fn export_markdown(&mut self) {
+        let (gen, missing) = {
+            let Some(tab) = self.tab_mut() else {
+                return;
+            };
+            tab.pending_export = false;
+            let missing = export_missing_glyph_pages(tab);
+            (tab.doc.gen, missing)
+        };
+        if missing.is_empty() {
+            self.open_export_dialog();
+            return;
+        }
+        let mut to_request = Vec::new();
+        if let Some(tab) = self.tab_mut() {
+            tab.pending_export = true;
+            for page in missing {
+                if tab.glyphs_waiting.insert(page) {
+                    to_request.push(page);
+                }
+            }
+        }
+        for page in to_request {
+            self.worker.glyphs(gen, page);
+        }
+        self.egui_ctx.request_repaint();
+    }
+
+    fn check_pending_export(&mut self) {
+        let gens: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter(|tab| tab.pending_export)
+            .map(|tab| tab.doc.gen)
+            .collect();
+        for gen in gens {
+            self.try_finish_pending_export(gen);
+        }
+    }
+
+    fn try_finish_pending_export(&mut self, gen: u64) {
+        {
+            let Some(tab) = self.tab_by_gen_mut(gen) else {
+                return;
+            };
+            if !tab.pending_export {
+                return;
+            }
+            if !export_missing_glyph_pages(tab).is_empty() {
+                return;
+            }
+            tab.pending_export = false;
+        }
+        self.open_export_dialog_for(gen);
+    }
+
+    fn open_export_dialog(&mut self) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let gen = tab.doc.gen;
+        self.open_export_dialog_for(gen);
+    }
+
+    fn open_export_dialog_for(&mut self, gen: u64) {
+        if self.dialog_busy {
+            return;
+        }
+        let Some(tab) = self.tab_by_gen(gen) else {
+            return;
+        };
+        let suggested = crate::export::default_export_name(&tab.doc.path);
+        let start_dir = tab.doc.path.parent().map(|p| p.to_path_buf());
+        self.dialog_busy = true;
+        let tx = self.dialog_tx.clone();
+        let ctx = self.egui_ctx.clone();
+        thread::spawn(move || {
+            let mut dialog = rfd::FileDialog::new()
+                .add_filter("Markdown", &["md"])
+                .set_file_name(&suggested);
+            if let Some(dir) = start_dir {
+                dialog = dialog.set_directory(dir);
+            }
+            let path = dialog.save_file();
+            let _ = tx.send(DialogReply::ExportMarkdown { gen, path });
+            ctx.request_repaint();
+        });
+    }
+
+    fn write_export_markdown(&mut self, gen: u64, path: PathBuf) {
+        let Some(tab) = self.tab_by_gen(gen) else {
+            return;
+        };
+        let doc_name = tab
+            .doc
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document.pdf")
+            .to_owned();
+        let highlights = collect_export_highlights(tab);
+        let md = crate::export::highlights_to_markdown(
+            &doc_name,
+            &highlights,
+            &tab.doc.glyphs,
+            &self.settings.highlight_presets,
+        );
+        match std::fs::write(&path, md) {
+            Ok(()) => self.error = None,
+            Err(err) => {
+                self.error = Some(format!("Could not write {}: {err}", path.display()));
+            }
+        }
     }
 
     pub(crate) fn open_path(&mut self, path: PathBuf) {
@@ -2287,6 +2496,7 @@ impl eframe::App for MarkerApp {
         self.poll_ipc(ctx);
         self.poll_dialog();
         self.poll(ctx);
+        self.check_pending_export();
         self.flush_math();
         self.prepare_visible_math(pixels_per_point);
         self.dispatch_search();
@@ -2334,6 +2544,7 @@ impl eframe::App for MarkerApp {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
                     || tab.search.pending
+                    || tab.pending_export
                     || tab.assistant.streaming
                     || tab.assistant.pending_crop.is_some()
             });
@@ -2369,6 +2580,13 @@ impl MarkerApp {
                 self.start_save_as(gen, path);
             }
             Ok(DialogReply::SaveAs { path: None, .. }) => self.dialog_busy = false,
+            Ok(DialogReply::ExportMarkdown { gen, path: Some(path) }) => {
+                self.dialog_busy = false;
+                self.write_export_markdown(gen, path);
+            }
+            Ok(DialogReply::ExportMarkdown { path: None, .. }) => {
+                self.dialog_busy = false;
+            }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.dialog_busy = false,
         }
@@ -2466,6 +2684,7 @@ impl MarkerApp {
                         inflight: HashSet::new(),
                         glyphs_waiting: HashSet::new(),
                         pending_study: None,
+                        pending_export: false,
                         previews: HashMap::new(),
                         image_textures: HashMap::new(),
                         pending_text_caret: None,
@@ -2567,6 +2786,7 @@ impl MarkerApp {
                     tab.doc.trim_glyph_cache(&pinned);
                 }
                 self.finish_pending_study(gen, page);
+                self.try_finish_pending_export(gen);
             }
             PdfReply::Search {
                 gen,
@@ -2658,6 +2878,7 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
+        tab.pending_export = false;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
@@ -2715,6 +2936,7 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
+        tab.pending_export = false;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();

@@ -119,6 +119,13 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         app.save_as_dialog();
     }
+    if app.tab().is_some()
+        && chrome_button(ui, "Export", false)
+            .on_hover_text("Export highlights to Markdown")
+            .clicked()
+    {
+        app.export_markdown();
+    }
     let outline_on = app.tab().map(|tab| tab.outline_open).unwrap_or(false);
     if app.tab().is_some()
         && chrome_button(ui, "Outline", outline_on)

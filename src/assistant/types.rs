@@ -98,6 +98,9 @@ pub struct TabAssistant {
     pub agent_mode: bool,
     pub status_line: Option<String>,
     pub pending_crop: Option<PendingCrop>,
+    /// When set, the next completed assistant reply is parsed as card TSV (ST3).
+    /// Value is the 0-based page used for the `source` column.
+    pub pending_cards_parse: Option<usize>,
     crop_seq: u64,
 }
 
@@ -113,6 +116,7 @@ impl TabAssistant {
         self.error = None;
         self.status_line = None;
         self.pending_crop = None;
+        self.pending_cards_parse = None;
     }
 
     /// Chat id to pass into the next worker turn (`None` → `create-chat`).

@@ -126,6 +126,15 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         app.export_markdown();
     }
+    if app.tab().is_some()
+        && chrome_button(ui, "Cards", false)
+            .on_hover_text(
+                "Export highlights as CSV for Anki import (cloze or front/back)",
+            )
+            .clicked()
+    {
+        app.export_cards();
+    }
     let outline_on = app.tab().map(|tab| tab.outline_open).unwrap_or(false);
     if app.tab().is_some()
         && chrome_button(ui, "Outline", outline_on)
@@ -1631,6 +1640,8 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     let mut begin_text = false;
     let mut begin_region = false;
     let mut study: Option<&'static str> = None;
+    let mut generate_cards = false;
+    let assistant_ready = app.assistant_is_configured();
 
     egui::SidePanel::right("assistant")
         .resizable(true)
@@ -1779,6 +1790,17 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                         study = Some(prompt);
                     }
                 }
+                if assistant_ready
+                    && ui
+                        .small_button("Generate cards from selection")
+                        .on_hover_text(
+                            "Ask Cursor for front/back cards as a fenced TSV block. \
+                             Does not force agent mode. Anki can import the resulting CSV.",
+                        )
+                        .clicked()
+                {
+                    generate_cards = true;
+                }
             });
 
             if let Some(tab) = app.tab_mut() {
@@ -1830,6 +1852,9 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     }
     if let Some(prompt) = study {
         app.study_prompt(prompt);
+    }
+    if generate_cards {
+        app.generate_cards_from_selection();
     }
     if let Some(i) = remove_attach {
         if let Some(tab) = app.tab_mut() {

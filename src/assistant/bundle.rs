@@ -7,6 +7,16 @@ use crate::geom::PdfRect;
 
 pub use crate::assistant::text::MAX_TEXT_CHARS;
 
+/// Fixed prompt for "Generate cards from selection" (ST3).
+///
+/// Demands a single fenced TSV block and nothing else. Callers must not force
+/// agent mode on when sending this.
+pub const GENERATE_CARDS_PROMPT: &str = "\
+Create Anki-style flashcards from the attached selection for a learner.\n\
+Reply with NOTHING except one Markdown fenced code block whose language tag is tsv.\n\
+Each line is one card: front, then a tab character, then back. No header row.\n\
+Do not write any commentary outside the fence.";
+
 #[derive(Clone, Debug)]
 pub struct BundlePaths {
     pub root: PathBuf,
@@ -247,6 +257,13 @@ mod tests {
     fn sanitize_strips_path_bits() {
         assert_eq!(sanitize_filename("../../evil.png"), ".._.._evil.png");
         assert_eq!(sanitize_filename("crop-1"), "crop-1.png");
+    }
+
+    #[test]
+    fn generate_cards_prompt_demands_tsv_fence() {
+        assert!(GENERATE_CARDS_PROMPT.contains("tsv"));
+        assert!(GENERATE_CARDS_PROMPT.to_ascii_lowercase().contains("tab"));
+        assert!(GENERATE_CARDS_PROMPT.to_ascii_lowercase().contains("nothing"));
     }
 
     #[test]

@@ -12,8 +12,10 @@ mod text;
 mod types;
 mod worker;
 
+pub use adapter::assistant_configured;
 pub use bundle::{
-    absolute_filepath, BundleImageAttach, BundleInput, BundleTextAttach, MAX_TEXT_CHARS,
+    absolute_filepath, BundleImageAttach, BundleInput, BundleTextAttach, GENERATE_CARDS_PROMPT,
+    MAX_TEXT_CHARS,
 };
 pub use crop::{clamp_crop_rect, crop_scale, CROP_DPI, CROP_MAX_PNG_BYTES};
 pub use markdown::show as show_markdown;

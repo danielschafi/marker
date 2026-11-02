@@ -76,7 +76,7 @@ pub(super) fn handle_pointer(app: &mut MarkerApp, response: &egui::Response, pan
             .interact_pointer_pos()
             .or_else(|| response.ctx.input(|input| input.pointer.hover_pos()));
         if let Some(pos) = pos {
-            super::open_context_menu(app, pos, pane);
+            super::menu::open_context_menu(app, pos, pane);
         }
     }
 

@@ -8,9 +8,11 @@ use super::*;
 impl MarkerApp {
     pub(crate) fn poll_dialog(&mut self) {
         match self.dialog_rx.try_recv() {
-            Ok(DialogReply::Open(Some(path))) => {
+            Ok(DialogReply::Open(Some(paths))) => {
                 self.dialog_busy = false;
-                self.open_path(path);
+                for path in paths {
+                    self.open_path(path);
+                }
             }
             Ok(DialogReply::Open(None)) => self.dialog_busy = false,
             Ok(DialogReply::SaveAs {

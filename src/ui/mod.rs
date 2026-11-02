@@ -16,12 +16,14 @@ use crate::assistant::{
     assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
     AssistantRole, CaptureMode,
 };
-use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
+use crate::geom::{zoom_percent, Rgb, INK_COLORS};
 use crate::math_spans;
 use crate::pdf::OutlineNode;
 use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
 use crate::view::viewport_tab;
+
+mod style_bar;
 
 const BRAND_FAMILY: &str = "Brand";
 
@@ -3503,20 +3505,6 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
     }
 }
 
-/// Static palette fallback (ink always; highlights when settings are unavailable).
-pub(crate) fn palette_for(tool: Tool) -> &'static [Rgb] {
-    match tool {
-        Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => &HIGHLIGHT_COLORS,
-        Tool::Select
-        | Tool::Text
-        | Tool::Note
-        | Tool::Rect
-        | Tool::Ellipse
-        | Tool::Line
-        | Tool::Math => &INK_COLORS,
-    }
-}
-
 pub(crate) fn apply_theme(ctx: &egui::Context) {
     install_fonts(ctx);
     theme::apply_theme(ctx);
@@ -3535,7 +3523,7 @@ fn install_fonts(ctx: &egui::Context) {
     fonts.font_data.insert(
         "InstrumentSerif-Italic".to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../assets/fonts/InstrumentSerif-Italic.ttf"
+            "../../assets/fonts/InstrumentSerif-Italic.ttf"
         ))),
     );
     let mut brand = vec!["InstrumentSerif-Italic".to_owned()];
@@ -3563,6 +3551,8 @@ fn brand_wordmark(ui: &mut egui::Ui) {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    use crate::geom::HIGHLIGHT_COLORS;
 
     #[test]
     fn highlight_color_name_is_exact_rgb_or_custom() {

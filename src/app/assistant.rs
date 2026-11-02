@@ -446,9 +446,9 @@ impl MarkerApp {
             }
             return;
         }
-        let encoded = urlencoding_minimal(&query);
+        let encoded = crate::platform::urlencoding_minimal(&query);
         let url = format!("https://duckduckgo.com/?q={encoded}");
-        let _ = open_browser(&url);
+        let _ = crate::platform::open_browser(&url);
     }
 
     pub(crate) fn on_crop(

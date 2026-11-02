@@ -8,6 +8,7 @@ mod instance;
 mod math;
 mod math_spans;
 mod pdf;
+mod platform;
 mod settings;
 mod theme;
 mod ui;

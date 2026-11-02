@@ -4,7 +4,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 
-use crate::geom::{Rgb, HIGHLIGHT_COLORS};
+use crate::geom::{Rgb, HIGHLIGHT_COLORS, INK_COLORS};
+
+/// Which static annotation swatch row to show when presets are unavailable.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PaletteKind {
+    Highlights,
+    Ink,
+}
+
+/// Static palette fallback (ink always; built-in highlights when presets are unavailable).
+pub(crate) fn palette_for(kind: PaletteKind) -> &'static [Rgb] {
+    match kind {
+        PaletteKind::Highlights => &HIGHLIGHT_COLORS,
+        PaletteKind::Ink => &INK_COLORS,
+    }
+}
 
 pub const RECENT_LIMIT: usize = 15;
 
@@ -62,26 +77,27 @@ fn default_true() -> bool {
 }
 
 pub fn default_highlight_presets() -> Vec<HighlightPreset> {
+    let colors = palette_for(PaletteKind::Highlights);
     vec![
         HighlightPreset {
             name: "Key idea".into(),
-            rgb: HIGHLIGHT_COLORS[0],
+            rgb: colors[0],
         },
         HighlightPreset {
             name: "Definition".into(),
-            rgb: HIGHLIGHT_COLORS[1],
+            rgb: colors[1],
         },
         HighlightPreset {
             name: "Example".into(),
-            rgb: HIGHLIGHT_COLORS[2],
+            rgb: colors[2],
         },
         HighlightPreset {
             name: "Question".into(),
-            rgb: HIGHLIGHT_COLORS[3],
+            rgb: colors[3],
         },
         HighlightPreset {
             name: "Orange".into(),
-            rgb: HIGHLIGHT_COLORS[4],
+            rgb: colors[4],
         },
     ]
 }
@@ -341,6 +357,12 @@ mod tests {
         assert!(again.search_case_sensitive);
         assert!(live_search_case_sensitive());
         cleanup(&dir);
+    }
+
+    #[test]
+    fn palette_for_selects_static_swatches() {
+        assert_eq!(palette_for(PaletteKind::Highlights), &HIGHLIGHT_COLORS);
+        assert_eq!(palette_for(PaletteKind::Ink), &INK_COLORS);
     }
 
     #[test]

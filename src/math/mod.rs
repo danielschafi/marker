@@ -331,9 +331,11 @@ impl<T> Default for MathCache<T> {
     }
 }
 
+// 1pt page margin: just enough for SVG/raster AA. Larger margins (#83 used 6×5pt)
+// pad every island, so mixed prose lines grow and `$…$` gets a wide side gap.
 const TEMPLATE: &str = r#"
 #import sys: inputs
-#set page(width: auto, height: auto, margin: (x: 6pt, y: 5pt), fill: none)
+#set page(width: auto, height: auto, margin: 1pt, fill: none)
 #set text(size: inputs.size * 1pt, fill: rgb(inputs.fill), top-edge: "ascender", bottom-edge: "descender")
 #eval(str(inputs.wrapped), mode: "markup")
 "#;
@@ -1184,7 +1186,9 @@ mod tests {
             "render error: {:?}",
             rendered.error
         );
-        assert!(rendered.height_pt > rendered.width_pt * 0.2);
+        // Smoke: MiTeX/Typst accept aligned. A prior ratio check (h > 0.2 w) only
+        // passed because the old 5pt y page margin padded a short box (#83).
+        assert!(rendered.width_pt > 10.0 && rendered.height_pt > 5.0);
     }
 
     #[test]
@@ -1445,6 +1449,41 @@ mod tests {
         assert!(cache.get(&a).is_none(), "oldest texture should leave");
         assert!(cache.get(&b).is_some());
         assert_eq!(cache.bytes(), 80);
+    }
+
+    #[test]
+    fn inline_math_box_stays_near_text_size() {
+        // Page margin used to be (x: 6pt, y: 5pt), which padded every island by
+        // ~12×10pt. Mixed prose then grew a tall line box and left a wide gap on
+        // either side of `$…$` (#83). Keep a 1pt bleed for raster AA only.
+        let engine = build_engine();
+        let size = 14.0;
+        let rendered = render_equation(&engine, r"x", size, Rgb::new(0, 0, 0), false, RASTER_SCALE);
+        assert!(rendered.error.is_none(), "{:?}", rendered.error);
+        assert!(
+            rendered.height_pt <= size + 2.5,
+            "height {} too tall for size {size} (old margin added 10pt)",
+            rendered.height_pt
+        );
+        assert!(
+            rendered.width_pt <= size,
+            "width {} too wide for a single italic x at {size}pt (old margin added 12pt)",
+            rendered.width_pt
+        );
+        let display = render_equation(
+            &engine,
+            r"$$\frac{1}{2}$$",
+            size,
+            Rgb::new(0, 0, 0),
+            false,
+            RASTER_SCALE,
+        );
+        assert!(display.error.is_none(), "{:?}", display.error);
+        assert!(
+            display.height_pt > size + 2.5,
+            "display fraction should still be taller than the text size, got {}",
+            display.height_pt
+        );
     }
 
     #[test]

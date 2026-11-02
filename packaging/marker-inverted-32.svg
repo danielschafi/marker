@@ -1,7 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img">
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="marker inverted 32px">
   <rect width="512" height="512" rx="116" fill="#FFFFFF"/>
   <path d="M152 96H300L376 172V400a16 16 0 0 1-16 16H152a16 16 0 0 1-16-16V112a16 16 0 0 1 16-16Z" fill="#1C1C1F"/>
-  <path d="M300 96V156a16 16 0 0 0 16 16H376Z" fill="#55555C"/>
-  <rect x="140" y="236" width="272" height="72" rx="18" fill="#FFC93C"/>
-  <rect x="168" y="260" width="180" height="24" rx="12" fill="#FFFFFF"/>
+  <rect x="148" y="236" width="256" height="72" rx="20" fill="#FFC93C"/>
 </svg>

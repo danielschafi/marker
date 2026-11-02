@@ -3945,6 +3945,43 @@ impl MarkerApp {
         }
     }
 
+    /// Point size used for math inside finished assistant turns (ST7).
+    pub(crate) const ASSISTANT_MATH_SIZE: f32 = 14.0;
+
+    /// Enqueue a background preview for math in an assistant answer.
+    ///
+    /// Keys the LT0 cache with no annotation id (`id = 0`) and never asks for
+    /// PDF bytes — these textures are UI-only and must not land in the document.
+    pub(crate) fn request_answer_math(&mut self, source: String, display: bool, color: Rgb) {
+        let Some(gen) = self.tab().map(|tab| tab.doc.gen) else {
+            return;
+        };
+        if source.trim().is_empty() {
+            return;
+        }
+        let size = Self::ASSISTANT_MATH_SIZE;
+        let key = MathKey::new(&source, display, size, color);
+        if self.math_cache.get(&key).is_some() {
+            return;
+        }
+        self.math_seq += 1;
+        let req = self.math_seq;
+        let span_key = math_spans::span_key(&key.source, display);
+        self.math_cache.insert_pending(key, req);
+        self.math.request_span(
+            gen,
+            0,
+            Some(span_key),
+            req,
+            source,
+            size,
+            color,
+            display,
+            MathLane::Background,
+            false,
+        );
+    }
+
     fn request_inline_reraster(
         &mut self,
         gen: u64,

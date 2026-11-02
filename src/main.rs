@@ -1,6 +1,7 @@
 mod annot;
 mod app;
 mod assistant;
+mod cite;
 mod geom;
 mod instance;
 mod math;

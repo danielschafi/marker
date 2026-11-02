@@ -18,6 +18,7 @@ use crate::app::{
     clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool,
 };
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
+use crate::cite;
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, Rgb, MAX_SCALE, MIN_SCALE};
 use crate::math::rich_text::{
     self, conceal_editor, preview_bubble, BubbleImage, CharSpan, EditorOutput, Render, Style,
@@ -4071,6 +4072,15 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                     if menu_item(ui, "Copy text", Some("Ctrl+C")) {
                         action = MenuAction::Copy;
                     }
+                    let cite_ready = app.tab().is_some_and(|tab| tab.doc.glyphs.contains_key(&0));
+                    if !cite_ready {
+                        cite::need_page0_glyphs();
+                    } else {
+                        cite::clear_page0_request();
+                    }
+                    if menu_item_enabled(ui, "Copy quote with citation", None, cite_ready) {
+                        action = MenuAction::CopyCite;
+                    }
                     wrote = true;
                 }
                 if can_delete {
@@ -4140,12 +4150,14 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 if let Some(tab) = app.tab_mut() {
                     tab.menu = None;
                 }
+                cite::clear_page0_request();
             }
         }
         MenuAction::Paste => {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             let _ = app.paste_clipboard_image();
         }
         MenuAction::Copy => {
@@ -4155,12 +4167,31 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
+        }
+        MenuAction::CopyCite => {
+            if let Some(quote) = copy_text.as_deref() {
+                match quoted_citation_clipboard(app, &menu, quote) {
+                    Some(payload) => ctx.copy_text(payload),
+                    None => {
+                        // Page-0 glyphs raced out; fall back to bare quote so the
+                        // click still does something visible while glyphs reload.
+                        ctx.copy_text(cite::wrap_quote(quote));
+                        cite::need_page0_glyphs();
+                    }
+                }
+            }
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+            cite::clear_page0_request();
         }
         MenuAction::Edit => {
             if let Some(id) = menu.hit {
                 if let Some(tab) = app.tab_mut() {
                     tab.menu = None;
                 }
+                cite::clear_page0_request();
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_mut() {
                     tab.select_only(id);
@@ -4178,6 +4209,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 }
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             app.delete_selected();
         }
         MenuAction::AttachText => {
@@ -4185,6 +4217,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             if app
                 .tab()
                 .is_some_and(|tab| tab.assistant.learning.is_some())
@@ -4199,6 +4232,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             app.attach_learning_screenshot();
         }
         MenuAction::Explain => {
@@ -4206,6 +4240,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             app.explain_selection();
         }
         MenuAction::Lookup => {
@@ -4213,6 +4248,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             app.lookup_selection_in_browser();
         }
         MenuAction::DeletePage => {
@@ -4220,17 +4256,59 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             if let Some(tab) = app.tab_mut() {
                 tab.menu = None;
             }
+            cite::clear_page0_request();
             app.delete_page_at(page);
         }
     }
 }
 
 fn menu_item(ui: &mut egui::Ui, label: &str, shortcut: Option<&str>) -> bool {
+    menu_item_enabled(ui, label, shortcut, true)
+}
+
+fn menu_item_enabled(
+    ui: &mut egui::Ui,
+    label: &str,
+    shortcut: Option<&str>,
+    enabled: bool,
+) -> bool {
     let mut button = Button::new(label);
     if let Some(shortcut) = shortcut {
         button = button.shortcut_text(shortcut);
     }
-    ui.add(button).clicked()
+    ui.add_enabled(enabled, button).clicked()
+}
+
+/// Build `quote` + citation from page-0 glyphs and the file name (no info dict yet).
+fn quoted_citation_clipboard(
+    app: &MarkerApp,
+    menu: &ContextMenu,
+    quote: &str,
+) -> Option<String> {
+    let tab = app.tab()?;
+    let glyphs = tab.doc.glyphs.get(&0)?;
+    let page0 = cite::page_text(glyphs);
+    let file_name = tab
+        .doc
+        .path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("document.pdf");
+    let page = citation_page(tab, menu);
+    let citation = cite::citation_line(file_name, page + 1, &page0);
+    Some(cite::format_quoted_citation(quote, &citation))
+}
+
+fn citation_page(tab: &Tab, menu: &ContextMenu) -> usize {
+    if let Some(sel) = &tab.text_sel {
+        return sel.page;
+    }
+    if tab.selected.len() == 1 {
+        if let Some(annot) = tab.doc.session.get(tab.selected[0]) {
+            return annot.page;
+        }
+    }
+    menu.page
 }
 
 fn menu_context_header(
@@ -4328,6 +4406,7 @@ enum MenuAction {
     None,
     Paste,
     Copy,
+    CopyCite,
     Edit,
     Delete,
     DeletePage,
@@ -4630,6 +4709,11 @@ pub(crate) fn wanted_tiles(
         if on_screen && !doc.glyphs.contains_key(&page) {
             want.words.push(page);
         }
+    }
+    // ST9: citation menu needs page-0 text for DOI/arXiv; request via the
+    // existing glyph job when the menu has asked (no app.rs plumbing).
+    if cite::page0_glyphs_needed() && !doc.glyphs.contains_key(&0) && !want.words.contains(&0) {
+        want.words.push(0);
     }
     if scroll_dir < 0.0 {
         if first > 0

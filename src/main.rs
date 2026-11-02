@@ -58,12 +58,17 @@ fn main() -> eframe::Result<()> {
 }
 
 fn run_ui(paths: Vec<std::path::PathBuf>, inbox: Option<instance::IpcInbox>) -> eframe::Result<()> {
+    // Always request an alpha-capable surface. X11 selects the 32-bit visual only
+    // at create time; Wayland can flip the opaque-region hint later. Settings
+    // `translucent_chrome` then controls whether we clear/paint with alpha so the
+    // letterbox shows the desktop (kitty-style), while PDF pages stay opaque.
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 840.0])
         .with_min_inner_size([760.0, 480.0])
         .with_title("Marker")
         .with_drag_and_drop(true)
-        .with_icon(icon::window_icon());
+        .with_icon(icon::window_icon())
+        .with_transparent(true);
 
     let options = eframe::NativeOptions {
         viewport,

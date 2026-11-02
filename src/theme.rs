@@ -91,6 +91,9 @@ impl ThemeColors {
         faint_bg: Color32::from_rgb(55, 64, 69),
     };
 
+    /// Soften chrome and letterbox alphas. Backdrop is more open than panels so
+    /// the empty side/letterbox area reads as kitty-style desktop see-through
+    /// once the native window is transparent; page tiles stay fully opaque.
     fn with_translucent(self, on: bool) -> Self {
         if !on {
             return self;
@@ -98,7 +101,7 @@ impl ThemeColors {
         Self {
             chrome: with_alpha(self.chrome, 210),
             chrome_raised: with_alpha(self.chrome_raised, 220),
-            backdrop: with_alpha(self.backdrop, 200),
+            backdrop: with_alpha(self.backdrop, 150),
             accent: self.accent,
             text: self.text,
             text_dim: self.text_dim,
@@ -264,6 +267,10 @@ pub(crate) fn apply_user_theme(
             os_accent: accent_key,
         });
     }
+
+    // Hint the compositor: clear the opaque region when see-through, restore it
+    // when solid. Harmless no-op on X11 after create; Wayland honors it live.
+    ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(translucent));
 }
 
 /// Refresh Linux color-scheme / accent when following System, otherwise no-op
@@ -373,6 +380,9 @@ mod tests {
         let solid = ThemeColors::DARK;
         let soft = solid.with_translucent(true);
         assert_eq!(soft.chrome.a(), 210);
+        assert_eq!(soft.backdrop.a(), 150);
+        assert!(soft.backdrop.a() < soft.chrome.a());
         assert_eq!(solid.with_translucent(false).chrome.a(), solid.chrome.a());
+        assert_eq!(solid.with_translucent(false).backdrop.a(), solid.backdrop.a());
     }
 }

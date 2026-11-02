@@ -1077,6 +1077,17 @@ impl MarkerApp {
 }
 
 impl eframe::App for MarkerApp {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        // With `ViewportBuilder::with_transparent(true)`, a transparent clear lets
+        // letterbox/chrome alphas composite over the desktop. When the setting is
+        // off, clear opaque so the window reads solid even on an alpha surface.
+        if self.settings.translucent_chrome {
+            egui::Rgba::TRANSPARENT.to_array()
+        } else {
+            visuals.extreme_bg_color.to_normalized_gamma_f32()
+        }
+    }
+
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if ctx.input(|input| input.viewport().close_requested()) {
             self.flush_on_exit_if_needed();

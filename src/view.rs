@@ -4116,6 +4116,14 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                     } else if menu_item(ui, "Select text for Assistant", Some("Ctrl+Shift+A")) {
                         action = MenuAction::AttachText;
                     }
+                    wrote = true;
+                }
+
+                if wrote {
+                    ui.separator();
+                }
+                if menu_item(ui, "Delete page", Some("Ctrl+Shift+Backspace")) {
+                    action = MenuAction::DeletePage;
                 }
             });
         });
@@ -4206,6 +4214,13 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 tab.menu = None;
             }
             app.lookup_selection_in_browser();
+        }
+        MenuAction::DeletePage => {
+            let page = menu.page;
+            if let Some(tab) = app.tab_mut() {
+                tab.menu = None;
+            }
+            app.delete_page_at(page);
         }
     }
 }
@@ -4315,6 +4330,7 @@ enum MenuAction {
     Copy,
     Edit,
     Delete,
+    DeletePage,
     AttachText,
     AttachShot,
     Explain,

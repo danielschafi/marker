@@ -12,7 +12,6 @@ mod overlays;
 mod paint;
 mod pointer;
 
-pub(crate) use commit::place_assistant_answer;
 #[allow(unused_imports)] // `TileWant` / `TileRequest` kept on the `view::` path for callers.
 pub(crate) use geometry::{visible_pages, wanted_tiles, TileRequest, TileWant};
 pub(crate) use paint::{cached_math_metrics, EguiMeasure};

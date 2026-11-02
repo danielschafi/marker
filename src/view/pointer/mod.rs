@@ -8,7 +8,6 @@ use super::commit::{commit_drag, place_box, resize_target};
 use super::PaneCtx;
 use crate::annot::{glyph_at, word_range, AnnotKind, MarkupStyle, ShapeKind};
 use crate::app::{CreateKind, Drag, MarkerApp, Tab, Tool};
-use crate::assistant::CaptureMode;
 use crate::geom::PdfPoint;
 
 mod click;
@@ -103,15 +102,12 @@ pub(super) fn handle_pointer(app: &mut MarkerApp, response: &egui::Response, pan
         Some(Drag::Pan { .. })
     ) {
         response.ctx.set_cursor_icon(CursorIcon::Grabbing);
-    } else if matches!(app.capture, CaptureMode::Region)
-        || matches!(
-            app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
-            Some(Drag::Marquee { .. })
-        )
-    {
+    } else if matches!(
+        app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
+        Some(Drag::Marquee { .. })
+    ) {
         response.clone().on_hover_cursor(CursorIcon::Crosshair);
-    } else if matches!(app.capture, CaptureMode::LearningText)
-        || app.tool.is_text_mark()
+    } else if app.tool.is_text_mark()
         || matches!(app.tool, Tool::Text | Tool::Math)
         || matches!(
             app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
@@ -124,41 +120,6 @@ pub(super) fn handle_pointer(app: &mut MarkerApp, response: &egui::Response, pan
 
 fn begin_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, space: bool) {
     let view = pane.rect;
-    if app.capture != CaptureMode::None && !space {
-        let capture = app.capture;
-        let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
-            return;
-        };
-        let Some((page, point)) = tab.doc.screen_to_page(pos, view) else {
-            return;
-        };
-        match capture {
-            CaptureMode::LearningText => {
-                let index = tab
-                    .doc
-                    .glyphs
-                    .get(&page)
-                    .and_then(|glyphs| glyph_at(glyphs, point));
-                tab.drag = Some(Drag::LearningSelect {
-                    page,
-                    anchor: index,
-                    current: index,
-                    origin: point,
-                    current_pt: point,
-                });
-            }
-            CaptureMode::Region => {
-                tab.drag = Some(Drag::Region {
-                    page,
-                    origin: point,
-                    current: point,
-                });
-            }
-            CaptureMode::None => {}
-        }
-        return;
-    }
-
     let tool = app.tool;
     let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
@@ -312,7 +273,6 @@ fn begin_select(tab: &mut Tab, page: usize, point: PdfPoint, pos: Pos2, view: Re
     tab.selected.clear();
     tab.editing = None;
     tab.style_bar = None;
-    tab.assistant.learning = None;
     let index = tab
         .doc
         .glyphs
@@ -340,7 +300,6 @@ fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint, style: Option<Ma
     tab.selected.clear();
     tab.text_sel = None;
     tab.style_bar = None;
-    tab.assistant.learning = None;
     let glyphs = tab.doc.glyphs.get(&page);
     let index = glyphs.and_then(|glyphs| glyph_at(glyphs, point));
     let word = index.and_then(|i| glyphs.and_then(|g| g.get(i)).map(|g| g.word));
@@ -452,34 +411,6 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx) {
                 style,
             });
         }
-        Drag::LearningSelect {
-            page,
-            anchor,
-            origin,
-            ..
-        } => {
-            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
-                return;
-            };
-            let point = tab
-                .doc
-                .screen_to_page(pos, view)
-                .filter(|(hit, _)| *hit == page)
-                .map(|(_, point)| point)
-                .unwrap_or(origin);
-            let current = tab
-                .doc
-                .glyphs
-                .get(&page)
-                .and_then(|glyphs| glyph_at(glyphs, point));
-            tab.drag = Some(Drag::LearningSelect {
-                page,
-                anchor,
-                current,
-                origin,
-                current_pt: point,
-            });
-        }
         Drag::TextSelect {
             page,
             anchor,
@@ -519,22 +450,6 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx) {
                 .map(|(_, point)| point)
                 .unwrap_or(origin);
             tab.drag = Some(Drag::Marquee {
-                page,
-                origin,
-                current: point,
-            });
-        }
-        Drag::Region { page, origin, .. } => {
-            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
-                return;
-            };
-            let point = tab
-                .doc
-                .screen_to_page(pos, view)
-                .filter(|(hit, _)| *hit == page)
-                .map(|(_, point)| point)
-                .unwrap_or(origin);
-            tab.drag = Some(Drag::Region {
                 page,
                 origin,
                 current: point,
@@ -679,14 +594,11 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, pane: PaneCtx, double: bo
             Drag::Highlight {
                 anchor: Some(_), ..
             }
-            | Drag::LearningSelect {
-                anchor: Some(_), ..
-            }
             | Drag::TextSelect {
                 anchor: Some(_), ..
             } => commit_drag(app, drag, pane),
-            Drag::Region { .. } | Drag::Marquee { .. } => {
-                // Tiny click — ignore empty crop / marquee.
+            Drag::Marquee { .. } => {
+                // Tiny click — ignore empty marquee.
             }
             Drag::Create {
                 page, origin, kind, ..
@@ -754,22 +666,7 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, pane: PaneCtx) -> bool {
         }
         Drag::Move { moved, .. } => *moved,
         Drag::Resize { .. } => true,
-        Drag::Region {
-            page,
-            origin,
-            current,
-        } => {
-            let a = tab.doc.page_to_screen(*page, *origin, view);
-            let b = tab.doc.page_to_screen(*page, *current, view);
-            a.distance(b) > 3.0
-        }
-        Drag::LearningSelect {
-            page,
-            origin,
-            current_pt,
-            ..
-        }
-        | Drag::TextSelect {
+        Drag::TextSelect {
             page,
             origin,
             current_pt,

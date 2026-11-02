@@ -165,10 +165,6 @@ impl MarkerApp {
         debug_assert_eq!(tab.id, id);
         let doc_id = tab.doc.doc_id;
         self.math.forget_doc(doc_id);
-        if tab.assistant.streaming {
-            self.assistant
-                .cancel(tab.doc.doc_id, tab.assistant.request_seq);
-        }
         self.worker.close(tab.doc.doc_id);
         self.tile_wanted
             .lock()

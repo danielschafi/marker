@@ -4,13 +4,13 @@
 //! link it without starting egui.
 
 pub mod annot;
-pub mod assistant;
 pub mod cite;
 pub mod export;
 pub mod geom;
 pub mod instance;
 pub mod math;
 pub mod math_spans;
+pub mod page_text;
 pub mod pdf;
 pub mod rich_text;
 pub mod settings;

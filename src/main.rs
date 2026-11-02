@@ -4,9 +4,6 @@
 mod annot {
     pub use marker::annot::*;
 }
-mod assistant {
-    pub use marker::assistant::*;
-}
 mod cite {
     pub use marker::cite::*;
 }
@@ -25,6 +22,9 @@ mod math {
 mod math_spans {
     pub use marker::math_spans::*;
 }
+mod page_text {
+    pub use marker::page_text::*;
+}
 mod pdf {
     pub use marker::pdf::*;
 }
@@ -42,7 +42,6 @@ mod worker {
 }
 
 mod app;
-mod assistant_md;
 mod icon;
 mod platform;
 mod rich_text_edit;

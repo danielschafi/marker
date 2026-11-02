@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use egui::Key;
 
 use crate::annot::{AnnotKind, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind};
-use crate::assistant::TabAssistant;
 use crate::geom::{PdfPoint, Rgb};
 use crate::math::MathPreview;
 use crate::pdf::{DocId, OpenedDoc, OutlineNode, PageInfo};
@@ -29,8 +28,6 @@ pub(crate) struct Tab {
     pub(crate) pending_jump: Option<(usize, Option<f32>)>,
     pub(crate) inflight: HashSet<TileKey>,
     pub(crate) glyphs_waiting: HashSet<usize>,
-    /// Study prompt waiting on a one-shot glyph load for `page` (ST5).
-    pub(crate) pending_study: Option<(usize, String)>,
     /// Markdown / Anki CSV export waiting on glyph loads for highlight pages (ST1 / ST3).
     pub(crate) pending_export: Option<PendingExport>,
     pub(crate) previews: HashMap<u64, MathPreview>,
@@ -60,7 +57,6 @@ pub(crate) struct Tab {
     pub(crate) thumbs_inflight: HashSet<usize>,
     pub(crate) annot_sidebar: AnnotSidebarState,
     pub(crate) review: ReviewState,
-    pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
@@ -130,7 +126,6 @@ impl Tab {
             pending_jump: None,
             inflight: HashSet::new(),
             glyphs_waiting: HashSet::new(),
-            pending_study: None,
             pending_export: None,
             previews: HashMap::new(),
             image_textures: HashMap::new(),
@@ -152,7 +147,6 @@ impl Tab {
             thumbs_inflight: HashSet::new(),
             annot_sidebar: AnnotSidebarState::default(),
             review: ReviewState::default(),
-            assistant: TabAssistant::default(),
             search: SearchState::default(),
             last_hl: None,
             focus_edit: false,
@@ -545,18 +539,6 @@ pub(crate) enum CreateKind {
 
 #[derive(Clone)]
 pub(crate) enum Drag {
-    Region {
-        page: usize,
-        origin: PdfPoint,
-        current: PdfPoint,
-    },
-    LearningSelect {
-        page: usize,
-        anchor: Option<usize>,
-        current: Option<usize>,
-        origin: PdfPoint,
-        current_pt: PdfPoint,
-    },
     /// Select-tool text drag (copyable page text; not an annotation).
     TextSelect {
         page: usize,

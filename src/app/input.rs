@@ -2,7 +2,6 @@
 
 use egui::{Key, ViewportCommand};
 
-use crate::assistant::CaptureMode;
 use crate::instance;
 
 use super::*;
@@ -14,16 +13,14 @@ pub(crate) enum ShortcutSection {
     Navigate,
     Edit,
     View,
-    Assistant,
 }
 
 impl ShortcutSection {
-    pub(crate) const ALL: [ShortcutSection; 5] = [
+    pub(crate) const ALL: [ShortcutSection; 4] = [
         ShortcutSection::Tools,
         ShortcutSection::Navigate,
         ShortcutSection::Edit,
         ShortcutSection::View,
-        ShortcutSection::Assistant,
     ];
 
     pub(crate) fn label(self) -> &'static str {
@@ -32,7 +29,6 @@ impl ShortcutSection {
             Self::Navigate => "Navigate",
             Self::Edit => "Edit",
             Self::View => "View",
-            Self::Assistant => "Assistant",
         }
     }
 }
@@ -91,15 +87,6 @@ impl KeyChord {
         }
     }
 
-    const fn cmd_alt(key: Key) -> Self {
-        Self {
-            key,
-            command: true,
-            alt: true,
-            shift: Some(false),
-        }
-    }
-
     pub(crate) fn matches(self, input: &egui::InputState) -> bool {
         if !input.key_pressed(self.key) {
             return false;
@@ -144,11 +131,6 @@ pub(crate) enum Action {
     CloseTab,
     ToggleToolbar,
     ToggleZen,
-    ToggleAssistant,
-    AttachOrSelectText,
-    BeginRegionCapture,
-    ExplainSelection,
-    AssistantStop,
     NextTab,
     PrevTab,
     ToggleSplitSide,
@@ -972,68 +954,6 @@ pub(crate) const KEYMAP: &[KeymapRow] = &[
         keys: "Esc",
         label: "Dismiss / leave edit",
     },
-    // Assistant
-    KeymapRow {
-        chord: Some(KeyChord::cmd_alt(Key::I)),
-        action: Some(Action::ToggleAssistant),
-        global: true,
-        when_not_editing: false,
-        cheatsheet: true,
-        gate: KeyGate::Always,
-        section: ShortcutSection::Assistant,
-        keys: "Ctrl+Alt+I",
-        label: "Toggle assistant",
-    },
-    KeymapRow {
-        // Old code: command+shift, alt not checked.
-        chord: Some(KeyChord {
-            key: Key::A,
-            command: true,
-            alt: false,
-            shift: Some(true),
-        }),
-        action: Some(Action::AttachOrSelectText),
-        global: true,
-        when_not_editing: false,
-        cheatsheet: true,
-        gate: KeyGate::Always,
-        section: ShortcutSection::Assistant,
-        keys: "Ctrl+Shift+A",
-        label: "Attach / select text",
-    },
-    KeymapRow {
-        chord: Some(KeyChord::cmd_alt(Key::S)),
-        action: Some(Action::BeginRegionCapture),
-        global: true,
-        when_not_editing: false,
-        cheatsheet: true,
-        gate: KeyGate::Always,
-        section: ShortcutSection::Assistant,
-        keys: "Ctrl+Alt+S",
-        label: "Capture region",
-    },
-    KeymapRow {
-        chord: Some(KeyChord::cmd_alt(Key::E)),
-        action: Some(Action::ExplainSelection),
-        global: true,
-        when_not_editing: false,
-        cheatsheet: true,
-        gate: KeyGate::Always,
-        section: ShortcutSection::Assistant,
-        keys: "Ctrl+Alt+E",
-        label: "Explain selection",
-    },
-    KeymapRow {
-        chord: Some(KeyChord::cmd(Key::Period)),
-        action: Some(Action::AssistantStop),
-        global: true,
-        when_not_editing: false,
-        cheatsheet: true,
-        gate: KeyGate::Always,
-        section: ShortcutSection::Assistant,
-        keys: "Ctrl+.",
-        label: "Stop assistant",
-    },
 ];
 
 /// Cheat-sheet rows derived from [`KEYMAP`] (`cheatsheet: true`).
@@ -1226,10 +1146,6 @@ impl MarkerApp {
     pub(crate) fn leave_typing(&mut self) {
         let mut exit_zen = false;
         let mut seal = false;
-        if self.capture != CaptureMode::None {
-            self.cancel_capture();
-            return;
-        }
         if self.preset_editor_open {
             self.preset_editor_open = false;
             return;
@@ -1261,13 +1177,9 @@ impl MarkerApp {
                 tab.live_math = None;
                 tab.pending_text_caret = None;
                 seal = true;
-            } else if tab.assistant.learning.take().is_some()
-                || !tab.selected.is_empty()
-                || tab.text_sel.take().is_some()
-            {
+            } else if !tab.selected.is_empty() || tab.text_sel.take().is_some() {
                 tab.selected.clear();
                 tab.editing = None;
-                // Cleared learning selection and/or annotation/text selection.
             } else if tab.search.open {
                 tab.search.open = false;
                 tab.search.hits.clear();
@@ -1315,12 +1227,8 @@ impl MarkerApp {
         }
         if ctx.wants_keyboard_input() {
             if ctx.input(|input| input.key_pressed(Key::Escape)) {
-                if self.capture != CaptureMode::None {
-                    self.cancel_capture();
-                } else {
-                    self.leave_typing();
-                    self.sync_zen_viewport(ctx);
-                }
+                self.leave_typing();
+                self.sync_zen_viewport(ctx);
             }
             return;
         }
@@ -1444,17 +1352,6 @@ impl MarkerApp {
             }
             Action::ToggleToolbar => self.toggle_toolbar(),
             Action::ToggleZen => self.toggle_zen(ctx),
-            Action::ToggleAssistant => self.toggle_assistant(),
-            Action::AttachOrSelectText => {
-                if self.tab().is_some_and(|t| t.assistant.learning.is_some()) {
-                    self.attach_learning_text();
-                } else {
-                    self.begin_learning_select();
-                }
-            }
-            Action::BeginRegionCapture => self.begin_region_capture(),
-            Action::ExplainSelection => self.explain_selection(),
-            Action::AssistantStop => self.assistant_stop(),
             Action::NextTab => {
                 if self.tabs.len() >= 2 {
                     if let Some(next) = self.adjacent_tab_id(self.active, 1) {
@@ -1529,12 +1426,8 @@ impl MarkerApp {
                 }
             }
             Action::Escape => {
-                if self.capture != CaptureMode::None {
-                    self.cancel_capture();
-                } else {
-                    self.leave_typing();
-                    self.sync_zen_viewport(ctx);
-                }
+                self.leave_typing();
+                self.sync_zen_viewport(ctx);
             }
         }
     }

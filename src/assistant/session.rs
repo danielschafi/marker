@@ -11,7 +11,7 @@
 //! | --- | --- | --- |
 //! | Close / hide assistant panel | kept | continues; UI reconnects on reopen |
 //! | Zen / chrome auto-hide | kept | continues |
-//! | Switch to another tab | kept on the background tab | continues (events keyed by tab `gen`) |
+//! | Switch to another tab | kept on the background tab | continues (events keyed by tab `doc_id`) |
 //! | Between turns (idle) | kept for the tab lifetime | n/a |
 //!
 //! ## End of local session

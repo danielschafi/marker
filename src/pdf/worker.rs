@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::app::TileKey;
 
+use super::DocId;
 use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
 
@@ -17,14 +18,14 @@ use super::engine::{
 
 pub enum PdfJob {
     Open {
-        gen: u64,
+        doc_id: DocId,
         path: PathBuf,
     },
     Close {
-        gen: u64,
+        doc_id: DocId,
     },
     Tile {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
         scale: f32,
         col: i32,
@@ -34,35 +35,35 @@ pub enum PdfJob {
     },
     /// Small full-page raster for the thumbnails panel (FT10).
     Thumb {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
     },
     Crop {
-        gen: u64,
+        doc_id: DocId,
         seq: u64,
         page: usize,
         rect: PdfRect,
         dpi: f32,
     },
     Save {
-        gen: u64,
+        doc_id: DocId,
         snapshot: SaveSnapshot,
     },
     SaveAs {
-        gen: u64,
+        doc_id: DocId,
         path: PathBuf,
         snapshot: SaveSnapshot,
     },
     InsertPage {
-        gen: u64,
+        doc_id: DocId,
         after: usize,
     },
     InsertPageAt {
-        gen: u64,
+        doc_id: DocId,
         at: usize,
     },
     DeletePage {
-        gen: u64,
+        doc_id: DocId,
         index: usize,
     },
     Shutdown,
@@ -72,29 +73,29 @@ pub enum PdfJob {
 /// thread never ranks them against raster work.
 enum ReadJob {
     Open {
-        gen: u64,
+        doc_id: DocId,
         path: PathBuf,
     },
     Close {
-        gen: u64,
+        doc_id: DocId,
     },
     /// Drop the reader's document and ack so the tile thread can rewrite the file.
     Release {
-        gen: u64,
+        doc_id: DocId,
         ack: Sender<()>,
     },
     Reopen {
-        gen: u64,
+        doc_id: DocId,
     },
     Search {
-        gen: u64,
+        doc_id: DocId,
         seq: u64,
         needle: String,
         from: usize,
         case_sensitive: bool,
     },
     Glyphs {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
     },
     Shutdown,
@@ -104,11 +105,11 @@ pub enum PdfReply {
     Opened(OpenedDoc),
     /// `tile.pixels` are premultiplied RGBA8 (see [`TileImage::pixels`]).
     Tile {
-        gen: u64,
+        doc_id: DocId,
         tile: TileImage,
     },
     TileMiss {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
         scale: f32,
         col: i32,
@@ -116,57 +117,57 @@ pub enum PdfReply {
     },
     /// Thumbnail panel reply — not a document tile (do not feed into tile LRU).
     Thumb {
-        gen: u64,
+        doc_id: DocId,
         thumb: ThumbImage,
     },
     ThumbMiss {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
     },
     Glyphs {
-        gen: u64,
+        doc_id: DocId,
         page: usize,
         glyphs: PageGlyphs,
     },
     Crop {
-        gen: u64,
+        doc_id: DocId,
         seq: u64,
         result: Result<CropImage, String>,
     },
     Search {
-        gen: u64,
+        doc_id: DocId,
         seq: u64,
         hits: Vec<(usize, Vec<PdfRect>)>,
         done: bool,
     },
     Saved {
-        gen: u64,
+        doc_id: DocId,
         result: Result<Vec<SavedXref>, String>,
     },
     /// Successful Save As retargets the open document onto `path`.
     SavedAs {
-        gen: u64,
+        doc_id: DocId,
         path: PathBuf,
         result: Result<Vec<SavedXref>, String>,
     },
     PageInserted {
-        gen: u64,
+        doc_id: DocId,
         index: usize,
         pages: Vec<PageInfo>,
     },
     PageDeleted {
-        gen: u64,
+        doc_id: DocId,
         index: usize,
         pages: Vec<PageInfo>,
     },
     Failed {
-        gen: Option<u64>,
+        doc_id: Option<DocId>,
         message: String,
     },
 }
 
 pub struct OpenedDoc {
-    pub gen: u64,
+    pub doc_id: DocId,
     pub path: PathBuf,
     pub pages: Vec<PageInfo>,
     pub outline: Vec<OutlineNode>,
@@ -182,8 +183,8 @@ pub struct PdfWorker {
 impl PdfWorker {
     pub fn spawn(
         ctx: egui::Context,
-        tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
-        thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+        tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
+        thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
     ) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (read_tx, read_rx) = mpsc::channel();
@@ -223,19 +224,19 @@ impl PdfWorker {
         }
     }
 
-    pub fn open(&self, gen: u64, path: PathBuf) {
-        let _ = self.jobs.send(PdfJob::Open { gen, path });
+    pub fn open(&self, doc_id: DocId, path: PathBuf) {
+        let _ = self.jobs.send(PdfJob::Open { doc_id, path });
     }
 
-    pub fn close(&self, gen: u64) {
-        let _ = self.jobs.send(PdfJob::Close { gen });
+    pub fn close(&self, doc_id: DocId) {
+        let _ = self.jobs.send(PdfJob::Close { doc_id });
     }
 
     // RF7 packs tile coords into a request struct.
     #[allow(clippy::too_many_arguments)]
     pub fn tile(
         &self,
-        gen: u64,
+        doc_id: DocId,
         page: usize,
         scale: f32,
         col: i32,
@@ -244,7 +245,7 @@ impl PdfWorker {
         distance: u32,
     ) {
         let _ = self.jobs.send(PdfJob::Tile {
-            gen,
+            doc_id,
             page,
             scale,
             col,
@@ -254,17 +255,17 @@ impl PdfWorker {
         });
     }
 
-    pub fn thumb(&self, gen: u64, page: usize) {
-        let _ = self.jobs.send(PdfJob::Thumb { gen, page });
+    pub fn thumb(&self, doc_id: DocId, page: usize) {
+        let _ = self.jobs.send(PdfJob::Thumb { doc_id, page });
     }
 
-    pub fn glyphs(&self, gen: u64, page: usize) {
-        let _ = self.reads.send(ReadJob::Glyphs { gen, page });
+    pub fn glyphs(&self, doc_id: DocId, page: usize) {
+        let _ = self.reads.send(ReadJob::Glyphs { doc_id, page });
     }
 
-    pub fn crop(&self, gen: u64, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
+    pub fn crop(&self, doc_id: DocId, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
         let _ = self.jobs.send(PdfJob::Crop {
-            gen,
+            doc_id,
             seq,
             page,
             rect,
@@ -272,11 +273,11 @@ impl PdfWorker {
         });
     }
 
-    pub fn search(&self, gen: u64, seq: u64, needle: String) {
+    pub fn search(&self, doc_id: DocId, seq: u64, needle: String) {
         // Case flag lives in Settings; app.rs cannot pass it this wave (FP9).
         let case_sensitive = crate::settings::live_search_case_sensitive();
         let _ = self.reads.send(ReadJob::Search {
-            gen,
+            doc_id,
             seq,
             needle,
             from: 0,
@@ -284,28 +285,28 @@ impl PdfWorker {
         });
     }
 
-    pub fn save(&self, gen: u64, snapshot: SaveSnapshot) {
-        let _ = self.jobs.send(PdfJob::Save { gen, snapshot });
+    pub fn save(&self, doc_id: DocId, snapshot: SaveSnapshot) {
+        let _ = self.jobs.send(PdfJob::Save { doc_id, snapshot });
     }
 
-    pub fn save_as(&self, gen: u64, path: PathBuf, snapshot: SaveSnapshot) {
+    pub fn save_as(&self, doc_id: DocId, path: PathBuf, snapshot: SaveSnapshot) {
         let _ = self.jobs.send(PdfJob::SaveAs {
-            gen,
+            doc_id,
             path,
             snapshot,
         });
     }
 
-    pub fn insert_page(&self, gen: u64, after: usize) {
-        let _ = self.jobs.send(PdfJob::InsertPage { gen, after });
+    pub fn insert_page(&self, doc_id: DocId, after: usize) {
+        let _ = self.jobs.send(PdfJob::InsertPage { doc_id, after });
     }
 
-    pub fn insert_page_at(&self, gen: u64, at: usize) {
-        let _ = self.jobs.send(PdfJob::InsertPageAt { gen, at });
+    pub fn insert_page_at(&self, doc_id: DocId, at: usize) {
+        let _ = self.jobs.send(PdfJob::InsertPageAt { doc_id, at });
     }
 
-    pub fn delete_page(&self, gen: u64, index: usize) {
-        let _ = self.jobs.send(PdfJob::DeletePage { gen, index });
+    pub fn delete_page(&self, doc_id: DocId, index: usize) {
+        let _ = self.jobs.send(PdfJob::DeletePage { doc_id, index });
     }
 
     pub fn poll(&self) -> Vec<PdfReply> {
@@ -357,28 +358,28 @@ fn reply(ctx: &egui::Context, replies: &Sender<PdfReply>, msg: PdfReply) {
 }
 
 impl PdfReply {
-    fn failed(gen: u64, message: impl Into<String>) -> Self {
+    fn failed(doc_id: DocId, message: impl Into<String>) -> Self {
         Self::Failed {
-            gen: Some(gen),
+            doc_id: Some(doc_id),
             message: message.into(),
         }
     }
 }
 
 fn engine_mut(
-    engines: &mut HashMap<u64, DocumentEngine>,
-    gen: u64,
+    engines: &mut HashMap<DocId, DocumentEngine>,
+    doc_id: DocId,
 ) -> Result<&mut DocumentEngine, PdfReply> {
     engines
-        .get_mut(&gen)
-        .ok_or_else(|| PdfReply::failed(gen, "No document is open."))
+        .get_mut(&doc_id)
+        .ok_or_else(|| PdfReply::failed(doc_id, "No document is open."))
 }
 
 struct WorkerCtx<'a> {
     ctx: &'a egui::Context,
     replies: &'a Sender<PdfReply>,
     reads: &'a Sender<ReadJob>,
-    engines: &'a mut HashMap<u64, DocumentEngine>,
+    engines: &'a mut HashMap<DocId, DocumentEngine>,
 }
 
 impl WorkerCtx<'_> {
@@ -387,32 +388,32 @@ impl WorkerCtx<'_> {
     }
 }
 
-fn handle_open(ctx: &mut WorkerCtx<'_>, gen: u64, path: PathBuf) {
+fn handle_open(ctx: &mut WorkerCtx<'_>, doc_id: DocId, path: PathBuf) {
     match DocumentEngine::open(&path) {
         Ok(loaded) => {
             let opened = OpenedDoc {
-                gen,
+                doc_id,
                 path: path.clone(),
                 pages: loaded.engine.pages().to_vec(),
                 outline: loaded.engine.outline().to_vec(),
                 annotations: loaded.annotations,
             };
-            ctx.engines.insert(gen, loaded.engine);
-            let _ = ctx.reads.send(ReadJob::Open { gen, path });
+            ctx.engines.insert(doc_id, loaded.engine);
+            let _ = ctx.reads.send(ReadJob::Open { doc_id, path });
             ctx.send(PdfReply::Opened(opened));
         }
-        Err(err) => ctx.send(PdfReply::failed(gen, err)),
+        Err(err) => ctx.send(PdfReply::failed(doc_id, err)),
     }
 }
 
 fn handle_tile(
     ctx: &mut WorkerCtx<'_>,
-    gen: u64,
+    doc_id: DocId,
     page: usize,
     scale: f32,
     col: i32,
     row: i32,
-    tile_wanted: &Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    tile_wanted: &Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
 ) {
     let key = TileKey {
         page,
@@ -423,11 +424,11 @@ fn handle_tile(
     let still_wanted = tile_wanted
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .get(&gen)
+        .get(&doc_id)
         .is_some_and(|set| set.contains(&key));
     if !still_wanted {
         ctx.send(PdfReply::TileMiss {
-            gen,
+            doc_id,
             page,
             scale,
             col,
@@ -435,201 +436,228 @@ fn handle_tile(
         });
         return;
     }
-    let Some(engine) = ctx.engines.get_mut(&gen) else {
+    let Some(engine) = ctx.engines.get_mut(&doc_id) else {
         return;
     };
     match engine.render_tile(page, scale, col, row) {
-        Ok(Some(tile)) => ctx.send(PdfReply::Tile { gen, tile }),
+        Ok(Some(tile)) => ctx.send(PdfReply::Tile { doc_id, tile }),
         Ok(None) => {
             ctx.send(PdfReply::TileMiss {
-                gen,
+                doc_id,
                 page,
                 scale,
                 col,
                 row,
             });
         }
-        Err(err) => ctx.send(PdfReply::failed(gen, err)),
+        Err(err) => ctx.send(PdfReply::failed(doc_id, err)),
     }
 }
 
 fn handle_thumb(
     ctx: &mut WorkerCtx<'_>,
-    gen: u64,
+    doc_id: DocId,
     page: usize,
-    thumb_wanted: &Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+    thumb_wanted: &Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
 ) {
     let still_wanted = thumb_wanted
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .get(&gen)
+        .get(&doc_id)
         .is_some_and(|set| set.contains(&page));
     if !still_wanted {
-        ctx.send(PdfReply::ThumbMiss { gen, page });
+        ctx.send(PdfReply::ThumbMiss { doc_id, page });
         return;
     }
-    let Some(engine) = ctx.engines.get_mut(&gen) else {
+    let Some(engine) = ctx.engines.get_mut(&doc_id) else {
         return;
     };
     match engine.render_thumb(page) {
-        Ok(Some(thumb)) => ctx.send(PdfReply::Thumb { gen, thumb }),
-        Ok(None) => ctx.send(PdfReply::ThumbMiss { gen, page }),
-        Err(err) => ctx.send(PdfReply::failed(gen, err)),
+        Ok(Some(thumb)) => ctx.send(PdfReply::Thumb { doc_id, thumb }),
+        Ok(None) => ctx.send(PdfReply::ThumbMiss { doc_id, page }),
+        Err(err) => ctx.send(PdfReply::failed(doc_id, err)),
     }
 }
 
-fn handle_crop(ctx: &mut WorkerCtx<'_>, gen: u64, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
-    let result = match engine_mut(ctx.engines, gen) {
+fn handle_crop(
+    ctx: &mut WorkerCtx<'_>,
+    doc_id: DocId,
+    seq: u64,
+    page: usize,
+    rect: PdfRect,
+    dpi: f32,
+) {
+    let result = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => engine.render_crop_png(page, rect, dpi),
         Err(_) => Err("No document is open.".into()),
     };
-    ctx.send(PdfReply::Crop { gen, seq, result });
+    ctx.send(PdfReply::Crop {
+        doc_id,
+        seq,
+        result,
+    });
 }
 
-fn handle_save(ctx: &mut WorkerCtx<'_>, gen: u64, snapshot: SaveSnapshot) {
-    release_reader(ctx.reads, gen);
-    let reply = match engine_mut(ctx.engines, gen) {
+fn handle_save(ctx: &mut WorkerCtx<'_>, doc_id: DocId, snapshot: SaveSnapshot) {
+    release_reader(ctx.reads, doc_id);
+    let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => PdfReply::Saved {
-            gen,
+            doc_id,
             result: engine.save(&snapshot),
         },
         Err(_) => PdfReply::Saved {
-            gen,
+            doc_id,
             result: Err("No document is open.".into()),
         },
     };
-    reopen_reader(ctx.reads, gen);
+    reopen_reader(ctx.reads, doc_id);
     ctx.send(reply);
 }
 
-fn handle_save_as(ctx: &mut WorkerCtx<'_>, gen: u64, path: PathBuf, snapshot: SaveSnapshot) {
-    release_reader(ctx.reads, gen);
-    let reply = match engine_mut(ctx.engines, gen) {
+fn handle_save_as(ctx: &mut WorkerCtx<'_>, doc_id: DocId, path: PathBuf, snapshot: SaveSnapshot) {
+    release_reader(ctx.reads, doc_id);
+    let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => {
             let result = engine.save_as(&snapshot, &path);
             // Reader still holds the old path; retarget while suspended so reopen
             // loads the copy we just wrote.
             if result.is_ok() {
                 let _ = ctx.reads.send(ReadJob::Open {
-                    gen,
+                    doc_id,
                     path: path.clone(),
                 });
             }
-            PdfReply::SavedAs { gen, path, result }
+            PdfReply::SavedAs {
+                doc_id,
+                path,
+                result,
+            }
         }
         Err(_) => PdfReply::SavedAs {
-            gen,
+            doc_id,
             path,
             result: Err("No document is open.".into()),
         },
     };
-    reopen_reader(ctx.reads, gen);
+    reopen_reader(ctx.reads, doc_id);
     ctx.send(reply);
 }
 
-fn handle_insert_page(ctx: &mut WorkerCtx<'_>, gen: u64, after: usize) {
-    release_reader(ctx.reads, gen);
-    let reply = match engine_mut(ctx.engines, gen) {
+fn handle_insert_page(ctx: &mut WorkerCtx<'_>, doc_id: DocId, after: usize) {
+    release_reader(ctx.reads, doc_id);
+    let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => match engine.insert_blank_page(after) {
-            Ok((index, pages)) => PdfReply::PageInserted { gen, index, pages },
-            Err(message) => PdfReply::failed(gen, message),
+            Ok((index, pages)) => PdfReply::PageInserted {
+                doc_id,
+                index,
+                pages,
+            },
+            Err(message) => PdfReply::failed(doc_id, message),
         },
         Err(reply) => reply,
     };
-    reopen_reader(ctx.reads, gen);
+    reopen_reader(ctx.reads, doc_id);
     ctx.send(reply);
 }
 
-fn handle_insert_page_at(ctx: &mut WorkerCtx<'_>, gen: u64, at: usize) {
-    release_reader(ctx.reads, gen);
-    let reply = match engine_mut(ctx.engines, gen) {
+fn handle_insert_page_at(ctx: &mut WorkerCtx<'_>, doc_id: DocId, at: usize) {
+    release_reader(ctx.reads, doc_id);
+    let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => match engine.insert_blank_page_at(at) {
-            Ok((index, pages)) => PdfReply::PageInserted { gen, index, pages },
-            Err(message) => PdfReply::failed(gen, message),
+            Ok((index, pages)) => PdfReply::PageInserted {
+                doc_id,
+                index,
+                pages,
+            },
+            Err(message) => PdfReply::failed(doc_id, message),
         },
         Err(reply) => reply,
     };
-    reopen_reader(ctx.reads, gen);
+    reopen_reader(ctx.reads, doc_id);
     ctx.send(reply);
 }
 
-fn handle_delete_page(ctx: &mut WorkerCtx<'_>, gen: u64, index: usize) {
-    release_reader(ctx.reads, gen);
-    let reply = match engine_mut(ctx.engines, gen) {
+fn handle_delete_page(ctx: &mut WorkerCtx<'_>, doc_id: DocId, index: usize) {
+    release_reader(ctx.reads, doc_id);
+    let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => match engine.delete_page_at(index) {
-            Ok(pages) => PdfReply::PageDeleted { gen, index, pages },
-            Err(message) => PdfReply::failed(gen, message),
+            Ok(pages) => PdfReply::PageDeleted {
+                doc_id,
+                index,
+                pages,
+            },
+            Err(message) => PdfReply::failed(doc_id, message),
         },
         Err(reply) => reply,
     };
-    reopen_reader(ctx.reads, gen);
+    reopen_reader(ctx.reads, doc_id);
     ctx.send(reply);
 }
 
 fn handle_job(
     ctx: &mut WorkerCtx<'_>,
     job: PdfJob,
-    tile_wanted: &Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
-    thumb_wanted: &Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+    tile_wanted: &Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
+    thumb_wanted: &Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
 ) -> bool {
     match job {
         PdfJob::Shutdown => true,
-        PdfJob::Open { gen, path } => {
-            handle_open(ctx, gen, path);
+        PdfJob::Open { doc_id, path } => {
+            handle_open(ctx, doc_id, path);
             false
         }
-        PdfJob::Close { gen } => {
-            ctx.engines.remove(&gen);
-            let _ = ctx.reads.send(ReadJob::Close { gen });
+        PdfJob::Close { doc_id } => {
+            ctx.engines.remove(&doc_id);
+            let _ = ctx.reads.send(ReadJob::Close { doc_id });
             false
         }
         PdfJob::Tile {
-            gen,
+            doc_id,
             page,
             scale,
             col,
             row,
             ..
         } => {
-            handle_tile(ctx, gen, page, scale, col, row, tile_wanted);
+            handle_tile(ctx, doc_id, page, scale, col, row, tile_wanted);
             false
         }
-        PdfJob::Thumb { gen, page } => {
-            handle_thumb(ctx, gen, page, thumb_wanted);
+        PdfJob::Thumb { doc_id, page } => {
+            handle_thumb(ctx, doc_id, page, thumb_wanted);
             false
         }
         PdfJob::Crop {
-            gen,
+            doc_id,
             seq,
             page,
             rect,
             dpi,
         } => {
-            handle_crop(ctx, gen, seq, page, rect, dpi);
+            handle_crop(ctx, doc_id, seq, page, rect, dpi);
             false
         }
-        PdfJob::Save { gen, snapshot } => {
-            handle_save(ctx, gen, snapshot);
+        PdfJob::Save { doc_id, snapshot } => {
+            handle_save(ctx, doc_id, snapshot);
             false
         }
         PdfJob::SaveAs {
-            gen,
+            doc_id,
             path,
             snapshot,
         } => {
-            handle_save_as(ctx, gen, path, snapshot);
+            handle_save_as(ctx, doc_id, path, snapshot);
             false
         }
-        PdfJob::InsertPage { gen, after } => {
-            handle_insert_page(ctx, gen, after);
+        PdfJob::InsertPage { doc_id, after } => {
+            handle_insert_page(ctx, doc_id, after);
             false
         }
-        PdfJob::InsertPageAt { gen, at } => {
-            handle_insert_page_at(ctx, gen, at);
+        PdfJob::InsertPageAt { doc_id, at } => {
+            handle_insert_page_at(ctx, doc_id, at);
             false
         }
-        PdfJob::DeletePage { gen, index } => {
-            handle_delete_page(ctx, gen, index);
+        PdfJob::DeletePage { doc_id, index } => {
+            handle_delete_page(ctx, doc_id, index);
             false
         }
     }
@@ -659,10 +687,10 @@ fn worker_loop(
     jobs: Receiver<PdfJob>,
     replies: Sender<PdfReply>,
     reads: Sender<ReadJob>,
-    tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
-    thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+    tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
+    thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
 ) {
-    let mut engines: HashMap<u64, DocumentEngine> = HashMap::new();
+    let mut engines: HashMap<DocId, DocumentEngine> = HashMap::new();
     let mut queued = VecDeque::new();
     while let Some(job) = dequeue_job(&jobs, &mut queued) {
         let mut worker = WorkerCtx {
@@ -685,24 +713,30 @@ const READER_OPEN_RETRY: Duration = Duration::from_millis(10);
 /// A second `PdfDocument` on the same file can make `rewrite_all` fail. The
 /// reader acks only after that document is dropped. If the ack never comes,
 /// the write proceeds anyway rather than wedging the tile thread.
-fn release_reader(reads: &Sender<ReadJob>, gen: u64) {
+fn release_reader(reads: &Sender<ReadJob>, doc_id: DocId) {
     let (ack_tx, ack_rx) = mpsc::channel();
-    if reads.send(ReadJob::Release { gen, ack: ack_tx }).is_err() {
+    if reads
+        .send(ReadJob::Release {
+            doc_id,
+            ack: ack_tx,
+        })
+        .is_err()
+    {
         return;
     }
     let _ = ack_rx.recv_timeout(READER_RELEASE_WAIT);
 }
 
-fn reopen_reader(reads: &Sender<ReadJob>, gen: u64) {
-    let _ = reads.send(ReadJob::Reopen { gen });
+fn reopen_reader(reads: &Sender<ReadJob>, doc_id: DocId) {
+    let _ = reads.send(ReadJob::Reopen { doc_id });
 }
 
 struct ReaderState {
-    engines: HashMap<u64, DocumentEngine>,
-    paths: HashMap<u64, PathBuf>,
-    latest_search: HashMap<u64, u64>,
+    engines: HashMap<DocId, DocumentEngine>,
+    paths: HashMap<DocId, PathBuf>,
+    latest_search: HashMap<DocId, u64>,
     /// Documents dropped so the tile thread can write the file.
-    suspended: HashSet<u64>,
+    suspended: HashSet<DocId>,
     /// Search and glyph jobs waiting for a reopen.
     deferred: VecDeque<ReadJob>,
 }
@@ -745,9 +779,11 @@ fn read_sort_key(job: &ReadJob) -> u8 {
     }
 }
 
-fn is_suspended_work(job: &ReadJob, suspended: &HashSet<u64>) -> bool {
+fn is_suspended_work(job: &ReadJob, suspended: &HashSet<DocId>) -> bool {
     match job {
-        ReadJob::Search { gen, .. } | ReadJob::Glyphs { gen, .. } => suspended.contains(gen),
+        ReadJob::Search { doc_id, .. } | ReadJob::Glyphs { doc_id, .. } => {
+            suspended.contains(doc_id)
+        }
         ReadJob::Open { .. }
         | ReadJob::Close { .. }
         | ReadJob::Release { .. }
@@ -788,15 +824,18 @@ fn dequeue_read(
     }
 }
 
-fn discard_work(queue: &mut VecDeque<ReadJob>, gen: u64) {
-    queue.retain(|job| !is_gen_work(job, gen));
+fn discard_work(queue: &mut VecDeque<ReadJob>, doc_id: DocId) {
+    queue.retain(|job| !is_doc_id_work(job, doc_id));
 }
 
-fn is_gen_work(job: &ReadJob, gen: u64) -> bool {
+fn is_doc_id_work(job: &ReadJob, doc_id: DocId) -> bool {
     match job {
-        ReadJob::Search { gen: job_gen, .. } | ReadJob::Glyphs { gen: job_gen, .. } => {
-            *job_gen == gen
+        ReadJob::Search {
+            doc_id: job_doc_id, ..
         }
+        | ReadJob::Glyphs {
+            doc_id: job_doc_id, ..
+        } => *job_doc_id == doc_id,
         ReadJob::Open { .. }
         | ReadJob::Close { .. }
         | ReadJob::Release { .. }
@@ -805,10 +844,10 @@ fn is_gen_work(job: &ReadJob, gen: u64) -> bool {
     }
 }
 
-fn flush_deferred(state: &mut ReaderState, queued: &mut VecDeque<ReadJob>, gen: u64) {
+fn flush_deferred(state: &mut ReaderState, queued: &mut VecDeque<ReadJob>, doc_id: DocId) {
     let pending = std::mem::take(&mut state.deferred);
     for job in pending {
-        if is_gen_work(&job, gen) {
+        if is_doc_id_work(&job, doc_id) {
             queued.push_back(job);
         } else {
             state.deferred.push_back(job);
@@ -829,18 +868,18 @@ fn open_engine(path: &Path) -> Result<DocumentEngine, String> {
 fn install_engine(
     state: &mut ReaderState,
     queued: &mut VecDeque<ReadJob>,
-    gen: u64,
+    doc_id: DocId,
     path: &Path,
 ) -> bool {
     match open_engine(path) {
         Ok(engine) => {
-            state.engines.insert(gen, engine);
-            state.suspended.remove(&gen);
-            flush_deferred(state, queued, gen);
+            state.engines.insert(doc_id, engine);
+            state.suspended.remove(&doc_id);
+            flush_deferred(state, queued, doc_id);
             true
         }
         Err(_) => {
-            state.engines.remove(&gen);
+            state.engines.remove(&doc_id);
             false
         }
     }
@@ -860,82 +899,90 @@ fn handle_read(
 ) -> bool {
     match job {
         ReadJob::Shutdown => true,
-        ReadJob::Open { gen, path } => {
-            state.paths.insert(gen, path.clone());
-            if !state.suspended.contains(&gen) {
-                let _ = install_engine(state, queued, gen, &path);
+        ReadJob::Open { doc_id, path } => {
+            state.paths.insert(doc_id, path.clone());
+            if !state.suspended.contains(&doc_id) {
+                let _ = install_engine(state, queued, doc_id, &path);
             }
             false
         }
-        ReadJob::Close { gen } => {
-            state.engines.remove(&gen);
-            state.paths.remove(&gen);
-            state.latest_search.remove(&gen);
-            state.suspended.remove(&gen);
-            discard_work(&mut state.deferred, gen);
-            discard_work(queued, gen);
+        ReadJob::Close { doc_id } => {
+            state.engines.remove(&doc_id);
+            state.paths.remove(&doc_id);
+            state.latest_search.remove(&doc_id);
+            state.suspended.remove(&doc_id);
+            discard_work(&mut state.deferred, doc_id);
+            discard_work(queued, doc_id);
             false
         }
-        ReadJob::Release { gen, ack } => {
-            state.engines.remove(&gen);
-            state.suspended.insert(gen);
+        ReadJob::Release { doc_id, ack } => {
+            state.engines.remove(&doc_id);
+            state.suspended.insert(doc_id);
             let _ = ack.send(());
             false
         }
-        ReadJob::Reopen { gen } => {
-            let Some(path) = state.paths.get(&gen).cloned() else {
-                state.suspended.remove(&gen);
-                flush_deferred(state, queued, gen);
+        ReadJob::Reopen { doc_id } => {
+            let Some(path) = state.paths.get(&doc_id).cloned() else {
+                state.suspended.remove(&doc_id);
+                flush_deferred(state, queued, doc_id);
                 return false;
             };
-            if !install_engine(state, queued, gen, &path) {
-                state.suspended.insert(gen);
+            if !install_engine(state, queued, doc_id, &path) {
+                state.suspended.insert(doc_id);
             }
             false
         }
-        ReadJob::Glyphs { gen, page } => {
-            handle_glyphs(io, state, gen, page);
+        ReadJob::Glyphs { doc_id, page } => {
+            handle_glyphs(io, state, doc_id, page);
             false
         }
         ReadJob::Search {
-            gen,
+            doc_id,
             seq,
             needle,
             from,
             case_sensitive,
         } => {
-            handle_search(io, state, gen, seq, needle, from, case_sensitive);
+            handle_search(io, state, doc_id, seq, needle, from, case_sensitive);
             false
         }
     }
 }
 
-fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, gen: u64, page: usize) {
-    let Some(engine) = state.engines.get(&gen) else {
+fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, doc_id: DocId, page: usize) {
+    let Some(engine) = state.engines.get(&doc_id) else {
         return;
     };
     match engine.glyphs(page) {
-        Ok(glyphs) => reply(io.ctx, io.replies, PdfReply::Glyphs { gen, page, glyphs }),
-        Err(err) => reply(io.ctx, io.replies, PdfReply::failed(gen, err)),
+        Ok(glyphs) => reply(
+            io.ctx,
+            io.replies,
+            PdfReply::Glyphs {
+                doc_id,
+                page,
+                glyphs,
+            },
+        ),
+        Err(err) => reply(io.ctx, io.replies, PdfReply::failed(doc_id, err)),
     }
 }
 
 fn handle_search(
     io: &ReadIo<'_>,
     state: &mut ReaderState,
-    gen: u64,
+    doc_id: DocId,
     seq: u64,
     needle: String,
     from: usize,
     case_sensitive: bool,
 ) {
     if from == 0 {
-        state.latest_search.insert(gen, seq);
+        state.latest_search.insert(doc_id, seq);
     }
-    if state.latest_search.get(&gen) != Some(&seq) {
+    if state.latest_search.get(&doc_id) != Some(&seq) {
         return;
     }
-    let Some(engine) = state.engines.get(&gen) else {
+    let Some(engine) = state.engines.get(&doc_id) else {
         return;
     };
     let page_count = engine.pages().len();
@@ -953,7 +1000,7 @@ fn handle_search(
         }
     }
     if let Some(message) = failed {
-        reply(io.ctx, io.replies, PdfReply::failed(gen, message));
+        reply(io.ctx, io.replies, PdfReply::failed(doc_id, message));
         return;
     }
     let done = end >= page_count;
@@ -961,7 +1008,7 @@ fn handle_search(
         io.ctx,
         io.replies,
         PdfReply::Search {
-            gen,
+            doc_id,
             seq,
             hits,
             done,
@@ -969,7 +1016,7 @@ fn handle_search(
     );
     if !done {
         let _ = io.jobs_tx.send(ReadJob::Search {
-            gen,
+            doc_id,
             seq,
             needle,
             from: end,
@@ -988,7 +1035,7 @@ mod tests {
 
     use crate::app::TileKey;
 
-    use super::{PdfReply, PdfWorker};
+    use super::{DocId, PdfReply, PdfWorker};
     use crate::pdf::engine::SaveSnapshot;
 
     fn wanted_for(page: usize, scale: f32, col: i32, row: i32) -> TileKey {
@@ -1068,8 +1115,8 @@ mod tests {
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
         let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
-        let gen = 3u64;
-        worker.open(gen, path);
+        let doc_id = DocId(3);
+        worker.open(doc_id, path);
         let opened = wait_until(&worker, |replies| {
             replies
                 .iter()
@@ -1098,13 +1145,13 @@ mod tests {
         {
             let mut guard = tile_wanted.lock().unwrap();
             guard
-                .entry(gen)
+                .entry(doc_id)
                 .or_default()
                 .insert(wanted_for(0, scale, 0, 0));
         }
-        worker.glyphs(gen, 0);
-        worker.search(gen, 1, "Hello".into());
-        worker.tile(gen, 0, scale, 0, 0, false, 0);
+        worker.glyphs(doc_id, 0);
+        worker.search(doc_id, 1, "Hello".into());
+        worker.tile(doc_id, 0, scale, 0, 0, false, 0);
         let first = wait_until(&worker, |replies| {
             let glyphs = replies.iter().any(
                 |reply| matches!(reply, PdfReply::Glyphs { glyphs, .. } if !glyphs.is_empty()),
@@ -1122,8 +1169,8 @@ mod tests {
         });
         assert_no_fail(&first);
 
-        worker.search(gen, 2, "Hello".into());
-        worker.save(gen, empty_save());
+        worker.search(doc_id, 2, "Hello".into());
+        worker.save(doc_id, empty_save());
         let saved = wait_until(&worker, |replies| {
             let save_ok = replies
                 .iter()
@@ -1135,7 +1182,7 @@ mod tests {
         });
         assert_no_fail(&saved);
 
-        worker.insert_page(gen, 0);
+        worker.insert_page(doc_id, 0);
         let inserted = wait_until(&worker, |replies| {
             replies.iter().any(
                 |reply| matches!(reply, PdfReply::PageInserted { pages, .. } if pages.len() == 5),
@@ -1147,7 +1194,7 @@ mod tests {
                 .any(|reply| matches!(reply, PdfReply::PageInserted { .. })),
             "insert did not finish"
         );
-        worker.delete_page(gen, 4);
+        worker.delete_page(doc_id, 4);
         let deleted = wait_until(&worker, |replies| {
             replies.iter().any(
                 |reply| matches!(reply, PdfReply::PageDeleted { pages, .. } if pages.len() == 4),
@@ -1159,7 +1206,7 @@ mod tests {
                 .any(|reply| matches!(reply, PdfReply::PageDeleted { .. })),
             "delete did not finish"
         );
-        worker.search(gen, 3, "Hello".into());
+        worker.search(doc_id, 3, "Hello".into());
         let again = wait_until(&worker, |replies| {
             replies.iter().any(|reply| {
                 matches!(reply, PdfReply::Search { seq: 3, done: true, hits, .. } if !hits.is_empty())
@@ -1180,7 +1227,7 @@ mod tests {
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
         let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
-        worker.open(1, path);
+        worker.open(DocId(1), path);
         let opened = wait_until(&worker, |replies| {
             replies
                 .iter()
@@ -1199,13 +1246,13 @@ mod tests {
             .collect();
         {
             let mut guard = tile_wanted.lock().unwrap();
-            let set = guard.entry(1).or_default();
+            let set = guard.entry(DocId(1)).or_default();
             for &(page, col, row) in &tiles {
                 set.insert(wanted_for(page, scale, col, row));
             }
         }
         let t0 = Instant::now();
-        worker.search(1, 1, "commit".into());
+        worker.search(DocId(1), 1, "commit".into());
         let mut saw_progress = false;
         let mut tile_sent = None;
         let mut first_tile = None;
@@ -1220,9 +1267,9 @@ mod tests {
                     PdfReply::Search { done, .. } => {
                         if !done && !saw_progress {
                             saw_progress = true;
-                            worker.tile(1, tiles[0].0, scale, 0, 0, false, 0);
+                            worker.tile(DocId(1), tiles[0].0, scale, 0, 0, false, 0);
                             for &(page, col, row) in tiles.iter().skip(1) {
-                                worker.tile(1, page, scale, col, row, false, page as u32);
+                                worker.tile(DocId(1), page, scale, col, row, false, page as u32);
                             }
                             tile_sent = Some(t0.elapsed());
                         }

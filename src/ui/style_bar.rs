@@ -89,7 +89,7 @@ impl MarkerApp {
             || self.selected_is_text_like();
         let show_stroke = matches!(
             self.tool,
-            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw
         ) || self.selected_is_shape();
         if show_size {
             let mut size = self.active_text_size();
@@ -309,7 +309,9 @@ impl MarkerApp {
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
                 self.settings.highlight_color
             }
-            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw => self.settings.shape_color,
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw => {
+                self.settings.shape_color
+            }
             Tool::Select | Tool::Text | Tool::Note | Tool::Math => self.settings.text_color,
         }
     }
@@ -489,7 +491,7 @@ impl MarkerApp {
         match kind_bucket.unwrap_or(match target {
             ColorTarget::Highlights => 0,
             ColorTarget::Ink => match self.tool {
-                Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw => 2,
+                Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw => 2,
                 _ => 1,
             },
         }) {

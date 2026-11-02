@@ -183,12 +183,13 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, space: bool) {
         Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
             begin_highlight(tab, page, point, tool.markup_style());
         }
-        Tool::Rect | Tool::Ellipse | Tool::Line => {
+        Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow => {
             tab.drag = Some(Drag::Shape {
                 page,
                 kind: match tool {
                     Tool::Ellipse => ShapeKind::Ellipse,
                     Tool::Line => ShapeKind::Line,
+                    Tool::Arrow => ShapeKind::Arrow,
                     _ => ShapeKind::Rect,
                 },
                 origin: point,

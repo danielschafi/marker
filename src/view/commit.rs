@@ -235,10 +235,10 @@ fn commit_shape(
 ) {
     let rect = PdfRect::from_points(origin, current);
     let long_enough = (origin.x - current.x).hypot(origin.y - current.y) >= 4.0;
-    if kind != ShapeKind::Line && rect.is_empty() {
+    if !kind.is_line_like() && rect.is_empty() {
         return;
     }
-    if kind == ShapeKind::Line && !long_enough {
+    if kind.is_line_like() && !long_enough {
         return;
     }
     let stroke = app.settings.shape_color;
@@ -610,6 +610,7 @@ pub(super) fn resize_target(
         | Tool::Rect
         | Tool::Ellipse
         | Tool::Line
+        | Tool::Arrow
         | Tool::Draw => false,
     };
     let radius = 16.0;

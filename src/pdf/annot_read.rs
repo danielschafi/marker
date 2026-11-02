@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use mupdf::pdf::{
-    AnnotationDefaultAppearance, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject,
+    AnnotationDefaultAppearance, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument,
+    PdfObject,
 };
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
@@ -429,8 +430,26 @@ pub(crate) fn import_kind(
             let (start, end) = annot.line()?;
             let start = PdfPoint::new(start.x, start.y);
             let end = PdfPoint::new(end.x, end.y);
+            let kind = match annot.line_ending_styles() {
+                Ok((_, LineEndingStyle::ClosedArrow | LineEndingStyle::OpenArrow)) => {
+                    ShapeKind::Arrow
+                }
+                Ok((LineEndingStyle::ClosedArrow | LineEndingStyle::OpenArrow, _)) => {
+                    // Arrowhead on the start endpoint — flip so Marker always paints at `end`.
+                    return Ok(Some(AnnotKind::Shape {
+                        kind: ShapeKind::Arrow,
+                        rect: PdfRect::from_points(end, start),
+                        start: end,
+                        end: start,
+                        stroke,
+                        fill: None,
+                        width: annot.border_width().unwrap_or(1.0).max(0.25),
+                    }));
+                }
+                _ => ShapeKind::Line,
+            };
             Ok(Some(AnnotKind::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 rect: PdfRect::from_points(start, end),
                 start,
                 end,

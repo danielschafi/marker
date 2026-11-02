@@ -92,6 +92,8 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `R` | Rectangle |
 | `E` | Ellipse |
 | `I` | Line |
+| `A` | Arrow |
+| `D` | Draw (freeform) |
 | `M` | Math |
 | `Ctrl+Shift+V` | Paste an image from the clipboard |
 

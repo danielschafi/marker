@@ -219,6 +219,20 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 stroke,
             );
         }
+        Tool::Arrow => {
+            let a = rect.left_bottom() + Vec2::new(1.5, -1.5);
+            let b = rect.right_top() + Vec2::new(-1.5, 1.5);
+            painter.line_segment([a, b], stroke);
+            let dir = (b - a).normalized();
+            let ortho = Vec2::new(-dir.y, dir.x);
+            let tip = b;
+            let base = b - dir * 5.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base + ortho * 2.8, base - ortho * 2.8],
+                color,
+                Stroke::NONE,
+            ));
+        }
         Tool::Draw => {
             let mut pts = Vec::new();
             let mut x = origin.x + 1.0;
@@ -265,6 +279,7 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
         Tool::Rect => "Rectangle tool",
         Tool::Ellipse => "Ellipse tool",
         Tool::Line => "Line tool",
+        Tool::Arrow => "Arrow tool",
         Tool::Draw => "Draw tool",
         Tool::Math => "Equation tool",
     }

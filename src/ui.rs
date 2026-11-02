@@ -25,7 +25,7 @@ use crate::view::viewport_tab;
 
 const BRAND_FAMILY: &str = "Brand";
 
-fn p(ctx: &egui::Context) -> ThemeColors {
+fn palette(ctx: &egui::Context) -> ThemeColors {
     theme::palette(ctx)
 }
 
@@ -59,7 +59,7 @@ const TAB_PILL_H: f32 = 20.0;
 const TOOL_CHIP: Vec2 = Vec2::new(24.0, 22.0);
 
 fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     TopBottomPanel::top("tabs")
         .exact_height(TAB_BAR_H)
         .show_separator_line(false)
@@ -70,12 +70,12 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                 .inner_margin(egui::Margin::symmetric(8, 4)),
         )
         .show(ctx, |ui| {
-            ui.spacing_mut().item_spacing = vec2(3.0, 0.0);
-            ui.spacing_mut().button_padding = vec2(6.0, 2.0);
+            ui.spacing_mut().item_spacing = Vec2::new(3.0, 0.0);
+            ui.spacing_mut().button_padding = Vec2::new(6.0, 2.0);
             let row_h = ui.available_height();
             let full = ui.available_rect_before_wrap();
             let (_, row_response) =
-                ui.allocate_exact_size(vec2(full.width(), row_h), Sense::hover());
+                ui.allocate_exact_size(Vec2::new(full.width(), row_h), Sense::hover());
             let row = row_response.rect;
 
             let center_reserve = 160.0;
@@ -214,7 +214,7 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
 }
 
 fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let opening = !app.opening.is_empty();
     let Some(tab) = app.tab() else {
         if opening {
@@ -246,7 +246,7 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     let max_w = (row.width() * 0.38).clamp(120.0, 420.0);
     width = width.min(max_w);
 
-    let title_rect = Rect::from_center_size(row.center(), vec2(width, TAB_PILL_H + 4.0));
+    let title_rect = Rect::from_center_size(row.center(), Vec2::new(width, TAB_PILL_H + 4.0));
     let sense = if tab_count > 1 {
         Sense::click_and_drag()
     } else {
@@ -340,7 +340,7 @@ fn tab_list_row(
     row_width: f32,
     drop_target: bool,
 ) -> TabAction {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let color = if selected {
         colors.text
     } else {
@@ -351,12 +351,14 @@ fn tab_list_row(
         FontId::new(12.5, FontFamily::Proportional),
         color,
     );
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(row_width, TAB_LIST_ROW_H), Sense::click_and_drag());
+    let (rect, response) = ui.allocate_exact_size(
+        Vec2::new(row_width, TAB_LIST_ROW_H),
+        Sense::click_and_drag(),
+    );
     let fill = if drop_target {
         colors.accent.gamma_multiply(0.28)
     } else if selected {
-        accent_fill(ui.ctx(), 36)
+        theme::accent_fill(ui.ctx(), 36)
     } else if response.hovered() || response.dragged() {
         theme::chrome_overlay(ui.ctx(), 14)
     } else {
@@ -455,7 +457,7 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         }
     }
 
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let mut close = None;
     let mut select = None;
     let mut tab_menu = None;
@@ -507,7 +509,7 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
 
     let area = egui::Area::new(Id::new("marker-tab-list"))
         .order(egui::Order::Foreground)
-        .anchor(Align2::RIGHT_TOP, vec2(-14.0, top))
+        .anchor(Align2::RIGHT_TOP, Vec2::new(-14.0, top))
         .interactable(true)
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
@@ -517,7 +519,7 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_width(row_width);
-                    ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
                     for (index, name, selected, dirty) in &names {
                         let is_drop =
                             drop_over == Some(*index) && drag_src.is_some_and(|src| src != *index);
@@ -617,7 +619,7 @@ fn ui_measure_text(ctx: &egui::Context, text: &str, size: f32) -> f32 {
 }
 
 fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let mut close = false;
     let mut next = false;
     let mut prev = false;
@@ -729,7 +731,7 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                                     format!("page {} · {query}", page + 1)
                                 };
                                 let fill = if selected {
-                                    accent_fill(ui.ctx(), 36)
+                                    theme::accent_fill(ui.ctx(), 36)
                                 } else {
                                     Color32::TRANSPARENT
                                 };
@@ -783,7 +785,7 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let page_info = app.tab().map(|tab| {
         let count = tab.doc.pages.len().max(1);
         let page = tab.doc.current_page(app.view_rect.height().max(1.0)) + 1;
@@ -792,7 +794,6 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
     let want_page_focus = app.page_focus;
     let dirty = app.tab().is_some_and(|tab| tab.doc.session.is_dirty());
     let notice = app.tab().and_then(|tab| match &tab.save {
-        SaveState::Clean | SaveState::Dirty { .. } => None,
         SaveState::Saving => Some((
             "Saving…".to_string(),
             colors.accent,
@@ -802,11 +803,12 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
             let fail = Color32::from_rgb(230, 120, 110);
             Some((message.clone(), fail, message.clone()))
         }
+        _ => None,
     });
     let error = app.error.clone();
     let mut jump = None;
     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 0.0);
+        ui.spacing_mut().item_spacing = Vec2::new(6.0, 0.0);
         // Rightmost: compact open-tabs affordance (list anchors top-right).
         if app.tabs.len() >= 2 {
             tabs_indicator_button(app, ui);
@@ -911,7 +913,7 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
 const CONTROL_H: f32 = 20.0;
 
 fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let list_open = app.tab_list.is_some();
     let label = format!("{} ▾", app.tabs.len());
     let text_w = ui_measure_text(ui.ctx(), &label, 11.5);
@@ -920,7 +922,7 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
     // Stable id so outside-click dismiss can ignore this toggle.
     let response = ui.interact(rect, Id::new("marker-tabs-indicator"), Sense::click());
     let fill = if list_open {
-        accent_fill(ui.ctx(), 42)
+        theme::accent_fill(ui.ctx(), 42)
     } else if response.is_pointer_button_down_on() {
         theme::chrome_overlay(ui.ctx(), 28)
     } else if response.hovered() {
@@ -948,14 +950,14 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
 }
 
 fn control_cluster(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let mut prepared = egui::Frame::new()
         .fill(colors.chrome_raised)
         .corner_radius(CornerRadius::same(5))
         .inner_margin(egui::Margin::symmetric(1, 1))
         .begin(ui);
-    prepared.content_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-    prepared.content_ui.spacing_mut().button_padding = vec2(0.0, 0.0);
+    prepared.content_ui.spacing_mut().item_spacing = Vec2::new(0.0, 0.0);
+    prepared.content_ui.spacing_mut().button_padding = Vec2::new(0.0, 0.0);
     prepared.content_ui.horizontal(|ui| {
         ui.set_height(CONTROL_H);
         add_contents(ui);
@@ -964,7 +966,7 @@ fn control_cluster(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) 
 }
 
 fn cluster_sep(ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::new(1.0, CONTROL_H - 6.0), Sense::hover());
     ui.painter().vline(
         rect.center().x,
@@ -974,7 +976,7 @@ fn cluster_sep(ui: &mut egui::Ui) {
 }
 
 fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let (rect, response) = ui.allocate_exact_size(size, Sense::click());
     let fill = if response.is_pointer_button_down_on() {
         theme::chrome_overlay(ui.ctx(), 28)
@@ -1027,7 +1029,7 @@ fn cheatsheet_window(app: &mut MarkerApp, ctx: &egui::Context) {
     if !app.cheatsheet_open {
         return;
     }
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let mut open = app.cheatsheet_open;
     egui::Window::new("Keyboard shortcuts")
         .id(Id::new("marker-cheatsheet"))
@@ -1081,7 +1083,7 @@ fn preset_editor_window(app: &mut MarkerApp, ctx: &egui::Context) {
     if !app.preset_editor_open {
         return;
     }
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let mut open = app.preset_editor_open;
     let mut dirty = false;
     let mut reset = false;
@@ -1226,7 +1228,7 @@ fn preset_editor_window(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let Some(tab) = app.tab() else {
         return;
     };
@@ -1266,7 +1268,7 @@ const THUMB_PANEL_IMG_W: f32 = 120.0;
 const THUMB_LOOKAHEAD: usize = 2;
 
 fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let view_h = app.view_rect.height().max(1.0);
     let Some((page_count, current, aspects, textures)) = (|| {
         let tab = app.tab()?;
@@ -1335,14 +1337,16 @@ fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                         let aspect = aspects.get(page).copied().unwrap_or(1.414);
                         let img_h = THUMB_PANEL_IMG_W * aspect;
                         let row_h = img_h + 22.0;
-                        let (row_rect, response) = ui
-                            .allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        let (row_rect, response) = ui.allocate_exact_size(
+                            Vec2::new(ui.available_width(), row_h),
+                            Sense::click(),
+                        );
                         if clip.intersects(row_rect) {
                             wanted.push(page);
                         }
                         let selected = page == current;
                         let fill = if selected {
-                            accent_fill(ui.ctx(), 28)
+                            theme::accent_fill(ui.ctx(), 28)
                         } else {
                             Color32::TRANSPARENT
                         };
@@ -1352,7 +1356,7 @@ fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                                 row_rect.center().x - THUMB_PANEL_IMG_W * 0.5,
                                 row_rect.top() + 2.0,
                             ),
-                            vec2(THUMB_PANEL_IMG_W, img_h),
+                            Vec2::new(THUMB_PANEL_IMG_W, img_h),
                         );
                         ui.painter().rect_filled(img_rect, 2.0, Color32::WHITE);
                         if let Some(texture) = textures.get(&page) {
@@ -1409,7 +1413,7 @@ fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let presets = app.settings.highlight_presets.clone();
     let Some(tab) = app.tab() else {
         return;
@@ -1462,7 +1466,7 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
 
             ui.label(RichText::new("Kind").weak().size(11.0));
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
                 for kind in AnnotFilterKind::ALL {
                     let on = kind_filters.contains(&kind);
                     if filter_chip(ui, kind.label(), on).clicked() {
@@ -1478,7 +1482,7 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
 
             ui.label(RichText::new("Color").weak().size(11.0));
             ui.horizontal_wrapped(|ui| {
-                ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
                 for preset in &presets {
                     let on = color_filters.contains(&preset.rgb);
                     if color_dot(ui, preset.rgb, on, &preset.name) {
@@ -1542,7 +1546,7 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn review_panel(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let presets = app.settings.highlight_presets.clone();
     let Some(tab) = app.tab() else {
         return;
@@ -1785,7 +1789,7 @@ fn group_review_rows<'a>(
 }
 
 fn review_row(ui: &mut egui::Ui, row: &ReviewRow, show_quote: bool) -> egui::Response {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let available = ui.available_width();
     let prompt = format!("p.{} · {}", row.page + 1, row.preset);
     let response = egui::Frame::new()
@@ -1906,9 +1910,9 @@ fn annot_row_matches(
 }
 
 fn annot_sidebar_row(ui: &mut egui::Ui, row: &AnnotSidebarRow, selected: bool) -> egui::Response {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let fill = if selected {
-        accent_fill(ui.ctx(), 36)
+        theme::accent_fill(ui.ctx(), 36)
     } else {
         Color32::TRANSPARENT
     };
@@ -1966,9 +1970,9 @@ fn annot_sidebar_row(ui: &mut egui::Ui, row: &AnnotSidebarRow, selected: bool) -
 }
 
 fn filter_chip(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let fill = if selected {
-        accent_fill(ui.ctx(), 42)
+        theme::accent_fill(ui.ctx(), 42)
     } else {
         Color32::TRANSPARENT
     };
@@ -2077,7 +2081,7 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     if !app.assistant_open || app.tab().is_none() {
         return;
     }
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let max_w = (ctx.content_rect().width() * 0.45).clamp(300.0, 640.0);
     let mut send = false;
     let mut stop = false;
@@ -2322,7 +2326,7 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
         .get(active)
         .is_some_and(|tab| tab.assistant.streaming);
     let math_color = {
-        let c = p(ui.ctx()).text;
+        let c = palette(ui.ctx()).text;
         Rgb::new(c.r(), c.g(), c.b())
     };
     // Finished turns only — streaming keeps source until the turn completes (ST7).
@@ -2482,7 +2486,7 @@ fn paint_assistant_answer_math(
 ) {
     let size = MarkerApp::ASSISTANT_MATH_SIZE;
     ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+        ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
         for span in math_spans::parse_spans(text) {
             match span {
                 math_spans::Span::Prose { start, end } => {
@@ -2553,7 +2557,7 @@ fn paint_assistant_answer_math(
 }
 
 fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     if app.tab().is_none() || !app.settings.toolbar_visible {
         return;
     }
@@ -2574,14 +2578,14 @@ fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                 .unwrap_or(0.0);
             let mut cluster_width = known.unwrap_or(0.0);
             ui.horizontal_centered(|ui| {
-                ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
                 if lead > 0.0 {
                     ui.add_space(lead);
                 }
                 let cluster = ui.scope_builder(
                     egui::UiBuilder::new().layout(Layout::left_to_right(Align::Center)),
                     |ui| {
-                        ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                        ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
                         for tool in Tool::ALL {
                             tool_chip(ui, &mut app.tool, tool);
                         }
@@ -2597,11 +2601,11 @@ fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
 }
 
 fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let selected = *current == tool;
     let (rect, response) = ui.allocate_exact_size(TOOL_CHIP, Sense::click());
     let fill = if selected {
-        accent_fill(ui.ctx(), 48)
+        theme::accent_fill(ui.ctx(), 48)
     } else if response.hovered() {
         theme::chrome_overlay(ui.ctx(), 16)
     } else {
@@ -2610,7 +2614,7 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
     if fill != Color32::TRANSPARENT {
         ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
     }
-    let icon = Rect::from_center_size(rect.center() + vec2(-2.5, -0.5), Vec2::splat(13.0));
+    let icon = Rect::from_center_size(rect.center() + Vec2::new(-2.5, -0.5), Vec2::splat(13.0));
     let color = if selected { colors.accent } else { colors.text };
     paint_tool_icon(ui.painter(), icon, tool, color);
     let key_color = if selected {
@@ -2619,7 +2623,7 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
         colors.text_dim
     };
     ui.painter().text(
-        rect.right_bottom() + vec2(-1.0, 0.0),
+        rect.right_bottom() + Vec2::new(-1.0, 0.0),
         Align2::RIGHT_BOTTOM,
         tool.shortcut().name(),
         FontId::new(8.0, FontFamily::Proportional),
@@ -2645,43 +2649,55 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
     match tool {
         Tool::Select => {
             let points = vec![
-                origin + vec2(1.5, 1.0),
-                origin + vec2(1.5, 13.5),
-                origin + vec2(4.8, 10.0),
-                origin + vec2(7.6, 14.2),
-                origin + vec2(9.6, 13.2),
-                origin + vec2(6.8, 9.0),
-                origin + vec2(11.2, 8.6),
+                origin + Vec2::new(1.5, 1.0),
+                origin + Vec2::new(1.5, 13.5),
+                origin + Vec2::new(4.8, 10.0),
+                origin + Vec2::new(7.6, 14.2),
+                origin + Vec2::new(9.6, 13.2),
+                origin + Vec2::new(6.8, 9.0),
+                origin + Vec2::new(11.2, 8.6),
             ];
             painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
         }
         Tool::Highlight => {
-            let bar = Rect::from_min_max(origin + vec2(0.5, 11.0), origin + vec2(14.5, 14.2));
+            let bar = Rect::from_min_max(
+                origin + Vec2::new(0.5, 11.0),
+                origin + Vec2::new(14.5, 14.2),
+            );
             painter.rect_filled(bar, 1.5, color.gamma_multiply(0.4));
             let points = vec![
-                origin + vec2(1.5, 7.5),
-                origin + vec2(7.5, 1.0),
-                origin + vec2(13.5, 5.5),
-                origin + vec2(7.5, 12.0),
+                origin + Vec2::new(1.5, 7.5),
+                origin + Vec2::new(7.5, 1.0),
+                origin + Vec2::new(13.5, 5.5),
+                origin + Vec2::new(7.5, 12.0),
             ];
             painter.add(egui::Shape::convex_polygon(points, color, Stroke::NONE));
         }
         Tool::Underline => {
             painter.line_segment(
-                [origin + vec2(1.0, 12.4), origin + vec2(13.2, 12.4)],
+                [
+                    origin + Vec2::new(1.0, 12.4),
+                    origin + Vec2::new(13.2, 12.4),
+                ],
                 Stroke::new(1.7_f32, color),
             );
             for x in [3.0, 7.0, 11.0] {
-                painter.line_segment([origin + vec2(x, 2.2), origin + vec2(x, 8.6)], stroke);
+                painter.line_segment(
+                    [origin + Vec2::new(x, 2.2), origin + Vec2::new(x, 8.6)],
+                    stroke,
+                );
             }
         }
         Tool::StrikeOut => {
             painter.line_segment(
-                [origin + vec2(0.8, 7.0), origin + vec2(13.4, 7.0)],
+                [origin + Vec2::new(0.8, 7.0), origin + Vec2::new(13.4, 7.0)],
                 Stroke::new(1.7_f32, color),
             );
             for x in [3.2, 7.0, 10.8] {
-                painter.line_segment([origin + vec2(x, 2.4), origin + vec2(x, 11.6)], stroke);
+                painter.line_segment(
+                    [origin + Vec2::new(x, 2.4), origin + Vec2::new(x, 11.6)],
+                    stroke,
+                );
             }
         }
         Tool::Squiggly => {
@@ -2725,8 +2741,8 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
         Tool::Line => {
             painter.line_segment(
                 [
-                    rect.left_bottom() + vec2(1.5, -1.5),
-                    rect.right_top() + vec2(-1.5, 1.5),
+                    rect.left_bottom() + Vec2::new(1.5, -1.5),
+                    rect.right_top() + Vec2::new(-1.5, 1.5),
                 ],
                 stroke,
             );
@@ -2971,7 +2987,7 @@ fn paint_tab_drag_feedback(
     pos: Pos2,
     zone: Option<SplitDropZone>,
 ) {
-    let colors = p(ctx);
+    let colors = palette(ctx);
     let painter = ctx.layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
         Id::new("marker-tab-drag"),
@@ -3006,7 +3022,7 @@ fn paint_tab_drag_feedback(
         colors.text,
     );
     let pill = Rect::from_center_size(
-        pos + vec2(12.0, 14.0),
+        pos + Vec2::new(12.0, 14.0),
         Vec2::new(galley.size().x + 16.0, TAB_PILL_H),
     );
     painter.rect_filled(pill, CornerRadius::same(6), colors.chrome_raised);
@@ -3066,7 +3082,7 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
 }
 
 pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: SplitState) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let full = ui.available_rect_before_wrap();
     let gap = 4.0;
     let handle = 5.0;
@@ -3137,8 +3153,8 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
 }
 
 fn vbar(ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
-    let (rect, _) = ui.allocate_exact_size(vec2(7.0, 14.0), Sense::hover());
+    let colors = palette(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(7.0, 14.0), Sense::hover());
     ui.painter().vline(
         rect.center().x,
         rect.top()..=rect.bottom(),
@@ -3205,7 +3221,7 @@ fn recent_file_flags(ctx: &egui::Context, recent: &[PathBuf]) -> Vec<bool> {
 }
 
 pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let rect = ui.available_rect_before_wrap();
     ui.painter().rect_filled(rect, 0.0, colors.backdrop);
     let recent: Vec<_> = app.settings.recent.clone();
@@ -3412,9 +3428,9 @@ fn outline_node(
 }
 
 fn chrome_button(ui: &mut egui::Ui, label: &str, selected: bool) -> egui::Response {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let fill = if selected {
-        accent_fill(ui.ctx(), 42)
+        theme::accent_fill(ui.ctx(), 42)
     } else {
         Color32::TRANSPARENT
     };
@@ -3538,20 +3554,12 @@ fn brand_family() -> FontFamily {
 }
 
 fn brand_wordmark(ui: &mut egui::Ui) {
-    let colors = p(ui.ctx());
+    let colors = palette(ui.ctx());
     let font = FontId::new(72.0, brand_family());
     let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap("Marker".to_owned(), font, colors.text));
     let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
     let text_pos = Pos2::new(rect.center().x - galley.size().x * 0.5, rect.top());
     ui.painter().galley(text_pos, galley, colors.text);
-}
-
-fn accent_fill(ctx: &egui::Context, alpha: u8) -> Color32 {
-    theme::accent_fill(ctx, alpha)
-}
-
-fn vec2(x: f32, y: f32) -> Vec2 {
-    Vec2::new(x, y)
 }
 
 #[cfg(test)]

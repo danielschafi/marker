@@ -177,6 +177,11 @@ impl Annotation {
 }
 
 impl AnnotKind {
+    /// Color / size / stroke controls apply; images and foreign imports are delete-only.
+    pub fn is_styleable(&self) -> bool {
+        !matches!(self, Self::Image { .. } | Self::Foreign { .. })
+    }
+
     pub fn bounds(&self) -> Option<PdfRect> {
         match self {
             Self::Highlight { quads, .. } | Self::Markup { quads, .. } => {

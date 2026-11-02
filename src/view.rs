@@ -1318,11 +1318,7 @@ fn select_glyphs_at_point(
                 let remembered = (!whole_word).then_some(id);
                 tab.last_hl = Some((Instant::now(), page, w, remembered));
             }
-            if !matches!(tab.save, crate::app::SaveState::Saving) {
-                tab.save = crate::app::SaveState::Dirty {
-                    since: Instant::now(),
-                };
-            }
+            tab.save.touch();
             app.seal_undo();
             true
         }
@@ -1391,12 +1387,10 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     .iter()
                     .copied()
                     .find(|&id| {
-                        tab.doc.session.get(id).is_some_and(|annot| {
-                            !matches!(
-                                annot.kind,
-                                AnnotKind::Image { .. } | AnnotKind::Foreign { .. }
-                            )
-                        })
+                        tab.doc
+                            .session
+                            .get(id)
+                            .is_some_and(|annot| annot.kind.is_styleable())
                     })
                     .or_else(|| tab.primary_selected())
             };
@@ -1468,11 +1462,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     }
                 }
             }
-            if !matches!(tab.save, crate::app::SaveState::Saving) {
-                tab.save = crate::app::SaveState::Dirty {
-                    since: Instant::now(),
-                };
-            }
+            tab.save.touch();
             app.seal_undo();
         }
         Drag::Shape {
@@ -1508,11 +1498,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 },
             );
             tab.select_only(id);
-            if !matches!(tab.save, crate::app::SaveState::Saving) {
-                tab.save = crate::app::SaveState::Dirty {
-                    since: Instant::now(),
-                };
-            }
+            tab.save.touch();
             app.seal_undo();
             app.open_style_bar(id, true);
         }
@@ -1552,10 +1538,8 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                             dirty.push(*id);
                         }
                     }
-                    if !dirty.is_empty() && !matches!(tab.save, crate::app::SaveState::Saving) {
-                        tab.save = crate::app::SaveState::Dirty {
-                            since: Instant::now(),
-                        };
+                    if !dirty.is_empty() {
+                        tab.save.touch();
                     }
                 }
                 for id in dirty {
@@ -1573,11 +1557,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 if !tab.is_selected(id) {
                     tab.select_only(id);
                 }
-                if !matches!(tab.save, crate::app::SaveState::Saving) {
-                    tab.save = crate::app::SaveState::Dirty {
-                        since: Instant::now(),
-                    };
-                }
+                tab.save.touch();
             }
             app.queue_math(id);
             app.seal_undo();
@@ -1788,11 +1768,7 @@ fn place_box_tab(
     tab.select_only(id);
     tab.editing = Some(id);
     tab.focus_edit = true;
-    if !matches!(tab.save, crate::app::SaveState::Saving) {
-        tab.save = crate::app::SaveState::Dirty {
-            since: Instant::now(),
-        };
-    }
+    tab.save.touch();
 }
 
 fn handle_at(doc: &DocState, id: u64, screen: Pos2, view: Rect, radius: f32) -> Option<Handle> {
@@ -3025,11 +3001,7 @@ fn edit_text_annot(
         }
         if changed {
             tab.doc.session.mark_dirty(id);
-            if !matches!(tab.save, crate::app::SaveState::Saving) {
-                tab.save = crate::app::SaveState::Dirty {
-                    since: Instant::now(),
-                };
-            }
+            tab.save.touch();
         }
     }
     queue_keys.sort_unstable();
@@ -3825,11 +3797,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 tab.live_math = None;
                 if changed {
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, crate::app::SaveState::Saving) {
-                        tab.save = crate::app::SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
             if changed {
@@ -3876,11 +3844,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 tab.live_math = None;
                 if changed {
                     tab.doc.session.mark_dirty(id);
-                    if !matches!(tab.save, crate::app::SaveState::Saving) {
-                        tab.save = crate::app::SaveState::Dirty {
-                            since: Instant::now(),
-                        };
-                    }
+                    tab.save.touch();
                 }
             }
         }
@@ -4102,18 +4066,14 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let can_style = if multi {
         app.tab().is_some_and(|tab| {
             tab.selected.iter().any(|id| {
-                tab.doc.session.get(*id).is_some_and(|annot| {
-                    !matches!(
-                        annot.kind,
-                        AnnotKind::Image { .. } | AnnotKind::Foreign { .. }
-                    )
-                })
+                tab.doc
+                    .session
+                    .get(*id)
+                    .is_some_and(|annot| annot.kind.is_styleable())
             })
         })
     } else {
-        hit_kind.as_ref().is_some_and(|kind| {
-            !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Foreign { .. })
-        })
+        hit_kind.as_ref().is_some_and(|kind| kind.is_styleable())
     };
     let can_edit = !multi
         && matches!(

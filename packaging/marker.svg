@@ -1,104 +1,69 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Marker">
-  <!-- App icon: polished highlighter on a dark squircle. Source of truth for desktop + window icons. -->
+  <!-- Hexagonal marker, side view, 60° tip-down-left. Symmetric tip on a yellow stroke capsule.
+       Silhouette energy from Daniel's sketch; facets / symmetry / yellow stroke per brief. -->
   <defs>
-    <linearGradient id="barrel" x1="18" y1="48" x2="96" y2="80" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#f7d76e"/>
-      <stop offset="0.5" stop-color="#f0bf3a"/>
-      <stop offset="1" stop-color="#e3a82a"/>
+    <linearGradient id="facetTop" x1="28" y1="46" x2="100" y2="56" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffe891"/>
+      <stop offset="1" stop-color="#f7d45c"/>
     </linearGradient>
-    <linearGradient id="tip" x1="96" y1="44" x2="118" y2="68" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#fff9e4"/>
-      <stop offset="1" stop-color="#f2dfa6"/>
+    <linearGradient id="facetMid" x1="28" y1="56" x2="100" y2="74" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f2c43c"/>
+      <stop offset="1" stop-color="#e8b02a"/>
     </linearGradient>
-    <linearGradient id="ferrule" x1="88" y1="48" x2="100" y2="76" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#f6ecc8"/>
-      <stop offset="1" stop-color="#d4bb7e"/>
+    <linearGradient id="facetBot" x1="28" y1="74" x2="100" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d0901e"/>
+      <stop offset="1" stop-color="#b87814"/>
     </linearGradient>
-    <linearGradient id="endcap" x1="14" y1="52" x2="30" y2="76" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#e0b040"/>
-      <stop offset="1" stop-color="#b8821c"/>
+    <linearGradient id="tipTop" x1="8" y1="48" x2="36" y2="60" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f0c850"/>
+      <stop offset="1" stop-color="#e0b038"/>
+    </linearGradient>
+    <linearGradient id="tipMid" x1="8" y1="60" x2="36" y2="70" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#c99422"/>
+      <stop offset="1" stop-color="#b8881c"/>
+    </linearGradient>
+    <linearGradient id="tipBot" x1="8" y1="70" x2="36" y2="82" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#a87016"/>
+      <stop offset="1" stop-color="#8f5c10"/>
+    </linearGradient>
+    <linearGradient id="eraser" x1="102" y1="44" x2="120" y2="84" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#fffdf8"/>
+      <stop offset="1" stop-color="#efe6d2"/>
+    </linearGradient>
+    <linearGradient id="strokeFill" x1="16" y1="108" x2="78" y2="120" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#f6d76e"/>
+      <stop offset="1" stop-color="#ebb83c"/>
     </linearGradient>
   </defs>
 
   <rect width="128" height="128" rx="28" fill="#1a1a1e"/>
 
-  <!-- Soft ink bloom under the tip -->
-  <ellipse cx="78" cy="96" rx="34" ry="10" fill="#f0bf3a" opacity="0.18"/>
+  <!-- Pen tip-left / eraser-right; rotate -60° (60° from horizontal, tip down-left). -->
+  <g transform="rotate(-60 64 64)">
+    <!-- Hex barrel — three side facets (hex seen from the side) -->
+    <path d="M34 46 H100 V56 H34 Z" fill="url(#facetTop)"/>
+    <path d="M34 56 H100 V74 H34 Z" fill="url(#facetMid)"/>
+    <path d="M34 74 H100 V84 H34 Z" fill="url(#facetBot)"/>
+    <path d="M34 56 H100" stroke="#000" stroke-opacity="0.15" stroke-width="1.1"/>
+    <path d="M34 74 H100" stroke="#000" stroke-opacity="0.20" stroke-width="1.1"/>
+    <path d="M34 46 H100" stroke="#fff" stroke-opacity="0.30" stroke-width="1.5"/>
 
-  <!-- Pen: tip NE → end SW -->
-  <g transform="rotate(-35 64 64)">
-    <!-- Barrel (wider, fills the mark) -->
-    <path
-      d="M26 50
-         H90
-         Q96 50 96 56
-         V72
-         Q96 78 90 78
-         H26
-         Q20 78 20 72
-         V56
-         Q20 50 26 50
-         Z"
-      fill="url(#barrel)"/>
-
-    <!-- Specular -->
-    <path
-      d="M28 55 H88"
-      stroke="#fff7d0"
-      stroke-width="3.5"
-      stroke-linecap="round"
-      opacity="0.38"/>
-
-    <!-- Grip rings -->
-    <path d="M42 50 V78" stroke="#c9922a" stroke-width="2.25" opacity="0.30"/>
-    <path d="M46 50 V78" stroke="#fff3b8" stroke-width="1.75" opacity="0.24"/>
+    <!-- Symmetric tip (point centered on axis) -->
+    <path d="M34 46 L10 64 L34 56 Z" fill="url(#tipTop)"/>
+    <path d="M34 56 L10 64 L34 74 Z" fill="url(#tipMid)"/>
+    <path d="M34 74 L10 64 L34 84 Z" fill="url(#tipBot)"/>
+    <path d="M34 56 L10 64" stroke="#000" stroke-opacity="0.16" stroke-width="0.9"/>
+    <path d="M34 74 L10 64" stroke="#000" stroke-opacity="0.22" stroke-width="0.9"/>
 
     <!-- Ferrule -->
-    <rect x="90" y="49" width="10" height="30" rx="1.5" fill="url(#ferrule)"/>
-    <path d="M92.5 52 V76" stroke="#fff9e8" stroke-width="1.4" opacity="0.5"/>
-    <path d="M97 52 V76" stroke="#b89a55" stroke-width="1.1" opacity="0.4"/>
+    <rect x="100" y="45" width="5" height="38" fill="#d6c296"/>
+    <path d="M101.5 48 V80" stroke="#fff8e8" stroke-width="1.2" stroke-opacity="0.55"/>
 
-    <!-- Chisel tip -->
-    <path
-      d="M100 53
-         L116 44
-         L122 50
-         L116 67
-         L100 75
-         Z"
-      fill="url(#tip)"/>
-    <!-- Chisel face -->
-    <path
-      d="M116 44 L122 50 L116 67 Z"
-      fill="#e6c56e"
-      opacity="0.9"/>
-    <path
-      d="M106 58 L115 52"
-      stroke="#c9a84a"
-      stroke-width="1.75"
-      stroke-linecap="round"
-      opacity="0.5"/>
-
-    <!-- End cap -->
-    <path
-      d="M20 53
-         H28
-         V75
-         H20
-         Q15 75 15 70
-         V58
-         Q15 53 20 53
-         Z"
-      fill="url(#endcap)"/>
-    <!-- Eraser nub -->
-    <path
-      d="M15 58
-         H20
-         V70
-         H15
-         Q13 70 13 64
-         Q13 58 15 58
-         Z"
-      fill="#f4d588"/>
+    <!-- Cream eraser / end (proud of barrel) -->
+    <rect x="105" y="43" width="17" height="42" rx="3.5" fill="url(#eraser)"/>
+    <path d="M108 48 H119" stroke="#fff" stroke-opacity="0.42" stroke-width="1.7" stroke-linecap="round"/>
   </g>
+
+  <!-- Yellowish marker stroke; tip rests on its top edge -->
+  <rect x="18" y="108" width="56" height="12" rx="6" fill="url(#strokeFill)"/>
 </svg>

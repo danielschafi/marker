@@ -1456,7 +1456,7 @@ fn brand_family() -> FontFamily {
     FontFamily::Name(BRAND_FAMILY.into())
 }
 
-/// Vector brand mark (highlighter on squircle), matching `packaging/marker.svg`.
+/// Vector brand mark (hex marker at 60°), matching `packaging/marker.svg`.
 pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let painter = ui.painter();
@@ -1467,61 +1467,78 @@ pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
     };
     painter.rect_filled(rect, CornerRadius::same(radius as u8), chassis);
 
-    // Soft ink bloom under the tip.
-    painter.circle_filled(
-        Pos2::new(rect.left() + size * 0.62, rect.top() + size * 0.76),
-        size * 0.12,
-        Color32::from_rgba_unmultiplied(240, 191, 58, 46),
+    // Yellowish stroke capsule the tip rests on.
+    let stroke = Rect::from_min_size(
+        Pos2::new(rect.left() + size * 0.14, rect.top() + size * 0.84),
+        Vec2::new(size * 0.44, size * 0.095),
+    );
+    painter.rect_filled(
+        stroke,
+        CornerRadius::same((size * 0.048).clamp(2.0, 6.0) as u8),
+        Color32::from_rgb(235, 184, 60),
     );
 
-    // Approximate the diagonal highlighter with convex polys (tip NE → end SW).
-    let barrel = [
-        Pos2::new(rect.left() + size * 0.22, rect.top() + size * 0.62),
-        Pos2::new(rect.left() + size * 0.62, rect.top() + size * 0.34),
-        Pos2::new(rect.left() + size * 0.70, rect.top() + size * 0.46),
-        Pos2::new(rect.left() + size * 0.30, rect.top() + size * 0.74),
-    ];
+    // Hex barrel at ~60° (tip down-left → eraser up-right): three facet bands.
+    let facet = |a: Pos2, b: Pos2, c: Pos2, d: Pos2, color: Color32| {
+        painter.add(egui::Shape::convex_polygon(
+            vec![a, b, c, d],
+            color,
+            Stroke::NONE,
+        ));
+    };
+    let o = rect.min;
+    let s = size;
+    // Mid facet (main)
+    facet(
+        Pos2::new(o.x + s * 0.30, o.y + s * 0.62),
+        Pos2::new(o.x + s * 0.62, o.y + s * 0.28),
+        Pos2::new(o.x + s * 0.70, o.y + s * 0.36),
+        Pos2::new(o.x + s * 0.38, o.y + s * 0.70),
+        Color32::from_rgb(242, 196, 60),
+    );
+    // Top facet (lighter)
+    facet(
+        Pos2::new(o.x + s * 0.34, o.y + s * 0.56),
+        Pos2::new(o.x + s * 0.66, o.y + s * 0.22),
+        Pos2::new(o.x + s * 0.70, o.y + s * 0.28),
+        Pos2::new(o.x + s * 0.38, o.y + s * 0.62),
+        Color32::from_rgb(255, 232, 145),
+    );
+    // Bottom facet (darker)
+    facet(
+        Pos2::new(o.x + s * 0.30, o.y + s * 0.70),
+        Pos2::new(o.x + s * 0.62, o.y + s * 0.36),
+        Pos2::new(o.x + s * 0.66, o.y + s * 0.42),
+        Pos2::new(o.x + s * 0.34, o.y + s * 0.76),
+        Color32::from_rgb(184, 120, 28),
+    );
+
+    // Symmetric tip
     painter.add(egui::Shape::convex_polygon(
-        barrel.to_vec(),
-        Color32::from_rgb(240, 191, 58),
+        vec![
+            Pos2::new(o.x + s * 0.30, o.y + s * 0.58),
+            Pos2::new(o.x + s * 0.18, o.y + s * 0.84),
+            Pos2::new(o.x + s * 0.36, o.y + s * 0.74),
+        ],
+        Color32::from_rgb(184, 130, 36),
         Stroke::NONE,
     ));
 
-    let ferrule = [
-        Pos2::new(rect.left() + size * 0.60, rect.top() + size * 0.33),
-        Pos2::new(rect.left() + size * 0.67, rect.top() + size * 0.28),
-        Pos2::new(rect.left() + size * 0.75, rect.top() + size * 0.40),
-        Pos2::new(rect.left() + size * 0.68, rect.top() + size * 0.45),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        ferrule.to_vec(),
-        Color32::from_rgb(232, 220, 180),
-        Stroke::NONE,
-    ));
-
-    let tip = [
-        Pos2::new(rect.left() + size * 0.66, rect.top() + size * 0.27),
-        Pos2::new(rect.left() + size * 0.80, rect.top() + size * 0.18),
-        Pos2::new(rect.left() + size * 0.86, rect.top() + size * 0.26),
-        Pos2::new(rect.left() + size * 0.74, rect.top() + size * 0.40),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        tip.to_vec(),
-        Color32::from_rgb(255, 246, 210),
-        Stroke::NONE,
-    ));
-
-    let endcap = [
-        Pos2::new(rect.left() + size * 0.16, rect.top() + size * 0.60),
-        Pos2::new(rect.left() + size * 0.24, rect.top() + size * 0.55),
-        Pos2::new(rect.left() + size * 0.32, rect.top() + size * 0.67),
-        Pos2::new(rect.left() + size * 0.24, rect.top() + size * 0.72),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        endcap.to_vec(),
-        Color32::from_rgb(184, 130, 28),
-        Stroke::NONE,
-    ));
+    // Ferrule + cream eraser
+    facet(
+        Pos2::new(o.x + s * 0.64, o.y + s * 0.22),
+        Pos2::new(o.x + s * 0.68, o.y + s * 0.18),
+        Pos2::new(o.x + s * 0.76, o.y + s * 0.26),
+        Pos2::new(o.x + s * 0.72, o.y + s * 0.30),
+        Color32::from_rgb(214, 194, 150),
+    );
+    facet(
+        Pos2::new(o.x + s * 0.68, o.y + s * 0.14),
+        Pos2::new(o.x + s * 0.80, o.y + s * 0.08),
+        Pos2::new(o.x + s * 0.88, o.y + s * 0.20),
+        Pos2::new(o.x + s * 0.76, o.y + s * 0.28),
+        Color32::from_rgb(255, 250, 240),
+    );
 }
 
 pub(crate) fn brand_wordmark(ui: &mut egui::Ui) {

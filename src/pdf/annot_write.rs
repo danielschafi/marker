@@ -1,5 +1,6 @@
 use mupdf::pdf::{
-    AnnotationFlags, AnnotationTextAlign, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfPage,
+    AnnotationFlags, AnnotationTextAlign, LineEndingStyle, PdfAnnotation, PdfAnnotationType,
+    PdfDocument, PdfPage,
 };
 use mupdf::Quad;
 
@@ -224,6 +225,23 @@ pub(crate) fn apply_existing(
             )?;
             annot.update()?;
         }
+        AnnotKind::Ink {
+            strokes,
+            color,
+            width,
+        } => {
+            apply_ink(annot, strokes, *color, *width)?;
+            write_marker(
+                doc,
+                annot,
+                MarkerKind::Ink,
+                source.id,
+                None,
+                Some(*color),
+                None,
+            )?;
+            annot.update()?;
+        }
         AnnotKind::Math {
             rect,
             source: latex,
@@ -306,7 +324,7 @@ pub(crate) fn apply_shape(
     let expected = match kind {
         ShapeKind::Rect => PdfAnnotationType::Square,
         ShapeKind::Ellipse => PdfAnnotationType::Circle,
-        ShapeKind::Line => PdfAnnotationType::Line,
+        ShapeKind::Line | ShapeKind::Arrow => PdfAnnotationType::Line,
     };
     if annot.r#type()? != expected {
         return Err(mupdf::Error::InvalidArgument("type changed".into()));
@@ -320,9 +338,40 @@ pub(crate) fn apply_shape(
         let _ = annot.object().dict_delete("IC");
     }
     match kind {
-        ShapeKind::Line => annot.set_line(to_point(start), to_point(end))?,
+        ShapeKind::Line | ShapeKind::Arrow => {
+            annot.set_line(to_point(start), to_point(end))?;
+            let end_style = if kind == ShapeKind::Arrow {
+                LineEndingStyle::ClosedArrow
+            } else {
+                LineEndingStyle::None
+            };
+            annot.set_line_ending_styles(LineEndingStyle::None, end_style)?;
+        }
         ShapeKind::Rect | ShapeKind::Ellipse => annot.set_rect(to_rect(rect))?,
     }
+    Ok(())
+}
+
+pub(crate) fn apply_ink(
+    annot: &mut PdfAnnotation,
+    strokes: &[Vec<PdfPoint>],
+    color: Rgb,
+    width: f32,
+) -> Result<(), mupdf::Error> {
+    if annot.r#type()? != PdfAnnotationType::Ink {
+        return Err(mupdf::Error::InvalidArgument("type changed".into()));
+    }
+    if strokes.is_empty() || strokes.iter().all(|stroke| stroke.is_empty()) {
+        return Err(mupdf::Error::InvalidArgument("empty ink".into()));
+    }
+    annot.set_ink_list(
+        strokes
+            .iter()
+            .map(|stroke| stroke.iter().copied().map(to_point)),
+    )?;
+    annot.set_color(rgb_color(color))?;
+    annot.set_border_width(width.max(0.25))?;
+    // Ink annots have no Rect property; MuPDF derives bounds from the ink list.
     Ok(())
 }
 
@@ -436,12 +485,22 @@ pub(crate) fn create_annot(
             let mut annot = match kind {
                 ShapeKind::Rect => page.add_square_annotation(to_rect(*rect))?,
                 ShapeKind::Ellipse => page.add_circle_annotation(to_rect(*rect))?,
-                ShapeKind::Line => page.add_line_annotation(to_point(*start), to_point(*end))?,
+                ShapeKind::Line | ShapeKind::Arrow => {
+                    page.add_line_annotation(to_point(*start), to_point(*end))?
+                }
             };
             annot.set_color(rgb_color(*stroke))?;
             annot.set_border_width(width.max(0.25))?;
             if let Some(fill) = fill {
                 annot.set_interior_color(rgb_color(*fill))?;
+            }
+            if kind.is_line_like() {
+                let end_style = if *kind == ShapeKind::Arrow {
+                    LineEndingStyle::ClosedArrow
+                } else {
+                    LineEndingStyle::None
+                };
+                annot.set_line_ending_styles(LineEndingStyle::None, end_style)?;
             }
             write_marker(
                 doc,
@@ -450,6 +509,33 @@ pub(crate) fn create_annot(
                 source.id,
                 None,
                 Some(*stroke),
+                None,
+            )?;
+            annot
+        }
+        AnnotKind::Ink {
+            strokes,
+            color,
+            width,
+        } => {
+            if strokes.is_empty() || strokes.iter().all(|stroke| stroke.is_empty()) {
+                return Err("Ink stroke is empty.".into());
+            }
+            let mut annot = page.add_ink_annotation(
+                strokes
+                    .iter()
+                    .map(|stroke| stroke.iter().copied().map(to_point)),
+            )?;
+            annot.set_color(rgb_color(*color))?;
+            annot.set_border_width(width.max(0.25))?;
+            // Ink annots have no Rect property; MuPDF derives bounds from the ink list.
+            write_marker(
+                doc,
+                &annot,
+                MarkerKind::Ink,
+                source.id,
+                None,
+                Some(*color),
                 None,
             )?;
             annot

@@ -322,6 +322,28 @@ fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
     }
 }
 
+/// Shaft plus a filled triangular head at `end`, sized from stroke width.
+fn paint_arrow_segment(painter: &egui::Painter, start: Pos2, end: Pos2, stroke: Stroke) {
+    let delta = end - start;
+    let len = delta.length();
+    if len < 0.5 {
+        painter.circle_filled(end, stroke.width.max(1.0) * 0.5, stroke.color);
+        return;
+    }
+    let dir = delta / len;
+    let head = (stroke.width.max(1.0) * 4.0).clamp(6.0, 28.0).min(len);
+    // Stop the shaft short of the tip so the head does not sit on a thick bar.
+    let shaft_end = end - dir * (head * 0.55);
+    painter.line_segment([start, shaft_end], stroke);
+    let ortho = Vec2::new(-dir.y, dir.x);
+    let base = end - dir * head;
+    painter.add(egui::Shape::convex_polygon(
+        vec![end, base + ortho * (head * 0.45), base - ortho * (head * 0.45)],
+        stroke.color,
+        Stroke::NONE,
+    ));
+}
+
 fn paint_annotations(
     tab: &Tab,
     cache: &crate::math::MathCache<crate::math::InlineReady>,
@@ -438,6 +460,32 @@ fn paint_annotations(
                         let a = tab.doc.page_to_screen(page, *start, view);
                         let b = tab.doc.page_to_screen(page, *end, view);
                         painter.line_segment([a, b], stroke);
+                    }
+                    ShapeKind::Arrow => {
+                        let a = tab.doc.page_to_screen(page, *start, view);
+                        let b = tab.doc.page_to_screen(page, *end, view);
+                        paint_arrow_segment(&painter, a, b, stroke);
+                    }
+                }
+            }
+            AnnotKind::Ink {
+                strokes,
+                color,
+                width,
+            } => {
+                let stroke = Stroke::new(
+                    (*width * tab.doc.scale).max(1.0),
+                    color.to_color32(),
+                );
+                for path in strokes {
+                    let pts: Vec<Pos2> = path
+                        .iter()
+                        .map(|point| tab.doc.page_to_screen(page, *point, view))
+                        .collect();
+                    if pts.len() >= 2 {
+                        painter.add(egui::Shape::line(pts, stroke));
+                    } else if let Some(only) = pts.first() {
+                        painter.circle_filled(*only, stroke.width * 0.5, stroke.color);
                     }
                 }
             }
@@ -627,22 +675,12 @@ fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, pane: Pane
     let Some(tab) = app.tab_by_id(pane.tab_id) else {
         return;
     };
-    // Skip while actively dragging a new learning / text select.
-    if matches!(
-        tab.drag,
-        Some(Drag::LearningSelect { .. } | Drag::TextSelect { .. })
-    ) {
+    // Skip while actively dragging a new text select.
+    if matches!(tab.drag, Some(Drag::TextSelect { .. })) {
         return;
     }
     let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 56);
-    if let Some(sel) = &tab.text_sel {
-        if let Some(glyphs) = tab.doc.glyphs.get(&sel.page) {
-            for rect in highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi) {
-                painter.rect_filled(pdf_rect_screen(&tab.doc, sel.page, rect, view), 1.0, fill);
-            }
-        }
-    }
-    let Some(sel) = &tab.assistant.learning else {
+    let Some(sel) = &tab.text_sel else {
         return;
     };
     let Some(glyphs) = tab.doc.glyphs.get(&sel.page) else {
@@ -659,14 +697,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
         return;
     };
     match &tab.drag {
-        Some(Drag::LearningSelect {
-            page,
-            anchor,
-            current,
-            origin,
-            current_pt,
-        })
-        | Some(Drag::TextSelect {
+        Some(Drag::TextSelect {
             page,
             anchor,
             current,
@@ -684,12 +715,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                 painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
             }
         }
-        Some(Drag::Region {
-            page,
-            origin,
-            current,
-        })
-        | Some(Drag::Marquee {
+        Some(Drag::Marquee {
             page,
             origin,
             current,
@@ -753,6 +779,11 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                     let b = tab.doc.page_to_screen(*page, *current, view);
                     painter.line_segment([a, b], stroke);
                 }
+                ShapeKind::Arrow => {
+                    let a = tab.doc.page_to_screen(*page, *origin, view);
+                    let b = tab.doc.page_to_screen(*page, *current, view);
+                    paint_arrow_segment(painter, a, b, stroke);
+                }
                 ShapeKind::Rect => {
                     let rect = pdf_rect_screen(
                         &tab.doc,
@@ -775,6 +806,21 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                         stroke,
                     ));
                 }
+            }
+        }
+        Some(Drag::Ink { page, points }) => {
+            let stroke = Stroke::new(
+                (app.settings.shape_width * tab.doc.scale).max(1.0),
+                app.settings.shape_color.to_color32(),
+            );
+            let pts: Vec<Pos2> = points
+                .iter()
+                .map(|point| tab.doc.page_to_screen(*page, *point, view))
+                .collect();
+            if pts.len() >= 2 {
+                painter.add(egui::Shape::line(pts, stroke));
+            } else if let Some(only) = pts.first() {
+                painter.circle_filled(*only, stroke.width * 0.5, stroke.color);
             }
         }
         Some(Drag::Create {

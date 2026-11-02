@@ -47,7 +47,10 @@ pub(super) fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                             if !app.settings.tool_visible(tool.settings_id()) {
                                 continue;
                             }
-                            tool_chip(ui, &mut app.tool, tool);
+                            let already = app.tool == tool;
+                            if tool_chip(ui, &mut app.tool, tool) && already {
+                                app.restore_default_tool_color(tool);
+                            }
                         }
                         vbar(ui);
                         app.color_controls(ui);
@@ -60,7 +63,8 @@ pub(super) fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
         });
 }
 
-fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
+/// Returns `true` when the chip was clicked.
+fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) -> bool {
     let colors = palette(ui.ctx());
     let selected = *current == tool;
     let (rect, response) = ui.allocate_exact_size(TOOL_CHIP, Sense::click());
@@ -89,7 +93,8 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
         FontId::new(8.0, FontFamily::Proportional),
         key_color,
     );
-    if response.clicked() {
+    let clicked = response.clicked();
+    if clicked {
         *current = tool;
     }
     response.widget_info(|| {
@@ -100,7 +105,17 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
             tool_a11y_label(tool),
         )
     });
-    response.on_hover_text(format!("{} ({})", tool.hint(), tool.shortcut().name()));
+    let hover = if tool.is_text_mark() || tool.is_shape() {
+        format!(
+            "{} ({}) — press again for default color",
+            tool.hint(),
+            tool.shortcut().name()
+        )
+    } else {
+        format!("{} ({})", tool.hint(), tool.shortcut().name())
+    };
+    response.on_hover_text(hover);
+    clicked
 }
 
 fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color32) {
@@ -207,6 +222,32 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 stroke,
             );
         }
+        Tool::Arrow => {
+            let a = rect.left_bottom() + Vec2::new(1.5, -1.5);
+            let b = rect.right_top() + Vec2::new(-1.5, 1.5);
+            painter.line_segment([a, b], stroke);
+            let dir = (b - a).normalized();
+            let ortho = Vec2::new(-dir.y, dir.x);
+            let tip = b;
+            let base = b - dir * 5.0;
+            painter.add(egui::Shape::convex_polygon(
+                vec![tip, base + ortho * 2.8, base - ortho * 2.8],
+                color,
+                Stroke::NONE,
+            ));
+        }
+        Tool::Draw => {
+            let mut pts = Vec::new();
+            let mut x = origin.x + 1.0;
+            let end = origin.x + 13.5;
+            while x <= end {
+                let t = (x - origin.x) / 13.0;
+                let y = origin.y + 10.5 - 6.5 * (t * std::f32::consts::PI).sin().abs();
+                pts.push(Pos2::new(x, y));
+                x += 1.1;
+            }
+            painter.add(egui::Shape::line(pts, Stroke::new(1.55_f32, color)));
+        }
         Tool::Math => {
             painter.text(
                 rect.center(),
@@ -241,6 +282,8 @@ fn tool_a11y_label(tool: Tool) -> &'static str {
         Tool::Rect => "Rectangle tool",
         Tool::Ellipse => "Ellipse tool",
         Tool::Line => "Line tool",
+        Tool::Arrow => "Arrow tool",
+        Tool::Draw => "Draw tool",
         Tool::Math => "Equation tool",
     }
 }

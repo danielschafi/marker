@@ -13,7 +13,8 @@ root="$(cd "$(dirname "$0")/.." && pwd)"
 prefix="${PREFIX:-$HOME/.local}"
 bin_dir="$prefix/bin"
 app_dir="$prefix/share/applications"
-icon_dir="$prefix/share/icons/hicolor/scalable/apps"
+hicolor="$prefix/share/icons/hicolor"
+icon_dir="$hicolor/scalable/apps"
 
 binary="${1:-}"
 if [[ -z "$binary" ]]; then
@@ -29,6 +30,13 @@ install -d "$bin_dir" "$app_dir" "$icon_dir"
 install -m 755 "$binary" "$bin_dir/marker"
 install -m 644 "$root/packaging/marker.desktop" "$app_dir/marker.desktop"
 install -m 644 "$root/packaging/marker.svg" "$icon_dir/marker.svg"
+
+# Fixed-size PNGs (rasterized from packaging/marker.svg; 32/64 use tuned variants).
+for size in 16 32 48 64 128 256 512; do
+  png_dir="$hicolor/${size}x${size}/apps"
+  install -d "$png_dir"
+  install -m 644 "$root/assets/icons/marker-${size}.png" "$png_dir/marker.png"
+done
 
 # Point every Exec= at the installed binary with an absolute path so the
 # launcher and desktop actions work even when ~/.local/bin is not on PATH.

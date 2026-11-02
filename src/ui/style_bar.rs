@@ -87,8 +87,10 @@ impl MarkerApp {
     pub(crate) fn metric_controls(&mut self, ui: &mut egui::Ui) {
         let show_size = matches!(self.tool, Tool::Text | Tool::Math | Tool::Select)
             || self.selected_is_text_like();
-        let show_stroke = matches!(self.tool, Tool::Rect | Tool::Ellipse | Tool::Line)
-            || self.selected_is_shape();
+        let show_stroke = matches!(
+            self.tool,
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw
+        ) || self.selected_is_shape();
         if show_size {
             let mut size = self.active_text_size();
             let response = ui.add(
@@ -307,7 +309,9 @@ impl MarkerApp {
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
                 self.settings.highlight_color
             }
-            Tool::Rect | Tool::Ellipse | Tool::Line => self.settings.shape_color,
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw => {
+                self.settings.shape_color
+            }
             Tool::Select | Tool::Text | Tool::Note | Tool::Math => self.settings.text_color,
         }
     }
@@ -336,7 +340,8 @@ impl MarkerApp {
                 Some(
                     AnnotKind::Text { color, .. }
                     | AnnotKind::Note { color, .. }
-                    | AnnotKind::Math { color, .. },
+                    | AnnotKind::Math { color, .. }
+                    | AnnotKind::Ink { color, .. },
                 ) => return Some(*color),
                 Some(AnnotKind::Shape { stroke, .. }) => return Some(*stroke),
                 _ => {}
@@ -364,7 +369,7 @@ impl MarkerApp {
     fn active_stroke(&self) -> f32 {
         if let Some(tab) = self.tab() {
             for id in &tab.selected {
-                if let Some(AnnotKind::Shape { width, .. }) =
+                if let Some(AnnotKind::Shape { width, .. } | AnnotKind::Ink { width, .. }) =
                     tab.doc.session.get(*id).map(|a| &a.kind)
                 {
                     return *width;
@@ -390,7 +395,7 @@ impl MarkerApp {
             tab.selected.iter().any(|id| {
                 matches!(
                     tab.doc.session.get(*id).map(|a| &a.kind),
-                    Some(AnnotKind::Shape { .. })
+                    Some(AnnotKind::Shape { .. } | AnnotKind::Ink { .. })
                 )
             })
         })
@@ -417,7 +422,7 @@ impl MarkerApp {
                 Some(AnnotKind::Note { .. }) => {
                     ink = true;
                 }
-                Some(AnnotKind::Shape { .. }) => {
+                Some(AnnotKind::Shape { .. } | AnnotKind::Ink { .. }) => {
                     ink = true;
                     stroke = true;
                 }
@@ -466,6 +471,10 @@ impl MarkerApp {
                             }
                             touched = Some(2);
                         }
+                        (AnnotKind::Ink { color: slot, .. }, ColorTarget::Ink) => {
+                            *slot = color;
+                            touched = Some(2);
+                        }
                         _ => {}
                     }
                 }
@@ -482,7 +491,7 @@ impl MarkerApp {
         match kind_bucket.unwrap_or(match target {
             ColorTarget::Highlights => 0,
             ColorTarget::Ink => match self.tool {
-                Tool::Rect | Tool::Ellipse | Tool::Line => 2,
+                Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw => 2,
                 _ => 1,
             },
         }) {
@@ -540,7 +549,9 @@ impl MarkerApp {
             for id in ids {
                 let mut changed = false;
                 if let Some(annot) = tab.doc.session.get_mut(id) {
-                    if let AnnotKind::Shape { width: slot, .. } = &mut annot.kind {
+                    if let AnnotKind::Shape { width: slot, .. }
+                    | AnnotKind::Ink { width: slot, .. } = &mut annot.kind
+                    {
                         *slot = width;
                         changed = true;
                     }

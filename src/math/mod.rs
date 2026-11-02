@@ -18,7 +18,7 @@ mod pipeline;
 pub use crate::rich_text;
 pub use pipeline::{
     upload_preview, upload_white_preview, white_preview_image, BlockReplyEffect, InlinePreview,
-    InlineReady, MathPipeline, MathPreview, VisibleMathPane, ASSISTANT_MATH_SIZE,
+    InlineReady, MathPipeline, MathPreview, VisibleMathPane,
 };
 
 /// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
@@ -331,9 +331,11 @@ impl<T> Default for MathCache<T> {
     }
 }
 
+// 1pt page margin: just enough for SVG/raster AA. Larger margins (#83 used 6×5pt)
+// pad every island, so mixed prose lines grow and `$…$` gets a wide side gap.
 const TEMPLATE: &str = r#"
 #import sys: inputs
-#set page(width: auto, height: auto, margin: (x: 6pt, y: 5pt), fill: none)
+#set page(width: auto, height: auto, margin: 1pt, fill: none)
 #set text(size: inputs.size * 1pt, fill: rgb(inputs.fill), top-edge: "ascender", bottom-edge: "descender")
 #eval(str(inputs.wrapped), mode: "markup")
 "#;
@@ -1184,7 +1186,9 @@ mod tests {
             "render error: {:?}",
             rendered.error
         );
-        assert!(rendered.height_pt > rendered.width_pt * 0.2);
+        // Smoke: MiTeX/Typst accept aligned. A prior ratio check (h > 0.2 w) only
+        // passed because the old 5pt y page margin padded a short box (#83).
+        assert!(rendered.width_pt > 10.0 && rendered.height_pt > 5.0);
     }
 
     #[test]
@@ -1448,6 +1452,41 @@ mod tests {
     }
 
     #[test]
+    fn inline_math_box_stays_near_text_size() {
+        // Page margin used to be (x: 6pt, y: 5pt), which padded every island by
+        // ~12×10pt. Mixed prose then grew a tall line box and left a wide gap on
+        // either side of `$…$` (#83). Keep a 1pt bleed for raster AA only.
+        let engine = build_engine();
+        let size = 14.0;
+        let rendered = render_equation(&engine, r"x", size, Rgb::new(0, 0, 0), false, RASTER_SCALE);
+        assert!(rendered.error.is_none(), "{:?}", rendered.error);
+        assert!(
+            rendered.height_pt <= size + 2.5,
+            "height {} too tall for size {size} (old margin added 10pt)",
+            rendered.height_pt
+        );
+        assert!(
+            rendered.width_pt <= size,
+            "width {} too wide for a single italic x at {size}pt (old margin added 12pt)",
+            rendered.width_pt
+        );
+        let display = render_equation(
+            &engine,
+            r"$$\frac{1}{2}$$",
+            size,
+            Rgb::new(0, 0, 0),
+            false,
+            RASTER_SCALE,
+        );
+        assert!(display.error.is_none(), "{:?}", display.error);
+        assert!(
+            display.height_pt > size + 2.5,
+            "display fraction should still be taller than the text size, got {}",
+            display.height_pt
+        );
+    }
+
+    #[test]
     fn preview_without_pdf_asks_save_to_request_it() {
         assert_eq!(pdf_plan(false, true, false, false), PdfPlan::Request);
         assert_eq!(pdf_plan(false, true, true, false), PdfPlan::Have);
@@ -1602,8 +1641,8 @@ mod tests {
         );
     }
 
-    /// Manual artifact: assistant-panel mock with rendered `$E = mc^2$` (ST7).
-    /// `ST7_MATH_ANSWER_PNG=/path/to.png cargo test --bin marker write_st7_math_answer_png -- --exact --nocapture`
+    /// Manual artifact: panel mock with rendered `$E = mc^2$` (legacy ST7).
+    /// `ST7_MATH_ANSWER_PNG=/path/to.png cargo test --lib write_st7_math_answer_png -- --exact --nocapture`
     #[test]
     fn write_st7_math_answer_png() {
         let Ok(path) = std::env::var("ST7_MATH_ANSWER_PNG") else {
@@ -1622,7 +1661,7 @@ mod tests {
         assert!(rendered.error.is_none(), "{:?}", rendered.error);
         assert!(
             rendered.pdf.is_none(),
-            "assistant math must not request PDF"
+            "UI-only math must not request PDF"
         );
         let eq = rendered.preview.expect("preview");
 
@@ -1630,7 +1669,7 @@ mod tests {
         let panel = r##"
 #set page(width: 360pt, height: auto, margin: 14pt, fill: rgb("#ececf0"))
 #set text(size: 12pt, fill: rgb("#1c1c20"))
-#text(weight: "bold", size: 12pt)[Cursor]
+#text(weight: "bold", size: 12pt)[Answer]
 #v(8pt)
 Energy relates mass and the speed of light: $E = m c^2$.
 #v(12pt)
@@ -1638,7 +1677,7 @@ Energy relates mass and the speed of light: $E = m c^2$.
   #text(size: 10pt)[Copy]
 ]
 #h(8pt)
-#text(size: 10pt, fill: rgb("#555555"))[Save to page   Save as note]
+#text(size: 10pt, fill: rgb("#555555"))[Copy]
 "##;
         let panel_engine = TypstEngine::builder()
             .main_file(panel)

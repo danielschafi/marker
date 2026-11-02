@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use egui::Key;
 
 use crate::annot::{AnnotKind, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind};
-use crate::assistant::TabAssistant;
 use crate::geom::{PdfPoint, Rgb};
 use crate::math::MathPreview;
 use crate::pdf::{DocId, OpenedDoc, OutlineNode, PageInfo};
@@ -29,8 +28,6 @@ pub(crate) struct Tab {
     pub(crate) pending_jump: Option<(usize, Option<f32>)>,
     pub(crate) inflight: HashSet<TileKey>,
     pub(crate) glyphs_waiting: HashSet<usize>,
-    /// Study prompt waiting on a one-shot glyph load for `page` (ST5).
-    pub(crate) pending_study: Option<(usize, String)>,
     /// Markdown / Anki CSV export waiting on glyph loads for highlight pages (ST1 / ST3).
     pub(crate) pending_export: Option<PendingExport>,
     pub(crate) previews: HashMap<u64, MathPreview>,
@@ -60,7 +57,6 @@ pub(crate) struct Tab {
     pub(crate) thumbs_inflight: HashSet<usize>,
     pub(crate) annot_sidebar: AnnotSidebarState,
     pub(crate) review: ReviewState,
-    pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
     pub(crate) focus_edit: bool,
@@ -130,7 +126,6 @@ impl Tab {
             pending_jump: None,
             inflight: HashSet::new(),
             glyphs_waiting: HashSet::new(),
-            pending_study: None,
             pending_export: None,
             previews: HashMap::new(),
             image_textures: HashMap::new(),
@@ -152,7 +147,6 @@ impl Tab {
             thumbs_inflight: HashSet::new(),
             annot_sidebar: AnnotSidebarState::default(),
             review: ReviewState::default(),
-            assistant: TabAssistant::default(),
             search: SearchState::default(),
             last_hl: None,
             focus_edit: false,
@@ -342,12 +336,13 @@ pub(crate) enum AnnotFilterKind {
     Note,
     Math,
     Shape,
+    Ink,
     Image,
     Foreign,
 }
 
 impl AnnotFilterKind {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Highlight,
         Self::Underline,
         Self::StrikeOut,
@@ -356,6 +351,7 @@ impl AnnotFilterKind {
         Self::Note,
         Self::Math,
         Self::Shape,
+        Self::Ink,
         Self::Image,
         Self::Foreign,
     ];
@@ -370,6 +366,7 @@ impl AnnotFilterKind {
             Self::Note => "Note",
             Self::Math => "Equation",
             Self::Shape => "Shape",
+            Self::Ink => "Drawing",
             Self::Image => "Image",
             Self::Foreign => "Imported",
         }
@@ -394,6 +391,7 @@ impl AnnotFilterKind {
             AnnotKind::Note { .. } => Some(Self::Note),
             AnnotKind::Math { .. } => Some(Self::Math),
             AnnotKind::Shape { .. } => Some(Self::Shape),
+            AnnotKind::Ink { .. } => Some(Self::Ink),
             AnnotKind::Image { .. } => Some(Self::Image),
             AnnotKind::Foreign { .. } => Some(Self::Foreign),
         }
@@ -439,11 +437,13 @@ pub(crate) enum Tool {
     Rect,
     Ellipse,
     Line,
+    Arrow,
+    Draw,
     Math,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 11] = [
+    pub(crate) const ALL: [Tool; 13] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
@@ -454,11 +454,13 @@ impl Tool {
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
+        Tool::Arrow,
+        Tool::Draw,
         Tool::Math,
     ];
 
     /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
-    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`.
+    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`. Arrow is `A`. Draw is `D`.
     pub(crate) fn shortcut(self) -> Key {
         match self {
             Tool::Select => Key::S,
@@ -471,6 +473,8 @@ impl Tool {
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
             Tool::Line => Key::I,
+            Tool::Arrow => Key::A,
+            Tool::Draw => Key::D,
             Tool::Math => Key::M,
         }
     }
@@ -487,6 +491,8 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Arrow => "Arrow",
+            Tool::Draw => "Freeform drawing",
             Tool::Math => "Equation",
         }
     }
@@ -504,6 +510,8 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Arrow => "Arrow",
+            Tool::Draw => "Draw",
             Tool::Math => "Equation",
         }
     }
@@ -521,6 +529,8 @@ impl Tool {
             Tool::Rect => "rect",
             Tool::Ellipse => "ellipse",
             Tool::Line => "line",
+            Tool::Arrow => "arrow",
+            Tool::Draw => "draw",
             Tool::Math => "math",
         }
     }
@@ -538,6 +548,8 @@ impl Tool {
             | Tool::Rect
             | Tool::Ellipse
             | Tool::Line
+            | Tool::Arrow
+            | Tool::Draw
             | Tool::Math => None,
         }
     }
@@ -546,6 +558,13 @@ impl Tool {
         matches!(
             self,
             Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly
+        )
+    }
+
+    pub(crate) fn is_shape(self) -> bool {
+        matches!(
+            self,
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw
         )
     }
 }
@@ -558,18 +577,6 @@ pub(crate) enum CreateKind {
 
 #[derive(Clone)]
 pub(crate) enum Drag {
-    Region {
-        page: usize,
-        origin: PdfPoint,
-        current: PdfPoint,
-    },
-    LearningSelect {
-        page: usize,
-        anchor: Option<usize>,
-        current: Option<usize>,
-        origin: PdfPoint,
-        current_pt: PdfPoint,
-    },
     /// Select-tool text drag (copyable page text; not an annotation).
     TextSelect {
         page: usize,
@@ -601,6 +608,11 @@ pub(crate) enum Drag {
         kind: ShapeKind,
         origin: PdfPoint,
         current: PdfPoint,
+    },
+    /// Freeform pen stroke: points accumulate while the pointer is down.
+    Ink {
+        page: usize,
+        points: Vec<PdfPoint>,
     },
     Create {
         page: usize,

@@ -42,6 +42,10 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
         }
         app.tab_drag = None;
         app.tab_drag_over = None;
+        // Title-drag opens an ephemeral list; shrink it back to a short pulse.
+        if let Some(crate::app::TabListState::Ephemeral { .. }) = app.tab_list {
+            app.pulse_tab_list();
+        }
     } else {
         ctx.request_repaint();
     }
@@ -52,50 +56,49 @@ fn hit_split_drop_zone(app: &MarkerApp, pos: Pos2) -> Option<SplitDropZone> {
         return Some(SplitDropZone::Tab(target));
     }
 
-    if let Some(split) = app.split {
-        let other = app.split_view_rect;
-        let active = app.view_rect;
-        let full = if active.is_positive() && other.is_positive() {
-            active.union(other)
-        } else if active.is_positive() {
-            active
-        } else if other.is_positive() {
-            other
-        } else {
+    let active = app.view_rect;
+    let other = app.split_view_rect;
+
+    if app.split.is_some() {
+        let full = union_positive(active, other)?;
+        if !full.contains(pos) {
             return None;
-        };
-        if full.contains(pos) {
-            // Prefer outer edges so drag can still flip side-by-side ↔ stacked.
-            if let Some(edge) = edge_drop_zone(full, pos) {
-                let flips = match edge {
-                    SplitDropZone::Left | SplitDropZone::Right => split.stacked,
-                    SplitDropZone::Top | SplitDropZone::Bottom => !split.stacked,
-                    SplitDropZone::OtherPane
-                    | SplitDropZone::ActivePane
-                    | SplitDropZone::Tab(_) => false,
-                };
-                if flips {
-                    return Some(edge);
-                }
-            }
-            if other.is_positive() && other.contains(pos) {
-                return Some(SplitDropZone::OtherPane);
-            }
-            if active.is_positive() && active.contains(pos) {
-                return Some(SplitDropZone::ActivePane);
-            }
+        }
+        // Outer edge bands assign a pane slot (or flip orientation); interiors
+        // replace / swap the pane under the pointer.
+        if let Some(edge) = edge_drop_zone(full, pos) {
+            return Some(edge);
+        }
+        if other.is_positive() && other.contains(pos) {
+            return Some(SplitDropZone::OtherPane);
+        }
+        if active.is_positive() && active.contains(pos) {
+            return Some(SplitDropZone::ActivePane);
         }
         return None;
     }
 
-    let view = app.view_rect;
+    let view = active;
     if !view.is_positive() || !view.contains(pos) {
         return None;
     }
-    edge_drop_zone(view, pos)
+    edge_drop_zone(view, pos).or(Some(SplitDropZone::Center))
 }
 
-fn edge_drop_zone(full: Rect, pos: Pos2) -> Option<SplitDropZone> {
+fn union_positive(a: Rect, b: Rect) -> Option<Rect> {
+    if a.is_positive() && b.is_positive() {
+        Some(a.union(b))
+    } else if a.is_positive() {
+        Some(a)
+    } else if b.is_positive() {
+        Some(b)
+    } else {
+        None
+    }
+}
+
+/// Relative edge bands (fraction of the rect). Exposed for unit tests.
+pub(crate) fn edge_drop_zone(full: Rect, pos: Pos2) -> Option<SplitDropZone> {
     let w = full.width().max(1.0);
     let h = full.height().max(1.0);
     let rel_x = ((pos.x - full.left()) / w).clamp(0.0, 1.0);
@@ -143,6 +146,32 @@ fn paint_tab_drag_feedback(
                 StrokeKind::Inside,
             );
         }
+    } else {
+        // No hit (e.g. over chrome): hint edges so the gesture does not feel dead.
+        let full = if app.split.is_some() {
+            union_positive(app.view_rect, app.split_view_rect).unwrap_or(Rect::NOTHING)
+        } else {
+            app.view_rect
+        };
+        if full.is_positive() {
+            let hint = colors.accent.gamma_multiply(0.12);
+            for zone in [
+                SplitDropZone::Left,
+                SplitDropZone::Right,
+                SplitDropZone::Top,
+                SplitDropZone::Bottom,
+            ] {
+                let band = drop_zone_rect_for_full(full, zone);
+                if band.is_positive() {
+                    painter.rect_stroke(
+                        band,
+                        CornerRadius::same(4),
+                        Stroke::new(1.0_f32, hint),
+                        StrokeKind::Inside,
+                    );
+                }
+            }
+        }
     }
 
     let name = app
@@ -177,41 +206,39 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
     match zone {
         SplitDropZone::OtherPane => app.split_view_rect,
         SplitDropZone::ActivePane => app.view_rect,
+        // Center "open beside" previews the right half of the unsplitted view.
+        SplitDropZone::Center => {
+            let full = app.view_rect;
+            drop_zone_rect_for_full(full, SplitDropZone::Right)
+        }
         // List-row highlight is painted in the open-tabs overlay.
         SplitDropZone::Tab(_) => Rect::NOTHING,
         SplitDropZone::Left | SplitDropZone::Right | SplitDropZone::Top | SplitDropZone::Bottom => {
             let full = if app.split.is_some() {
-                let a = app.view_rect;
-                let b = app.split_view_rect;
-                if a.is_positive() && b.is_positive() {
-                    a.union(b)
-                } else if a.is_positive() {
-                    a
-                } else {
-                    b
-                }
+                union_positive(app.view_rect, app.split_view_rect).unwrap_or(Rect::NOTHING)
             } else {
                 app.view_rect
             };
-            if !full.is_positive() {
-                return Rect::NOTHING;
-            }
-            let mid_x = full.center().x;
-            let mid_y = full.center().y;
-            match zone {
-                SplitDropZone::Left => {
-                    Rect::from_min_max(full.min, Pos2::new(mid_x, full.bottom()))
-                }
-                SplitDropZone::Right => Rect::from_min_max(Pos2::new(mid_x, full.top()), full.max),
-                SplitDropZone::Top => Rect::from_min_max(full.min, Pos2::new(full.right(), mid_y)),
-                SplitDropZone::Bottom => {
-                    Rect::from_min_max(Pos2::new(full.left(), mid_y), full.max)
-                }
-                SplitDropZone::OtherPane | SplitDropZone::ActivePane | SplitDropZone::Tab(_) => {
-                    unreachable!()
-                }
-            }
+            drop_zone_rect_for_full(full, zone)
         }
+    }
+}
+
+fn drop_zone_rect_for_full(full: Rect, zone: SplitDropZone) -> Rect {
+    if !full.is_positive() {
+        return Rect::NOTHING;
+    }
+    let mid_x = full.center().x;
+    let mid_y = full.center().y;
+    match zone {
+        SplitDropZone::Left => Rect::from_min_max(full.min, Pos2::new(mid_x, full.bottom())),
+        SplitDropZone::Right => Rect::from_min_max(Pos2::new(mid_x, full.top()), full.max),
+        SplitDropZone::Top => Rect::from_min_max(full.min, Pos2::new(full.right(), mid_y)),
+        SplitDropZone::Bottom => Rect::from_min_max(Pos2::new(full.left(), mid_y), full.max),
+        SplitDropZone::OtherPane
+        | SplitDropZone::ActivePane
+        | SplitDropZone::Tab(_)
+        | SplitDropZone::Center => Rect::NOTHING,
     }
 }
 
@@ -246,6 +273,8 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
 
     let first = split.first;
     let second = split.second;
+    // Safety net for stale ids after close; navigation uses `activate_tab` so
+    // a live tab outside the split is rewritten into a pane before we get here.
     if !split.contains(app.active) {
         app.active = first;
     }
@@ -284,4 +313,40 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
         viewport_tab(app, ui, second, !focus_first);
     });
     app.dispatch_tiles(ui.ctx().pixels_per_point());
+}
+
+#[cfg(test)]
+mod edge_zone_tests {
+    use super::edge_drop_zone;
+    use crate::app::SplitDropZone;
+    use egui::{Pos2, Rect};
+
+    fn full() -> Rect {
+        Rect::from_min_max(Pos2::new(0.0, 0.0), Pos2::new(100.0, 100.0))
+    }
+
+    #[test]
+    fn edge_bands_prefer_nearest_side() {
+        assert_eq!(
+            edge_drop_zone(full(), Pos2::new(5.0, 50.0)),
+            Some(SplitDropZone::Left)
+        );
+        assert_eq!(
+            edge_drop_zone(full(), Pos2::new(95.0, 50.0)),
+            Some(SplitDropZone::Right)
+        );
+        assert_eq!(
+            edge_drop_zone(full(), Pos2::new(50.0, 5.0)),
+            Some(SplitDropZone::Top)
+        );
+        assert_eq!(
+            edge_drop_zone(full(), Pos2::new(50.0, 95.0)),
+            Some(SplitDropZone::Bottom)
+        );
+    }
+
+    #[test]
+    fn center_is_not_an_edge() {
+        assert_eq!(edge_drop_zone(full(), Pos2::new(50.0, 50.0)), None);
+    }
 }

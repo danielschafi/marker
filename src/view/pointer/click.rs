@@ -9,28 +9,13 @@ use super::super::paint::text_mark_kind;
 use super::PaneCtx;
 use crate::annot::{click_glyph_range, glyph_at, highlight_quads, AnnotKind, MarkupStyle};
 use crate::app::{CreateKind, MarkerApp, Tab, TextSel, Tool};
-use crate::assistant::{CaptureMode, LearningSelection};
 use crate::geom::PdfPoint;
 
 pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool) {
     let view = pane.rect;
     // True clicks never start a drag (`Sense::click_and_drag` waits for movement), so
-    // text / highlight / learning selection must be handled here — including double-click
+    // text / highlight selection must be handled here — including double-click
     // whole-word selection (#34).
-    if app.capture == CaptureMode::LearningText {
-        let Some((page, point)) = app
-            .tab_by_id(pane.tab_id)
-            .and_then(|tab| tab.doc.screen_to_page(pos, view))
-        else {
-            return;
-        };
-        select_glyphs_at_point(app, pane, page, point, double, GlyphClick::Learning);
-        return;
-    }
-    if app.capture == CaptureMode::Region {
-        return;
-    }
-
     let tool = app.tool;
     let located = app
         .tab_by_id(pane.tab_id)
@@ -70,7 +55,6 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 }
                 if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
-                    tab.assistant.learning = None;
                     tab.style_bar = None;
                     if open && editable {
                         tab.editing = Some(id);
@@ -115,7 +99,6 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
-                    tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
                 }
@@ -139,7 +122,6 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
-                    tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
                 }
@@ -164,7 +146,6 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 app.begin_edit_undo(id);
                 if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
-                    tab.assistant.learning = None;
                     tab.editing = Some(id);
                     tab.focus_edit = true;
                 }
@@ -175,7 +156,7 @@ pub(super) fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool)
                 place_box(app, pane, page, point, None, CreateKind::Math);
             }
         }
-        Tool::Rect | Tool::Ellipse | Tool::Line => {
+        Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw => {
             if hit.is_none() {
                 app.clear_page_selection();
             }
@@ -195,7 +176,6 @@ enum GlyphClick {
     TextSelect,
     /// `None` is a highlight fill. A style is underline, strikeout, or squiggly.
     Mark(Option<MarkupStyle>),
-    Learning,
 }
 
 /// Select / highlight glyphs under a click. Double-click expands to the whole word.
@@ -233,26 +213,11 @@ fn select_glyphs_at_point(
             tab.selected.clear();
             tab.editing = None;
             tab.style_bar = None;
-            tab.assistant.learning = None;
             tab.text_sel = Some(TextSel {
                 page,
                 glyph_lo: lo,
                 glyph_hi: hi,
             });
-            true
-        }
-        GlyphClick::Learning => {
-            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
-                return false;
-            };
-            tab.assistant.learning = Some(LearningSelection {
-                page,
-                glyph_lo: lo,
-                glyph_hi: hi,
-            });
-            app.capture = CaptureMode::None;
-            app.assistant_open = true;
-            app.attach_learning_text();
             true
         }
         GlyphClick::Mark(style) => {

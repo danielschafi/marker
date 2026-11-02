@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 
 use mupdf::pdf::{
-    AnnotationDefaultAppearance, PdfAnnotation, PdfAnnotationType, PdfDocument, PdfObject,
+    AnnotationDefaultAppearance, LineEndingStyle, PdfAnnotation, PdfAnnotationType, PdfDocument,
+    PdfObject,
 };
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
@@ -18,6 +19,7 @@ pub(crate) enum MarkerKind {
     Text,
     Note,
     Shape,
+    Ink,
     Math,
     Image,
     InlineMath,
@@ -33,6 +35,7 @@ impl MarkerKind {
             Self::Text => "Text",
             Self::Note => "Note",
             Self::Shape => "Shape",
+            Self::Ink => "Ink",
             Self::Math => "Math",
             Self::Image => "Image",
             Self::InlineMath => "InlineMath",
@@ -58,6 +61,7 @@ impl std::str::FromStr for MarkerKind {
             "Text" => Self::Text,
             "Note" => Self::Note,
             "Shape" => Self::Shape,
+            "Ink" => Self::Ink,
             "Math" => Self::Math,
             "Image" => Self::Image,
             "InlineMath" => Self::InlineMath,
@@ -173,6 +177,11 @@ pub(crate) fn is_native_markup(kind_name: PdfAnnotationType, annot: &PdfAnnotati
     read_marker(&annot.object()).kind == Some(expected)
 }
 
+pub(crate) fn is_native_ink(kind_name: PdfAnnotationType, annot: &PdfAnnotation) -> bool {
+    kind_name == PdfAnnotationType::Ink
+        && read_marker(&annot.object()).kind == Some(MarkerKind::Ink)
+}
+
 pub(crate) fn markup_style_of(kind_name: PdfAnnotationType) -> Option<MarkupStyle> {
     match kind_name {
         PdfAnnotationType::Underline => Some(MarkupStyle::Underline),
@@ -262,9 +271,9 @@ pub(crate) fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, m
         let page = doc.load_pdf_page(index)?;
         for annot in page.annotations() {
             let kind_name = annot.r#type()?;
-            // Marker-native underline / strikeout / squiggly carry a Marker dict.
+            // Marker-native underline / strikeout / squiggly / ink carry a Marker dict.
             // Unmarked copies stay foreign (read-only).
-            if !is_native_markup(kind_name, &annot) {
+            if !is_native_markup(kind_name, &annot) && !is_native_ink(kind_name, &annot) {
                 if let Some(kind) = import_foreign(kind_name, &annot)? {
                     let preferred = read_nm_id(&annot.object());
                     let id = allocate_id(preferred, &mut used);
@@ -287,6 +296,7 @@ pub(crate) fn import_annotations(doc: &PdfDocument) -> Result<Vec<Annotation>, m
                     | PdfAnnotationType::Square
                     | PdfAnnotationType::Circle
                     | PdfAnnotationType::Line
+                    | PdfAnnotationType::Ink
                     | PdfAnnotationType::Stamp
                     | PdfAnnotationType::Underline
                     | PdfAnnotationType::StrikeOut
@@ -420,14 +430,54 @@ pub(crate) fn import_kind(
             let (start, end) = annot.line()?;
             let start = PdfPoint::new(start.x, start.y);
             let end = PdfPoint::new(end.x, end.y);
+            let kind = match annot.line_ending_styles() {
+                Ok((_, LineEndingStyle::ClosedArrow | LineEndingStyle::OpenArrow)) => {
+                    ShapeKind::Arrow
+                }
+                Ok((LineEndingStyle::ClosedArrow | LineEndingStyle::OpenArrow, _)) => {
+                    // Arrowhead on the start endpoint — flip so Marker always paints at `end`.
+                    return Ok(Some(AnnotKind::Shape {
+                        kind: ShapeKind::Arrow,
+                        rect: PdfRect::from_points(end, start),
+                        start: end,
+                        end: start,
+                        stroke,
+                        fill: None,
+                        width: annot.border_width().unwrap_or(1.0).max(0.25),
+                    }));
+                }
+                _ => ShapeKind::Line,
+            };
             Ok(Some(AnnotKind::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 rect: PdfRect::from_points(start, end),
                 start,
                 end,
                 stroke,
                 fill: None,
                 width: annot.border_width().unwrap_or(1.0).max(0.25),
+            }))
+        }
+        PdfAnnotationType::Ink => {
+            let strokes: Vec<Vec<PdfPoint>> = annot
+                .ink_list()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|stroke| {
+                    stroke
+                        .into_iter()
+                        .map(|point| PdfPoint::new(point.x, point.y))
+                        .collect()
+                })
+                .filter(|stroke: &Vec<PdfPoint>| !stroke.is_empty())
+                .collect();
+            if strokes.is_empty() {
+                return Ok(None);
+            }
+            Ok(Some(AnnotKind::Ink {
+                strokes,
+                color: stroke,
+                width: annot.border_width().unwrap_or(1.5).max(0.25),
             }))
         }
         PdfAnnotationType::Stamp => {

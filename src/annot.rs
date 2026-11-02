@@ -67,6 +67,15 @@ pub enum ShapeKind {
     Rect,
     Ellipse,
     Line,
+    /// Line with a closed arrowhead at `end`. Saved as a PDF Line with `/LE`.
+    Arrow,
+}
+
+impl ShapeKind {
+    /// Line and arrow share endpoints, hit testing, and resize handles.
+    pub fn is_line_like(self) -> bool {
+        matches!(self, Self::Line | Self::Arrow)
+    }
 }
 
 /// Stroke along glyph quads. Editable and saved as a PDF text-markup annotation.
@@ -133,6 +142,14 @@ pub enum AnnotKind {
         end: PdfPoint,
         stroke: Rgb,
         fill: Option<Rgb>,
+        width: f32,
+    },
+    /// Freeform pen strokes. Editable and saved as a PDF Ink annotation.
+    ///
+    /// Unmarked Ink from other apps stays [`ForeignKind::Ink`] (read-only).
+    Ink {
+        strokes: Vec<Vec<PdfPoint>>,
+        color: Rgb,
         width: f32,
     },
     Math {
@@ -203,12 +220,19 @@ impl AnnotKind {
             | Self::Image { rect, .. }
             | Self::Foreign { rect, .. } => Some(*rect),
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => Some(PdfRect::from_points(*start, *end).inflate(2.0)),
+            } if kind.is_line_like() => {
+                // Arrowheads need a little extra pad beyond the shaft.
+                let pad = if *kind == ShapeKind::Arrow { 6.0 } else { 2.0 };
+                Some(PdfRect::from_points(*start, *end).inflate(pad))
+            }
             Self::Shape { rect, .. } => Some(*rect),
+            Self::Ink {
+                strokes, width, ..
+            } => ink_bounds(strokes, *width),
         }
     }
 
@@ -226,12 +250,12 @@ impl AnnotKind {
                 *rect = rect.translate(dx, dy);
             }
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 rect,
                 ..
-            } => {
+            } if kind.is_line_like() => {
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
                 *rect = rect.translate(dx, dy);
@@ -242,6 +266,14 @@ impl AnnotKind {
                 *rect = rect.translate(dx, dy);
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
+            }
+            Self::Ink { strokes, .. } => {
+                for stroke in strokes {
+                    for point in stroke {
+                        point.x += dx;
+                        point.y += dy;
+                    }
+                }
             }
             // Foreign annotations stay where the other app put them.
             Self::Foreign { .. } => {}
@@ -255,11 +287,14 @@ impl AnnotKind {
             }
             Self::Foreign { .. } => false,
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => dist_to_segment(p, *start, *end) <= slop.max(3.0),
+            } if kind.is_line_like() => dist_to_segment(p, *start, *end) <= slop.max(3.0),
+            Self::Ink {
+                strokes, width, ..
+            } => ink_hit(strokes, *width, p, slop),
             Self::Text { .. }
             | Self::Note { .. }
             | Self::Math { .. }
@@ -270,6 +305,39 @@ impl AnnotKind {
                 .unwrap_or(false),
         }
     }
+}
+
+/// Axis-aligned bounds of ink strokes, padded by half the stroke width.
+pub fn ink_bounds(strokes: &[Vec<PdfPoint>], width: f32) -> Option<PdfRect> {
+    let mut any = false;
+    let mut min_x = f32::INFINITY;
+    let mut min_y = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    let mut max_y = f32::NEG_INFINITY;
+    for stroke in strokes {
+        for point in stroke {
+            any = true;
+            min_x = min_x.min(point.x);
+            min_y = min_y.min(point.y);
+            max_x = max_x.max(point.x);
+            max_y = max_y.max(point.y);
+        }
+    }
+    if !any {
+        return None;
+    }
+    Some(PdfRect::new(min_x, min_y, max_x, max_y).inflate((width * 0.5).max(1.0)))
+}
+
+fn ink_hit(strokes: &[Vec<PdfPoint>], width: f32, p: PdfPoint, slop: f32) -> bool {
+    let threshold = slop.max(width * 0.5).max(3.0);
+    strokes.iter().any(|stroke| match stroke.as_slice() {
+        [] => false,
+        [only] => (p.x - only.x).hypot(p.y - only.y) <= threshold,
+        points => points
+            .windows(2)
+            .any(|pair| dist_to_segment(p, pair[0], pair[1]) <= threshold),
+    })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -569,11 +637,13 @@ impl AnnotKind {
     pub fn handles(&self) -> Vec<(Handle, PdfPoint)> {
         match self {
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)],
+            } if kind.is_line_like() => {
+                vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)]
+            }
             Self::Text { rect, .. }
             | Self::Math { rect, .. }
             | Self::Image { rect, .. }
@@ -588,6 +658,7 @@ impl AnnotKind {
             Self::Highlight { .. }
             | Self::Markup { .. }
             | Self::Note { .. }
+            | Self::Ink { .. }
             | Self::Foreign { .. } => Vec::new(),
         }
     }
@@ -596,12 +667,12 @@ impl AnnotKind {
         let min = 8.0;
         match self {
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 rect,
                 ..
-            } => {
+            } if kind.is_line_like() => {
                 match handle {
                     Handle::LineStart => *start = to,
                     Handle::LineEnd => *end = to,
@@ -644,6 +715,7 @@ impl AnnotKind {
             Self::Highlight { .. }
             | Self::Markup { .. }
             | Self::Note { .. }
+            | Self::Ink { .. }
             | Self::Foreign { .. } => {}
         }
     }
@@ -857,6 +929,76 @@ mod tests {
         match &session.annotations[1].kind {
             AnnotKind::Text { content, .. } => assert_eq!(content, "b"),
             other => panic!("expected text annot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_hit_handles_and_translate() {
+        let mut kind = AnnotKind::Shape {
+            kind: ShapeKind::Arrow,
+            rect: PdfRect::from_points(PdfPoint::new(0.0, 0.0), PdfPoint::new(40.0, 0.0)),
+            start: PdfPoint::new(0.0, 0.0),
+            end: PdfPoint::new(40.0, 0.0),
+            stroke: Rgb::new(0, 0, 0),
+            fill: None,
+            width: 2.0,
+        };
+        assert!(kind.hit(PdfPoint::new(20.0, 0.0), 2.0));
+        assert!(!kind.hit(PdfPoint::new(20.0, 20.0), 2.0));
+        let handles = kind.handles();
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles[0].0, Handle::LineStart);
+        assert_eq!(handles[1].0, Handle::LineEnd);
+        kind.translate(5.0, -3.0);
+        match &kind {
+            AnnotKind::Shape {
+                kind: ShapeKind::Arrow,
+                start,
+                end,
+                ..
+            } => {
+                assert!((start.x - 5.0).abs() < f32::EPSILON);
+                assert!((start.y + 3.0).abs() < f32::EPSILON);
+                assert!((end.x - 45.0).abs() < f32::EPSILON);
+                assert!((end.y + 3.0).abs() < f32::EPSILON);
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+        kind.resize(Handle::LineEnd, PdfPoint::new(60.0, 10.0));
+        match &kind {
+            AnnotKind::Shape { end, .. } => {
+                assert!((end.x - 60.0).abs() < f32::EPSILON);
+                assert!((end.y - 10.0).abs() < f32::EPSILON);
+            }
+            other => panic!("expected shape, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ink_bounds_hit_and_translate() {
+        let mut kind = AnnotKind::Ink {
+            strokes: vec![vec![
+                PdfPoint::new(10.0, 10.0),
+                PdfPoint::new(40.0, 10.0),
+                PdfPoint::new(40.0, 40.0),
+            ]],
+            color: Rgb::new(0, 0, 0),
+            width: 2.0,
+        };
+        let bounds = kind.bounds().expect("ink bounds");
+        assert!((bounds.x0 - 9.0).abs() < f32::EPSILON);
+        assert!((bounds.y0 - 9.0).abs() < f32::EPSILON);
+        assert!((bounds.x1 - 41.0).abs() < f32::EPSILON);
+        assert!((bounds.y1 - 41.0).abs() < f32::EPSILON);
+        assert!(kind.hit(PdfPoint::new(25.0, 10.0), 1.0));
+        assert!(!kind.hit(PdfPoint::new(100.0, 100.0), 1.0));
+        kind.translate(5.0, -3.0);
+        match &kind {
+            AnnotKind::Ink { strokes, .. } => {
+                assert_eq!(strokes[0][0], PdfPoint::new(15.0, 7.0));
+                assert_eq!(strokes[0][2], PdfPoint::new(45.0, 37.0));
+            }
+            other => panic!("expected ink annot, got {other:?}"),
         }
     }
 }

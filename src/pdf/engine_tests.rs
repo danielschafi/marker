@@ -303,7 +303,9 @@ fn annotations_roundtrip_and_tiles_skip_them() {
                 ShapeKind::Rect => "rect",
                 ShapeKind::Ellipse => "ellipse",
                 ShapeKind::Line => "line",
+                ShapeKind::Arrow => "arrow",
             },
+            AnnotKind::Ink { .. } => "ink",
             AnnotKind::Math { .. } => "math",
             AnnotKind::Image { .. } => "image",
             AnnotKind::Foreign { .. } => "foreign",
@@ -450,6 +452,172 @@ fn shape_fill_roundtrip() {
         .collect();
     fills.sort_by_key(|f| f.is_some());
     assert_eq!(fills, [None, Some(fill)]);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn arrow_line_ending_roundtrip() {
+    let dir = std::env::temp_dir().join(format!(
+        "marker-arrow-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sample.pdf");
+    sample_pdf(&path);
+
+    let loaded = DocumentEngine::open(&path).unwrap();
+    let mut engine = loaded.engine;
+    let start = PdfPoint::new(90.0, 140.0);
+    let end = PdfPoint::new(210.0, 200.0);
+    let stroke = Rgb::new(28, 78, 186);
+    let width = 2.0;
+    let mut session = crate::annot::Session::from_imported(loaded.annotations);
+    session.insert(
+        0,
+        AnnotKind::Shape {
+            kind: ShapeKind::Arrow,
+            rect: PdfRect::from_points(start, end),
+            start,
+            end,
+            stroke,
+            fill: None,
+            width,
+        },
+    );
+    engine
+        .save(&SaveSnapshot {
+            upserts: session.cloned_annotations(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
+        })
+        .unwrap();
+
+    let again = DocumentEngine::open(&path).unwrap();
+    let arrow = again
+        .annotations
+        .iter()
+        .find_map(|annot| match &annot.kind {
+            AnnotKind::Shape {
+                kind: ShapeKind::Arrow,
+                start: loaded_start,
+                end: loaded_end,
+                stroke: loaded_stroke,
+                width: loaded_width,
+                ..
+            } => Some((
+                *loaded_start,
+                *loaded_end,
+                *loaded_stroke,
+                *loaded_width,
+            )),
+            _ => None,
+        })
+        .expect("arrow shape annotation");
+    assert_eq!(arrow.2, stroke);
+    assert!((arrow.3 - width).abs() < 0.05, "width {}", arrow.3);
+    assert!(
+        (arrow.0.x - start.x).abs() < 0.5 && (arrow.0.y - start.y).abs() < 0.5,
+        "start {:?} vs {:?}",
+        arrow.0,
+        start
+    );
+    assert!(
+        (arrow.1.x - end.x).abs() < 0.5 && (arrow.1.y - end.y).abs() < 0.5,
+        "end {:?} vs {:?}",
+        arrow.1,
+        end
+    );
+    assert!(
+        again.annotations.iter().all(|annot| {
+            !matches!(
+                annot.kind,
+                AnnotKind::Shape {
+                    kind: ShapeKind::Line,
+                    ..
+                }
+            )
+        }),
+        "arrow must not reload as a plain line"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ink_stroke_roundtrip() {
+    let dir = std::env::temp_dir().join(format!(
+        "marker-ink-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sample.pdf");
+    sample_pdf(&path);
+
+    let loaded = DocumentEngine::open(&path).unwrap();
+    let mut engine = loaded.engine;
+    let color = Rgb::new(186, 36, 36);
+    let width = 2.5;
+    let strokes = vec![vec![
+        PdfPoint::new(80.0, 120.0),
+        PdfPoint::new(140.0, 160.0),
+        PdfPoint::new(200.0, 110.0),
+    ]];
+    let mut session = crate::annot::Session::from_imported(loaded.annotations);
+    session.insert(
+        0,
+        AnnotKind::Ink {
+            strokes: strokes.clone(),
+            color,
+            width,
+        },
+    );
+    engine
+        .save(&SaveSnapshot {
+            upserts: session.cloned_annotations(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
+        })
+        .unwrap();
+
+    let again = DocumentEngine::open(&path).unwrap();
+    let ink = again
+        .annotations
+        .iter()
+        .find_map(|annot| match &annot.kind {
+            AnnotKind::Ink {
+                strokes: loaded_strokes,
+                color: loaded_color,
+                width: loaded_width,
+            } => Some((loaded_strokes, *loaded_color, *loaded_width)),
+            _ => None,
+        })
+        .expect("native ink annotation");
+    assert_eq!(ink.1, color);
+    assert!((ink.2 - width).abs() < 0.05, "width {}", ink.2);
+    assert_eq!(ink.0.len(), 1);
+    assert_eq!(ink.0[0].len(), strokes[0].len());
+    for (got, want) in ink.0[0].iter().zip(strokes[0].iter()) {
+        assert!((got.x - want.x).abs() < 0.5, "x {} vs {}", got.x, want.x);
+        assert!((got.y - want.y).abs() < 0.5, "y {} vs {}", got.y, want.y);
+    }
+    assert!(
+        again
+            .annotations
+            .iter()
+            .all(|annot| !matches!(annot.kind, AnnotKind::Foreign { .. })),
+        "marker ink must not load as foreign"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -10,13 +10,12 @@ use egui::{
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{AnnotFilterKind, MarkerApp, ReviewGroupMode, ShortcutSection, Tab, SHORTCUTS};
-use crate::assistant::{glyphs_intersecting_rects, reconstruct_text};
+use crate::page_text::{glyphs_intersecting_rects, reconstruct_text};
 use crate::geom::{Rgb, INK_COLORS};
 use crate::pdf::OutlineNode;
 use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
 
-mod assistant_panel;
 mod empty_state;
 mod settings_window;
 mod split_drop;
@@ -27,7 +26,6 @@ mod toolbar;
 pub(crate) use empty_state::empty_state;
 pub(crate) use split_drop::{split_viewports, tab_drag_overlay};
 
-use assistant_panel::assistant_panel;
 use empty_state::outline_node;
 use settings_window::settings_window;
 use tab_bar::{paint_tab_list, paint_tab_menu, tab_bar};
@@ -57,7 +55,6 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
         thumbs_panel(app, ctx);
         annot_sidebar(app, ctx);
         review_panel(app, ctx);
-        assistant_panel(app, ctx);
     }
     paint_tab_list(app, ctx, show_chrome);
     // Menu must paint even in zen (tab list still opens there).
@@ -470,7 +467,9 @@ fn preset_editor_window(app: &mut MarkerApp, ctx: &egui::Context) {
                 }
                 if ui
                     .button("Reset to defaults")
-                    .on_hover_text("Restore the five built-in named colors")
+                    .on_hover_text(
+                        "Restore the five built-in named colors and the default highlight swatch",
+                    )
                     .clicked()
                 {
                     reset = true;
@@ -998,6 +997,7 @@ fn review_row_data(
         AnnotKind::Note { content, color, .. } => ("Note", Some(*color), content.clone()),
         AnnotKind::Text { .. }
         | AnnotKind::Shape { .. }
+        | AnnotKind::Ink { .. }
         | AnnotKind::Math { .. }
         | AnnotKind::Image { .. }
         | AnnotKind::Foreign { .. } => return None,
@@ -1283,6 +1283,7 @@ fn annot_display_color(kind: &AnnotKind) -> Option<Rgb> {
         | AnnotKind::Text { color, .. }
         | AnnotKind::Note { color, .. }
         | AnnotKind::Math { color, .. }
+        | AnnotKind::Ink { color, .. }
         | AnnotKind::Foreign { color, .. } => Some(*color),
         AnnotKind::Shape { stroke, .. } => Some(*stroke),
         AnnotKind::Image { .. } => None,
@@ -1312,6 +1313,11 @@ fn annot_kind_label(kind: &AnnotKind) -> &'static str {
             kind: ShapeKind::Line,
             ..
         } => "Line",
+        AnnotKind::Shape {
+            kind: ShapeKind::Arrow,
+            ..
+        } => "Arrow",
+        AnnotKind::Ink { .. } => "Drawing",
         AnnotKind::Image { .. } => "Image",
         AnnotKind::Foreign { kind, .. } => match kind {
             ForeignKind::Underline => "Underline",
@@ -1343,7 +1349,7 @@ fn annot_snippet(tab: &Tab, annot: &Annotation) -> String {
                 String::new()
             }
         }
-        AnnotKind::Shape { .. } | AnnotKind::Image { .. } => String::new(),
+        AnnotKind::Shape { .. } | AnnotKind::Ink { .. } | AnnotKind::Image { .. } => String::new(),
     };
     one_line_snippet(&raw, 72)
 }
@@ -1440,12 +1446,12 @@ pub(crate) fn apply_theme(ctx: &egui::Context) {
 fn install_fonts(ctx: &egui::Context) {
     let mut fonts = FontDefinitions::default();
     fonts.font_data.insert(
-        "InstrumentSerif-Italic".to_owned(),
+        "Manrope-Bold".to_owned(),
         Arc::new(FontData::from_static(include_bytes!(
-            "../../assets/fonts/InstrumentSerif-Italic.ttf"
+            "../../assets/fonts/Manrope-Bold.ttf"
         ))),
     );
-    let mut brand = vec!["InstrumentSerif-Italic".to_owned()];
+    let mut brand = vec!["Manrope-Bold".to_owned()];
     brand.extend(fonts.families[&FontFamily::Proportional].clone());
     fonts
         .families
@@ -1457,10 +1463,83 @@ fn brand_family() -> FontFamily {
     FontFamily::Name(BRAND_FAMILY.into())
 }
 
+/// Document + yellow highlight mark matching `packaging/marker.svg` (512 viewBox).
+pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
+    let painter = ui.painter();
+    let inverted = matches!(ui.ctx().theme(), egui::Theme::Light);
+    // Colors from packaging/marker.svg / packaging/marker-inverted.svg.
+    let (chassis, page, fold, lines, highlight, ink) = if inverted {
+        (
+            Color32::from_rgb(0xFF, 0xFF, 0xFF),
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+            Color32::from_rgb(0x55, 0x55, 0x5C),
+            Color32::from_rgb(0x6A, 0x6A, 0x72),
+            Color32::from_rgb(0xFF, 0xC9, 0x3C),
+            Color32::from_rgb(0xFF, 0xFF, 0xFF),
+        )
+    } else {
+        (
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+            Color32::WHITE,
+            Color32::from_rgb(0xD6, 0xD6, 0xDB),
+            Color32::from_rgb(0xB8, 0xB8, 0xBF),
+            Color32::from_rgb(0xFF, 0xC9, 0x3C),
+            Color32::from_rgb(0x1C, 0x1C, 0x1F),
+        )
+    };
+
+    let scale = size / 512.0;
+    let p = |x: f32, y: f32| Pos2::new(rect.left() + x * scale, rect.top() + y * scale);
+    let r = |x: f32, y: f32, w: f32, h: f32| {
+        Rect::from_min_size(p(x, y), Vec2::new(w * scale, h * scale))
+    };
+    let rr = |v: f32| CornerRadius::same((v * scale).round().clamp(1.0, 255.0) as u8);
+
+    painter.rect_filled(rect, rr(116.0), chassis);
+
+    // Dog-eared document body (path M152 96H300L376 172V400… approximated).
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            p(152.0, 96.0),
+            p(300.0, 96.0),
+            p(300.0, 172.0),
+            p(376.0, 172.0),
+            p(376.0, 400.0),
+            p(152.0, 400.0),
+        ],
+        page,
+        Stroke::NONE,
+    ));
+
+    if size <= 32.0 {
+        // packaging/marker-32.svg: document + thicker highlight only (no fold / lines / ink).
+        painter.rect_filled(r(148.0, 236.0, 256.0, 72.0), rr(20.0), highlight);
+        return;
+    }
+
+    painter.add(egui::Shape::convex_polygon(
+        vec![p(300.0, 96.0), p(376.0, 172.0), p(300.0, 172.0)],
+        fold,
+        Stroke::NONE,
+    ));
+
+    // 128 full detail; 64 omits the top gray line.
+    if size >= 96.0 {
+        painter.rect_filled(r(176.0, 204.0, 104.0, 14.0), rr(7.0), lines);
+    }
+    painter.rect_filled(r(148.0, 250.0, 256.0, 48.0), rr(14.0), highlight);
+    painter.rect_filled(r(176.0, 266.0, 164.0, 16.0), rr(8.0), ink);
+    painter.rect_filled(r(176.0, 330.0, 176.0, 14.0), rr(7.0), lines);
+    painter.rect_filled(r(176.0, 364.0, 108.0, 14.0), rr(7.0), lines);
+}
+
 pub(crate) fn brand_wordmark(ui: &mut egui::Ui) {
     let colors = palette(ui.ctx());
+    brand_mark(ui, 64.0);
+    ui.add_space(10.0);
     let font = FontId::new(72.0, brand_family());
-    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap("Marker".to_owned(), font, colors.text));
+    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap("marker".to_owned(), font, colors.text));
     let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
     let text_pos = Pos2::new(rect.center().x - galley.size().x * 0.5, rect.top());
     ui.painter().galley(text_pos, galley, colors.text);

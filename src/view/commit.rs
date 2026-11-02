@@ -6,20 +6,12 @@ use egui::{Pos2, Rect};
 
 use super::paint::{mark_drag_quads, text_mark_kind};
 use super::PaneCtx;
-use crate::annot::{highlight_quads, AnnotKind, Handle, MarkupStyle, ShapeKind};
+use crate::annot::{AnnotKind, Handle, MarkupStyle, ShapeKind};
 use crate::app::{CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool};
-use crate::assistant::{CaptureMode, LearningSelection};
 use crate::geom::{PdfPoint, PdfRect};
-use crate::pdf::PageInfo;
 
 pub(super) fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
     match drag {
-        Drag::LearningSelect {
-            page,
-            anchor,
-            current,
-            ..
-        } => commit_learning_select(app, pane, page, anchor, current),
         Drag::TextSelect {
             page,
             anchor,
@@ -31,11 +23,6 @@ pub(super) fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
             origin,
             current,
         } => commit_marquee(app, pane, page, origin, current),
-        Drag::Region {
-            page,
-            origin,
-            current,
-        } => commit_region(app, pane, page, origin, current),
         Drag::Highlight {
             page,
             anchor,
@@ -55,6 +42,7 @@ pub(super) fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
             origin,
             current,
         } => commit_shape(app, pane, page, kind, origin, current),
+        Drag::Ink { page, points } => commit_ink(app, pane, page, points),
         Drag::Create {
             page,
             origin,
@@ -69,28 +57,6 @@ pub(super) fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
         } => commit_move(app, pane, ids, origins, moved),
         Drag::Resize { id, .. } => commit_resize(app, pane, id),
         Drag::Pan { .. } => commit_pan(),
-    }
-}
-
-fn commit_learning_select(
-    app: &mut MarkerApp,
-    pane: PaneCtx,
-    page: usize,
-    anchor: Option<usize>,
-    current: Option<usize>,
-) {
-    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
-        return;
-    };
-    if let (Some(a), Some(c)) = (anchor, current) {
-        tab.assistant.learning = Some(LearningSelection {
-            page,
-            glyph_lo: a.min(c),
-            glyph_hi: a.max(c),
-        });
-        app.capture = CaptureMode::None;
-        app.set_assistant_open(true);
-        app.attach_learning_text();
     }
 }
 
@@ -148,22 +114,6 @@ fn commit_marquee(
     if let Some(id) = style_id {
         app.open_style_bar(id, false);
     }
-}
-
-fn commit_region(
-    app: &mut MarkerApp,
-    _pane: PaneCtx,
-    page: usize,
-    origin: PdfPoint,
-    current: PdfPoint,
-) {
-    let rect = PdfRect::from_points(origin, current);
-    if rect.is_empty() {
-        return;
-    }
-    app.capture = CaptureMode::None;
-    app.set_assistant_open(true);
-    app.request_crop(page, rect);
 }
 
 #[allow(clippy::too_many_arguments)] // mirrors Drag::Highlight fields
@@ -234,10 +184,10 @@ fn commit_shape(
 ) {
     let rect = PdfRect::from_points(origin, current);
     let long_enough = (origin.x - current.x).hypot(origin.y - current.y) >= 4.0;
-    if kind != ShapeKind::Line && rect.is_empty() {
+    if !kind.is_line_like() && rect.is_empty() {
         return;
     }
-    if kind == ShapeKind::Line && !long_enough {
+    if kind.is_line_like() && !long_enough {
         return;
     }
     let stroke = app.settings.shape_color;
@@ -255,6 +205,39 @@ fn commit_shape(
             end: current,
             stroke,
             fill: None,
+            width,
+        },
+    );
+    tab.select_only(id);
+    tab.save.touch();
+    app.seal_undo();
+    app.open_style_bar(id, true);
+}
+
+fn commit_ink(app: &mut MarkerApp, pane: PaneCtx, page: usize, points: Vec<PdfPoint>) {
+    if points.len() < 2 {
+        return;
+    }
+    let Some(first) = points.first() else {
+        return;
+    };
+    let Some(last) = points.last() else {
+        return;
+    };
+    if (first.x - last.x).hypot(first.y - last.y) < 4.0 && points.len() < 3 {
+        return;
+    }
+    let color = app.settings.shape_color;
+    let width = app.settings.shape_width;
+    app.seal_then_arm();
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
+        return;
+    };
+    let id = tab.doc.session.insert(
+        page,
+        AnnotKind::Ink {
+            strokes: vec![points],
+            color,
             width,
         },
     );
@@ -356,117 +339,6 @@ pub(super) fn place_box(
         }
         app.open_style_bar(id, true);
     }
-}
-
-/// Insert a Text or Note annotation filled with `content` (ST6).
-///
-/// Places beside the current selection when one exists; otherwise at the
-/// viewport center (falling back to the current page center).
-pub(crate) fn place_assistant_answer(
-    tab: &mut Tab,
-    view: Rect,
-    kind: CreateKind,
-    settings: &crate::settings::Settings,
-    content: String,
-) -> Option<u64> {
-    if !matches!(kind, CreateKind::Text | CreateKind::Note) {
-        return None;
-    }
-    if tab.doc.pages.is_empty() {
-        return None;
-    }
-    let size = settings.text_size;
-    let (page, point, rect) = match selection_bounds(tab) {
-        Some((page, bounds)) => {
-            let info = tab.doc.pages.get(page)?;
-            let (point, rect) = match kind {
-                CreateKind::Note => {
-                    let point = point_beside_bounds(bounds, info, crate::annot::NOTE_SIZE);
-                    (point, None)
-                }
-                CreateKind::Text => {
-                    let height = size * 1.8 + 4.0;
-                    let rect = rect_beside_bounds(bounds, info, 200.0, height);
-                    (PdfPoint::new(rect.x0, rect.y0), Some(rect))
-                }
-                CreateKind::Math => return None,
-            };
-            (page, point, rect)
-        }
-        None => {
-            let (page, point) = viewport_anchor(&tab.doc, view)?;
-            (page, point, None)
-        }
-    };
-    place_box_tab(tab, page, point, rect, kind, settings, content);
-    tab.primary_selected()
-}
-
-fn selection_bounds(tab: &Tab) -> Option<(usize, PdfRect)> {
-    if let Some(sel) = &tab.assistant.learning {
-        let glyphs = tab.doc.glyphs.get(&sel.page)?;
-        let quads = highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi);
-        return union_pdf_rects(&quads).map(|bounds| (sel.page, bounds));
-    }
-    if let Some(sel) = &tab.text_sel {
-        let glyphs = tab.doc.glyphs.get(&sel.page)?;
-        let quads = highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi);
-        return union_pdf_rects(&quads).map(|bounds| (sel.page, bounds));
-    }
-    let id = tab.primary_selected()?;
-    let annot = tab.doc.session.get(id)?;
-    match &annot.kind {
-        AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
-            union_pdf_rects(quads).map(|bounds| (annot.page, bounds))
-        }
-        AnnotKind::Text { .. }
-        | AnnotKind::Note { .. }
-        | AnnotKind::Shape { .. }
-        | AnnotKind::Math { .. }
-        | AnnotKind::Image { .. }
-        | AnnotKind::Foreign { .. } => annot.bounds().map(|bounds| (annot.page, bounds)),
-    }
-}
-
-fn viewport_anchor(doc: &DocState, view: Rect) -> Option<(usize, PdfPoint)> {
-    if let Some(hit) = doc.screen_to_page(view.center(), view) {
-        return Some(hit);
-    }
-    let page = doc.current_page(view.height().max(1.0));
-    let info = doc.pages.get(page)?;
-    Some((
-        page,
-        PdfPoint::new((info.x0 + info.x1) * 0.5, (info.y0 + info.y1) * 0.5),
-    ))
-}
-
-fn point_beside_bounds(bounds: PdfRect, page: &PageInfo, width: f32) -> PdfPoint {
-    let rect = rect_beside_bounds(bounds, page, width, width);
-    PdfPoint::new(rect.x0, rect.y0)
-}
-
-fn rect_beside_bounds(bounds: PdfRect, page: &PageInfo, width: f32, height: f32) -> PdfRect {
-    const GAP: f32 = 8.0;
-    let right = bounds.x1 + GAP;
-    if right + width <= page.x1 + 0.5 {
-        return PdfRect::new(right, bounds.y0, right + width, bounds.y0 + height);
-    }
-    let max_x = (page.x1 - width).max(page.x0);
-    let x = bounds.x0.clamp(page.x0, max_x);
-    let y = bounds.y1 + GAP;
-    PdfRect::new(x, y, x + width, y + height)
-}
-
-fn union_pdf_rects(rects: &[PdfRect]) -> Option<PdfRect> {
-    let first = *rects.first()?;
-    Some(rects.iter().skip(1).fold(first, |acc, r| {
-        PdfRect::new(
-            acc.x0.min(r.x0),
-            acc.y0.min(r.y0),
-            acc.x1.max(r.x1),
-            acc.y1.max(r.y1),
-        )
-    }))
 }
 
 fn place_box_tab(
@@ -574,7 +446,9 @@ pub(super) fn resize_target(
         | Tool::Squiggly
         | Tool::Rect
         | Tool::Ellipse
-        | Tool::Line => false,
+        | Tool::Line
+        | Tool::Arrow
+        | Tool::Draw => false,
     };
     let radius = 16.0;
     if let Some(id) = selected {
@@ -594,40 +468,4 @@ pub(super) fn resize_target(
         }
     }
     None
-}
-
-#[cfg(test)]
-mod place_answer_tests {
-    use super::rect_beside_bounds;
-    use crate::geom::PdfRect;
-    use crate::pdf::PageInfo;
-
-    #[test]
-    fn beside_prefers_right_when_space_allows() {
-        let page = PageInfo {
-            x0: 0.0,
-            y0: 0.0,
-            x1: 600.0,
-            y1: 800.0,
-        };
-        let bounds = PdfRect::new(40.0, 100.0, 120.0, 140.0);
-        let rect = rect_beside_bounds(bounds, &page, 200.0, 30.0);
-        assert!((rect.x0 - 128.0).abs() < f32::EPSILON);
-        assert!((rect.y0 - 100.0).abs() < f32::EPSILON);
-        assert!((rect.width() - 200.0).abs() < f32::EPSILON);
-    }
-
-    #[test]
-    fn beside_falls_below_when_right_overflows() {
-        let page = PageInfo {
-            x0: 0.0,
-            y0: 0.0,
-            x1: 200.0,
-            y1: 800.0,
-        };
-        let bounds = PdfRect::new(40.0, 100.0, 180.0, 140.0);
-        let rect = rect_beside_bounds(bounds, &page, 200.0, 30.0);
-        assert!((rect.x0 - 0.0).abs() < f32::EPSILON);
-        assert!((rect.y0 - 148.0).abs() < f32::EPSILON);
-    }
 }

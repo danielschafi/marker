@@ -246,7 +246,7 @@ pub fn page_text(glyphs: &[crate::annot::Glyph]) -> String {
     if glyphs.is_empty() {
         return String::new();
     }
-    crate::assistant::reconstruct_text(glyphs, 0, glyphs.len() - 1)
+    crate::page_text::reconstruct_text(glyphs, 0, glyphs.len() - 1)
 }
 
 #[cfg(test)]

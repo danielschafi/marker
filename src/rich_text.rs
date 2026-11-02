@@ -436,4 +436,33 @@ mod tests {
         assert_eq!(*baseline_pt, Some(6.0));
         assert!((*y - 2.0).abs() < 0.05, "aligned y={y}");
     }
+
+    #[test]
+    fn inline_math_near_text_metrics_keeps_line_height() {
+        // After #83's tight Typst margin, a simple island is ~font-size tall.
+        // Centering it on the prose line must not open a gap to the next line.
+        let measure = Fixed { em: 0.5 };
+        let size = 10.0;
+        let line_height = size * 1.25;
+        let runs = layout_rich_text(
+            "a $x$\nb",
+            size,
+            200.0,
+            &measure,
+            &metrics(8.0, size + 2.0, None),
+        );
+        let mut prose_y = Vec::new();
+        for run in &runs {
+            if let LaidRun::Prose { text, y, .. } = run {
+                prose_y.push((text.as_str(), *y));
+            }
+        }
+        assert_eq!(prose_y[0].0, "a ");
+        assert_eq!(prose_y.last().map(|p| p.0), Some("b"));
+        let gap = prose_y.last().unwrap().1 - prose_y[0].1;
+        assert!(
+            (gap - line_height).abs() < 0.05,
+            "expected ~{line_height} between lines, got {gap} ({prose_y:?})"
+        );
+    }
 }

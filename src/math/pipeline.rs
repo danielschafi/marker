@@ -23,8 +23,6 @@ use super::{
 /// Trailing debounce before a queued keystroke fires a render request.
 const DEADLINE_DEBOUNCE: Duration = Duration::from_millis(40);
 
-/// Point size used for math inside finished assistant turns (ST7).
-pub const ASSISTANT_MATH_SIZE: f32 = 14.0;
 
 /// Ready payload for [`super::MathCache`]. The SVG stays so a later zoom can re-raster.
 pub struct InlineReady {
@@ -283,6 +281,7 @@ impl MathPipeline {
                     | AnnotKind::Markup { .. }
                     | AnnotKind::Note { .. }
                     | AnnotKind::Shape { .. }
+                    | AnnotKind::Ink { .. }
                     | AnnotKind::Image { .. }
                     | AnnotKind::Foreign { .. } => {}
                 }
@@ -485,43 +484,6 @@ impl MathPipeline {
         }
     }
 
-    /// Enqueue a background preview for math in an assistant answer.
-    ///
-    /// Keys the LT0 cache with no annotation id (`id = 0`) and never asks for
-    /// PDF bytes — these textures are UI-only and must not land in the document.
-    pub fn request_answer_math(
-        &mut self,
-        doc_id: DocId,
-        source: String,
-        display: bool,
-        color: Rgb,
-    ) {
-        if source.trim().is_empty() {
-            return;
-        }
-        let size = ASSISTANT_MATH_SIZE;
-        let key = MathKey::new(&source, display, size, color);
-        if self.cache.get(&key).is_some() {
-            return;
-        }
-        self.seq += 1;
-        let req = self.seq;
-        let span_key = math_spans::span_key(&key.source, display);
-        self.cache.insert_pending(key, req);
-        self.worker.request_span(
-            doc_id,
-            0,
-            Some(span_key),
-            req,
-            source,
-            size,
-            color,
-            display,
-            MathLane::Background,
-            false,
-        );
-    }
-
     pub fn request_inline_reraster(
         &mut self,
         doc_id: DocId,
@@ -688,6 +650,7 @@ impl MathPipeline {
                 | AnnotKind::Markup { .. }
                 | AnnotKind::Note { .. }
                 | AnnotKind::Shape { .. }
+                | AnnotKind::Ink { .. }
                 | AnnotKind::Image { .. }
                 | AnnotKind::Foreign { .. } => {}
             }

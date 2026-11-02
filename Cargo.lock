@@ -1356,42 +1356,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui_commonmark"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5246a4e9b83c345ec8230933bd0dca16d1c3c11db0edd4fd9c1a90683240b49"
-dependencies = [
- "egui",
- "egui_commonmark_backend",
- "egui_extras",
- "pulldown-cmark",
-]
-
-[[package]]
-name = "egui_commonmark_backend"
-version = "0.22.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3cff846279556f57af8ea606f2e4ceaf83e60b81db014c126dfb926fa06c75b"
-dependencies = [
- "egui",
- "egui_extras",
- "pulldown-cmark",
-]
-
-[[package]]
-name = "egui_extras"
-version = "0.33.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d01d34e845f01c62e3fded726961092e70417d66570c499b9817ab24674ca4ed"
-dependencies = [
- "ahash 0.8.12",
- "egui",
- "enum-map",
- "log",
- "profiling",
-]
-
-[[package]]
 name = "egui_glow"
 version = "0.33.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1437,26 +1401,6 @@ name = "endi"
 version = "1.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "66b7e2430c6dff6a955451e2cfc438f09cea1965a9d6f87f7e3b90decc014099"
-
-[[package]]
-name = "enum-map"
-version = "2.7.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6866f3bfdf8207509a033af1a75a7b08abda06bbaaeae6669323fd5a097df2e9"
-dependencies = [
- "enum-map-derive",
-]
-
-[[package]]
-name = "enum-map-derive"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f282cfdfe92516eb26c2af8589c274c7c17681f5ecc03c18255fe741c6aa64eb"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 2.0.119",
-]
 
 [[package]]
 name = "enum-ordinalize"
@@ -2942,7 +2886,6 @@ dependencies = [
  "directories",
  "eframe",
  "egui",
- "egui_commonmark",
  "image",
  "libc",
  "mitex",
@@ -2950,7 +2893,6 @@ dependencies = [
  "resvg",
  "rfd",
  "serde",
- "serde_json",
  "thiserror 2.0.21",
  "toml 0.9.12+spec-1.1.0",
  "typst",
@@ -4032,17 +3974,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 1.0.109",
-]
-
-[[package]]
-name = "pulldown-cmark"
-version = "0.13.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e9f068eba8e7071c5f9511831b44f32c740d5adf574e990f946ddb53db2f314e"
-dependencies = [
- "bitflags 2.13.2",
- "memchr",
- "unicase",
 ]
 
 [[package]]
@@ -5738,12 +5669,6 @@ dependencies = [
  "syn 2.0.119",
  "unic-langid-impl",
 ]
-
-[[package]]
-name = "unicase"
-version = "2.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbc4bc3a9f746d862c45cb89d705aa10f187bb96c76001afab07a0d35ce60142"
 
 [[package]]
 name = "unicode-bidi"

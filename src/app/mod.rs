@@ -8,11 +8,7 @@ use std::time::{Duration, Instant};
 use egui::ViewportCommand;
 
 use crate::annot::{AnnotKind, Annotation};
-use crate::assistant::{
-    assistant_configured, AssistantAttachment, AssistantWorker, CaptureMode, GENERATE_CARDS_PROMPT,
-    MAX_TEXT_CHARS,
-};
-use crate::geom::{PdfPoint, PdfRect, Rgb};
+use crate::geom::{PdfPoint, PdfRect};
 use crate::instance::IpcInbox;
 use crate::math::MathPipeline;
 use crate::pdf::{DocId, PdfReply, PdfWorker};
@@ -22,7 +18,6 @@ use crate::ui;
 use crate::undo::{Direction, PageOpKind, StepOutcome, UndoEntry};
 use crate::view::{self, viewport};
 use crate::worker::EguiWake;
-use egui_commonmark::CommonMarkCache;
 
 /// Identity of one open tab in the strip (stable across reorders / closes).
 ///
@@ -63,12 +58,6 @@ pub(crate) struct MarkerApp {
     pub(crate) zen: bool,
     /// Keep chrome visible briefly after the pointer leaves the top reveal strip.
     zen_chrome_until: Option<Instant>,
-    /// Learning assistant panel (closed on launch).
-    pub(crate) assistant_open: bool,
-    /// Temporary capture mode for assistant attachments.
-    pub(crate) capture: CaptureMode,
-    /// Shared cache for assistant Markdown rendering (issue #26).
-    pub(crate) assistant_md_cache: CommonMarkCache,
     /// `?` shortcut cheat sheet window.
     pub(crate) cheatsheet_open: bool,
     /// Named highlight preset editor (Colors chrome button).
@@ -80,7 +69,6 @@ pub(crate) struct MarkerApp {
     worker: PdfWorker,
     /// Cache, deadlines, scan stamps, and Typst worker behind one interface.
     pub(crate) math: MathPipeline,
-    assistant: AssistantWorker,
     next_doc_id: DocId,
     next_tab_id: TabId,
     dialog_tx: Sender<DialogReply>,
@@ -109,8 +97,6 @@ pub(crate) struct MarkerApp {
     tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
     /// Latest wanted thumbnail pages per document id (read by the pdf worker).
     thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
-    /// Generated Anki CSV waiting for the cards save dialog (ST3).
-    pending_generated_csv: Option<(DocId, String)>,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -145,7 +131,7 @@ pub(crate) enum TabListState {
 }
 
 /// Where a dragged tab would land relative to the viewport.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SplitDropZone {
     Left,
     Right,
@@ -157,9 +143,25 @@ pub(crate) enum SplitDropZone {
     ActivePane,
     /// Pair with this tab (drop on a row in the open-tabs list).
     Tab(TabId),
+    /// Center of an unsplitted viewport: open beside the partner.
+    Center,
 }
 
-mod assistant;
+impl SplitDropZone {
+    pub(crate) fn tab_target(self) -> Option<TabId> {
+        match self {
+            SplitDropZone::Tab(id) => Some(id),
+            SplitDropZone::Left
+            | SplitDropZone::Right
+            | SplitDropZone::Top
+            | SplitDropZone::Bottom
+            | SplitDropZone::OtherPane
+            | SplitDropZone::ActivePane
+            | SplitDropZone::Center => None,
+        }
+    }
+}
+
 mod input;
 mod math_jobs;
 mod replies;
@@ -167,7 +169,6 @@ mod save;
 mod state;
 mod tabs;
 pub(crate) use input::{ShortcutSection, SHORTCUTS};
-pub(crate) use math_jobs::upload_png_texture;
 pub(crate) use replies::trim_tab_tiles;
 pub(crate) use state::*;
 
@@ -247,9 +248,7 @@ fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
         pinned.push(sel.page);
     }
     let drag_page = match &tab.drag {
-        Some(Drag::Highlight { page, .. })
-        | Some(Drag::TextSelect { page, .. })
-        | Some(Drag::LearningSelect { page, .. }) => Some(*page),
+        Some(Drag::Highlight { page, .. }) | Some(Drag::TextSelect { page, .. }) => Some(*page),
         _ => None,
     };
     if let Some(page) = drag_page {
@@ -328,9 +327,6 @@ impl MarkerApp {
             page_focus: false,
             zen: false,
             zen_chrome_until: None,
-            assistant_open: false,
-            capture: CaptureMode::None,
-            assistant_md_cache: CommonMarkCache::default(),
             cheatsheet_open: false,
             preset_editor_open: false,
             settings_open: false,
@@ -341,8 +337,7 @@ impl MarkerApp {
                 Arc::clone(&tile_wanted),
                 Arc::clone(&thumb_wanted),
             ),
-            math: MathPipeline::spawn(Arc::clone(&wake)),
-            assistant: AssistantWorker::spawn(wake),
+            math: MathPipeline::spawn(wake),
             next_doc_id: DocId(1),
             next_tab_id: TabId(1),
             dialog_tx,
@@ -361,7 +356,6 @@ impl MarkerApp {
             tile_focus_tab: TabId(0),
             tile_wanted,
             thumb_wanted,
-            pending_generated_csv: None,
         };
         for path in paths {
             app.open_path(path);
@@ -565,13 +559,7 @@ impl MarkerApp {
 
     /// Export native highlights/markup as Anki-importable CSV (ST3).
     pub(crate) fn export_cards(&mut self) {
-        self.pending_generated_csv = None;
         self.begin_highlight_export(PendingExport::Cards);
-    }
-
-    /// Whether the optional "Generate cards" control should show (CLI on PATH).
-    pub(crate) fn assistant_is_configured(&self) -> bool {
-        assistant_configured()
     }
 
     fn begin_highlight_export(&mut self, kind: PendingExport) {
@@ -699,21 +687,8 @@ impl MarkerApp {
     }
 
     fn write_export_cards(&mut self, doc_id: DocId, path: PathBuf) {
-        let csv = if let Some((pending_doc_id, body)) = self.pending_generated_csv.take() {
-            if pending_doc_id == doc_id {
-                body
-            } else {
-                self.pending_generated_csv = Some((pending_doc_id, body));
-                match self.cards_csv_for_tab(doc_id) {
-                    Some(csv) => csv,
-                    None => return,
-                }
-            }
-        } else {
-            match self.cards_csv_for_tab(doc_id) {
-                Some(csv) => csv,
-                None => return,
-            }
+        let Some(csv) = self.cards_csv_for_tab(doc_id) else {
+            return;
         };
         match std::fs::write(&path, csv) {
             Ok(()) => self.error = None,
@@ -738,102 +713,6 @@ impl MarkerApp {
             &tab.doc.glyphs,
             &self.settings.highlight_presets,
         ))
-    }
-
-    /// Ask the assistant for Q/A cards from the current selection (ST3).
-    ///
-    /// Uses the existing bundle + fixed prompt. Does not force agent mode on.
-    /// On completion, parses a fenced TSV; failure leaves the raw reply visible
-    /// and skips writing a file.
-    pub(crate) fn generate_cards_from_selection(&mut self) {
-        if !assistant_configured() {
-            return;
-        }
-        self.set_assistant_open(true);
-        if let Some(tab) = self.tab_mut() {
-            tab.pending_study = None;
-            tab.assistant.pending_cards_parse = None;
-        }
-        if let Some((page, raw)) = self.study_selection_text() {
-            self.apply_generate_cards(page, &raw);
-            return;
-        }
-        if let Some(tab) = self.tab_mut() {
-            tab.assistant.error = Some("Select text before generating cards.".into());
-        }
-    }
-
-    fn apply_generate_cards(&mut self, page: usize, raw: &str) {
-        {
-            let Some(tab) = self.tab_mut() else {
-                return;
-            };
-            if raw.trim().is_empty() {
-                tab.assistant.error = Some("Selection has no text.".into());
-                return;
-            }
-            if tab.assistant.streaming {
-                tab.assistant.error = Some("Wait for the current reply to finish.".into());
-                return;
-            }
-            let (text, truncated) = crate::assistant::truncate_text(raw, MAX_TEXT_CHARS);
-            tab.assistant
-                .attachments
-                .retain(|a| !matches!(a, AssistantAttachment::Text { .. }));
-            tab.assistant.attachments.push(AssistantAttachment::Text {
-                page,
-                text,
-                truncated,
-            });
-            tab.assistant.draft = GENERATE_CARDS_PROMPT.to_string();
-            tab.assistant.error = None;
-            tab.assistant.status_line = None;
-            // Do not force agent mode on — leave the user's checkbox as-is.
-            tab.assistant.pending_cards_parse = Some(page);
-        }
-        self.assistant_send();
-        // Disclosure / empty-send failures leave streaming false — drop the parse flag.
-        if let Some(tab) = self.tab_mut() {
-            if !tab.assistant.streaming {
-                tab.assistant.pending_cards_parse = None;
-            }
-        }
-    }
-
-    fn finish_generated_cards(&mut self, doc_id: DocId, page: usize, reply: &str) {
-        match crate::export::parse_cards_tsv_fence(reply) {
-            Ok(cards) => {
-                let n = cards.len();
-                let doc_name = {
-                    let Some(tab) = self.tab_by_doc_id(doc_id) else {
-                        return;
-                    };
-                    tab.doc
-                        .path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("document.pdf")
-                        .to_owned()
-                };
-                let source = format!("{doc_name}#page={}", page + 1);
-                let csv = crate::export::generated_cards_to_csv(&cards, "generated", &source);
-                self.pending_generated_csv = Some((doc_id, csv));
-                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
-                    tab.assistant.status_line =
-                        Some(format!("Parsed {n} card(s) — choose a save location."));
-                    tab.assistant.error = None;
-                }
-                self.open_export_dialog_for(doc_id, PendingExport::Cards);
-            }
-            Err(err) => {
-                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
-                    tab.assistant.error = Some(format!(
-                        "Could not parse card TSV ({err}). Raw reply is above; no file written."
-                    ));
-                    tab.assistant.status_line = None;
-                }
-            }
-        }
     }
 
     pub(crate) fn fit_width(&mut self) {
@@ -1012,7 +891,7 @@ impl MarkerApp {
         let tab = self.tab()?;
         if let Some(sel) = &tab.text_sel {
             let glyphs = tab.doc.glyphs.get(&sel.page)?;
-            let text = crate::assistant::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi);
+            let text = crate::page_text::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi);
             if !text.trim().is_empty() {
                 return Some(text);
             }
@@ -1023,9 +902,9 @@ impl MarkerApp {
             match &annot.kind {
                 AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
                     let glyphs = tab.doc.glyphs.get(&annot.page)?;
-                    let indices = crate::assistant::glyphs_intersecting_rects(glyphs, quads);
+                    let indices = crate::page_text::glyphs_intersecting_rects(glyphs, quads);
                     let (&lo, &hi) = (indices.first()?, indices.last()?);
-                    let text = crate::assistant::reconstruct_text(glyphs, lo, hi);
+                    let text = crate::page_text::reconstruct_text(glyphs, lo, hi);
                     if !text.trim().is_empty() {
                         return Some(text);
                     }
@@ -1039,6 +918,7 @@ impl MarkerApp {
                 | AnnotKind::Note { .. }
                 | AnnotKind::Math { .. }
                 | AnnotKind::Shape { .. }
+                | AnnotKind::Ink { .. }
                 | AnnotKind::Image { .. }
                 | AnnotKind::Foreign { .. } => {}
             }
@@ -1052,8 +932,22 @@ impl MarkerApp {
         let glyphs = tab.doc.glyphs.get(&page)?;
         let index = crate::annot::glyph_at(glyphs, point)?;
         let (lo, hi) = crate::annot::word_range(glyphs, index)?;
-        let text = crate::assistant::reconstruct_text(glyphs, lo, hi);
+        let text = crate::page_text::reconstruct_text(glyphs, lo, hi);
         (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Open DuckDuckGo for the current page/highlight/text selection.
+    pub(crate) fn lookup_selection_in_browser(&mut self) {
+        let Some(query) = self.copyable_selection_text() else {
+            return;
+        };
+        let query = query.trim();
+        if query.is_empty() {
+            return;
+        }
+        let encoded = crate::platform::urlencoding_minimal(query);
+        let url = format!("https://duckduckgo.com/?q={encoded}");
+        let _ = crate::platform::open_browser(&url);
     }
 
     pub(crate) fn delete_selected(&mut self) {
@@ -1156,17 +1050,28 @@ impl MarkerApp {
         self.settings_open = !self.settings_open;
     }
 
-    /// Clear annotation selection, style bar, and assistant learning selection.
+    /// Re-selecting a markup or shape tool restores that family's factory color (#85).
+    /// Text / note / math ink stays sticky on purpose.
+    pub(crate) fn restore_default_tool_color(&mut self, tool: Tool) {
+        let changed = if tool.is_text_mark() {
+            self.settings.restore_default_highlight_color()
+        } else if tool.is_shape() {
+            self.settings.restore_default_shape_color()
+        } else {
+            false
+        };
+        if changed {
+            self.settings.save();
+        }
+    }
+
+    /// Clear annotation selection and style bar.
     pub(crate) fn clear_page_selection(&mut self) {
         if let Some(tab) = self.tab_mut() {
             tab.selected.clear();
             tab.text_sel = None;
             tab.editing = None;
             tab.style_bar = None;
-            tab.assistant.learning = None;
-        }
-        if self.capture == CaptureMode::LearningText {
-            // Keep capture mode so the user can re-drag; only clear the committed selection.
         }
     }
 }
@@ -1241,8 +1146,6 @@ impl eframe::App for MarkerApp {
                     || !tab.thumbs_inflight.is_empty()
                     || tab.search.pending
                     || tab.pending_export.is_some()
-                    || tab.assistant.streaming
-                    || tab.assistant.pending_crop.is_some()
             });
         if interacting {
             let focused = ctx.input(|input| input.focused);
@@ -1268,9 +1171,6 @@ impl eframe::App for MarkerApp {
 }
 
 impl MarkerApp {
-    /// Point size used for math inside finished assistant turns (ST7).
-    pub(crate) const ASSISTANT_MATH_SIZE: f32 = crate::math::ASSISTANT_MATH_SIZE;
-
     pub(crate) fn dispatch_tiles(&mut self, pixels_per_point: f32) {
         if let Some(index) = self.tab_index(self.active) {
             self.dispatch_tiles_at(index, self.view_rect, pixels_per_point);

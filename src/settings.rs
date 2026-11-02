@@ -247,6 +247,38 @@ impl Settings {
 
     pub fn reset_highlight_presets(&mut self) {
         self.highlight_presets = default_highlight_presets();
+        // Resetting named presets also restores the active highlight swatch (#85).
+        let _ = self.restore_default_highlight_color();
+    }
+
+    /// Factory yellow used for new marks when the user has not picked another swatch.
+    pub fn default_highlight_color() -> Rgb {
+        Self::default().highlight_color
+    }
+
+    /// Factory blue used for new shapes when the user has not picked another swatch.
+    pub fn default_shape_color() -> Rgb {
+        Self::default().shape_color
+    }
+
+    /// Restore the factory highlight color. Returns `true` when the value changed.
+    pub fn restore_default_highlight_color(&mut self) -> bool {
+        let default = Self::default_highlight_color();
+        if self.highlight_color == default {
+            return false;
+        }
+        self.highlight_color = default;
+        true
+    }
+
+    /// Restore the factory shape stroke color. Returns `true` when the value changed.
+    pub fn restore_default_shape_color(&mut self) -> bool {
+        let default = Self::default_shape_color();
+        if self.shape_color == default {
+            return false;
+        }
+        self.shape_color = default;
+        true
     }
 
     fn clamp_highlight_presets(&mut self) {
@@ -516,6 +548,47 @@ mod tests {
         assert!(!again.tool_visible("ellipse"));
         assert!(!again.tool_visible("line"));
         cleanup(&dir);
+    }
+
+    #[test]
+    fn restore_default_highlight_and_shape_colors() {
+        let mut settings = Settings {
+            highlight_color: HIGHLIGHT_COLORS[2],
+            shape_color: INK_COLORS[0],
+            text_color: INK_COLORS[1],
+            ..Settings::default()
+        };
+        assert!(settings.restore_default_highlight_color());
+        assert_eq!(
+            settings.highlight_color,
+            Settings::default_highlight_color()
+        );
+        assert!(!settings.restore_default_highlight_color());
+
+        assert!(settings.restore_default_shape_color());
+        assert_eq!(settings.shape_color, Settings::default_shape_color());
+        assert!(!settings.restore_default_shape_color());
+
+        // Text / note ink is intentionally sticky (#85).
+        assert_eq!(settings.text_color, INK_COLORS[1]);
+    }
+
+    #[test]
+    fn reset_highlight_presets_restores_active_swatch() {
+        let mut settings = Settings {
+            highlight_color: HIGHLIGHT_COLORS[3],
+            highlight_presets: vec![HighlightPreset {
+                name: "Only".into(),
+                rgb: HIGHLIGHT_COLORS[3],
+            }],
+            ..Settings::default()
+        };
+        settings.reset_highlight_presets();
+        assert_eq!(settings.highlight_presets, default_highlight_presets());
+        assert_eq!(
+            settings.highlight_color,
+            Settings::default_highlight_color()
+        );
     }
 
     #[test]

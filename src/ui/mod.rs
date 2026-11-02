@@ -1456,9 +1456,8 @@ fn brand_family() -> FontFamily {
     FontFamily::Name(BRAND_FAMILY.into())
 }
 
-/// Vector brand mark (page + highlighter), matching `packaging/marker.svg`.
+/// Vector brand mark (highlighter on squircle), matching `packaging/marker.svg`.
 pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
-    let colors = palette(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(Vec2::splat(size), Sense::hover());
     let painter = ui.painter();
     let radius = (size * 0.22).clamp(6.0, 18.0);
@@ -1468,49 +1467,59 @@ pub(crate) fn brand_mark(ui: &mut egui::Ui, size: f32) {
     };
     painter.rect_filled(rect, CornerRadius::same(radius as u8), chassis);
 
-    let page = Rect::from_min_max(
-        Pos2::new(rect.left() + size * 0.27, rect.top() + size * 0.17),
-        Pos2::new(rect.left() + size * 0.73, rect.top() + size * 0.83),
-    );
-    painter.rect_filled(
-        page,
-        CornerRadius::same((size * 0.05).clamp(2.0, 6.0) as u8),
-        Color32::from_rgb(251, 250, 246),
+    // Soft ink bloom under the tip.
+    painter.circle_filled(
+        Pos2::new(rect.left() + size * 0.62, rect.top() + size * 0.76),
+        size * 0.12,
+        Color32::from_rgba_unmultiplied(240, 191, 58, 46),
     );
 
-    // Accent dog-ear / tab.
-    let accent = [
-        Pos2::new(page.left() - size * 0.04, page.top() + size * 0.04),
-        Pos2::new(page.left() + size * 0.14, page.top() + size * 0.04),
-        Pos2::new(page.left() - size * 0.04, page.top() + size * 0.22),
+    // Approximate the diagonal highlighter with convex polys (tip NE → end SW).
+    let barrel = [
+        Pos2::new(rect.left() + size * 0.22, rect.top() + size * 0.62),
+        Pos2::new(rect.left() + size * 0.62, rect.top() + size * 0.34),
+        Pos2::new(rect.left() + size * 0.70, rect.top() + size * 0.46),
+        Pos2::new(rect.left() + size * 0.30, rect.top() + size * 0.74),
     ];
     painter.add(egui::Shape::convex_polygon(
-        accent.to_vec(),
-        colors.accent,
-        Stroke::NONE,
-    ));
-
-    // Highlighter stroke across the page.
-    let mark = [
-        Pos2::new(rect.left() + size * 0.20, rect.top() + size * 0.70),
-        Pos2::new(rect.left() + size * 0.72, rect.top() + size * 0.36),
-        Pos2::new(rect.left() + size * 0.80, rect.top() + size * 0.44),
-        Pos2::new(rect.left() + size * 0.28, rect.top() + size * 0.78),
-    ];
-    painter.add(egui::Shape::convex_polygon(
-        mark.to_vec(),
+        barrel.to_vec(),
         Color32::from_rgb(240, 191, 58),
         Stroke::NONE,
     ));
+
+    let ferrule = [
+        Pos2::new(rect.left() + size * 0.60, rect.top() + size * 0.33),
+        Pos2::new(rect.left() + size * 0.67, rect.top() + size * 0.28),
+        Pos2::new(rect.left() + size * 0.75, rect.top() + size * 0.40),
+        Pos2::new(rect.left() + size * 0.68, rect.top() + size * 0.45),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        ferrule.to_vec(),
+        Color32::from_rgb(232, 220, 180),
+        Stroke::NONE,
+    ));
+
     let tip = [
-        Pos2::new(rect.left() + size * 0.70, rect.top() + size * 0.33),
-        Pos2::new(rect.left() + size * 0.82, rect.top() + size * 0.42),
-        Pos2::new(rect.left() + size * 0.77, rect.top() + size * 0.47),
-        Pos2::new(rect.left() + size * 0.65, rect.top() + size * 0.38),
+        Pos2::new(rect.left() + size * 0.66, rect.top() + size * 0.27),
+        Pos2::new(rect.left() + size * 0.80, rect.top() + size * 0.18),
+        Pos2::new(rect.left() + size * 0.86, rect.top() + size * 0.26),
+        Pos2::new(rect.left() + size * 0.74, rect.top() + size * 0.40),
     ];
     painter.add(egui::Shape::convex_polygon(
         tip.to_vec(),
         Color32::from_rgb(255, 246, 210),
+        Stroke::NONE,
+    ));
+
+    let endcap = [
+        Pos2::new(rect.left() + size * 0.16, rect.top() + size * 0.60),
+        Pos2::new(rect.left() + size * 0.24, rect.top() + size * 0.55),
+        Pos2::new(rect.left() + size * 0.32, rect.top() + size * 0.67),
+        Pos2::new(rect.left() + size * 0.24, rect.top() + size * 0.72),
+    ];
+    painter.add(egui::Shape::convex_polygon(
+        endcap.to_vec(),
+        Color32::from_rgb(184, 130, 28),
         Stroke::NONE,
     ));
 }

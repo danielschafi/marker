@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::app::TileKey;
 
 use super::DocId;
+use super::Error;
 use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
 
@@ -101,6 +102,11 @@ enum ReadJob {
     Shutdown,
 }
 
+/// Worker → UI replies.
+///
+/// Error payloads stay `String` here (RF6): engine work uses [`Error`], and this
+/// module converts via [`Display`](std::fmt::Display) at the send boundary so
+/// `app.rs` (owned by RF5) does not need to change yet.
 pub enum PdfReply {
     Opened(OpenedDoc),
     /// `tile.pixels` are premultiplied RGBA8 (see [`TileImage::pixels`]).
@@ -132,6 +138,7 @@ pub enum PdfReply {
     Crop {
         doc_id: DocId,
         seq: u64,
+        /// Stringly error at the reply boundary; see [`PdfReply`] module note.
         result: Result<CropImage, String>,
     },
     Search {
@@ -142,12 +149,14 @@ pub enum PdfReply {
     },
     Saved {
         doc_id: DocId,
+        /// Stringly error at the reply boundary; see [`PdfReply`] module note.
         result: Result<Vec<SavedXref>, String>,
     },
     /// Successful Save As retargets the open document onto `path`.
     SavedAs {
         doc_id: DocId,
         path: PathBuf,
+        /// Stringly error at the reply boundary; see [`PdfReply`] module note.
         result: Result<Vec<SavedXref>, String>,
     },
     PageInserted {
@@ -358,12 +367,17 @@ fn reply(ctx: &egui::Context, replies: &Sender<PdfReply>, msg: PdfReply) {
 }
 
 impl PdfReply {
-    fn failed(doc_id: DocId, message: impl Into<String>) -> Self {
+    fn failed(doc_id: DocId, err: impl std::fmt::Display) -> Self {
         Self::Failed {
             doc_id: Some(doc_id),
-            message: message.into(),
+            message: err.to_string(),
         }
     }
+}
+
+/// Map engine [`Error`] to the stringly [`PdfReply`] boundary.
+fn reply_err(err: Error) -> String {
+    err.to_string()
 }
 
 fn engine_mut(
@@ -372,7 +386,7 @@ fn engine_mut(
 ) -> Result<&mut DocumentEngine, PdfReply> {
     engines
         .get_mut(&doc_id)
-        .ok_or_else(|| PdfReply::failed(doc_id, "No document is open."))
+        .ok_or_else(|| PdfReply::failed(doc_id, Error::NoDocument))
 }
 
 struct WorkerCtx<'a> {
@@ -488,8 +502,8 @@ fn handle_crop(
     dpi: f32,
 ) {
     let result = match engine_mut(ctx.engines, doc_id) {
-        Ok(engine) => engine.render_crop_png(page, rect, dpi),
-        Err(_) => Err("No document is open.".into()),
+        Ok(engine) => engine.render_crop_png(page, rect, dpi).map_err(reply_err),
+        Err(_) => Err(reply_err(Error::NoDocument)),
     };
     ctx.send(PdfReply::Crop {
         doc_id,
@@ -503,11 +517,11 @@ fn handle_save(ctx: &mut WorkerCtx<'_>, doc_id: DocId, snapshot: SaveSnapshot) {
     let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => PdfReply::Saved {
             doc_id,
-            result: engine.save(&snapshot),
+            result: engine.save(&snapshot).map_err(reply_err),
         },
         Err(_) => PdfReply::Saved {
             doc_id,
-            result: Err("No document is open.".into()),
+            result: Err(reply_err(Error::NoDocument)),
         },
     };
     reopen_reader(ctx.reads, doc_id);
@@ -518,7 +532,7 @@ fn handle_save_as(ctx: &mut WorkerCtx<'_>, doc_id: DocId, path: PathBuf, snapsho
     release_reader(ctx.reads, doc_id);
     let reply = match engine_mut(ctx.engines, doc_id) {
         Ok(engine) => {
-            let result = engine.save_as(&snapshot, &path);
+            let result = engine.save_as(&snapshot, &path).map_err(reply_err);
             // Reader still holds the old path; retarget while suspended so reopen
             // loads the copy we just wrote.
             if result.is_ok() {
@@ -536,7 +550,7 @@ fn handle_save_as(ctx: &mut WorkerCtx<'_>, doc_id: DocId, path: PathBuf, snapsho
         Err(_) => PdfReply::SavedAs {
             doc_id,
             path,
-            result: Err("No document is open.".into()),
+            result: Err(reply_err(Error::NoDocument)),
         },
     };
     reopen_reader(ctx.reads, doc_id);
@@ -855,7 +869,7 @@ fn flush_deferred(state: &mut ReaderState, queued: &mut VecDeque<ReadJob>, doc_i
     }
 }
 
-fn open_engine(path: &Path) -> Result<DocumentEngine, String> {
+fn open_engine(path: &Path) -> Result<DocumentEngine, Error> {
     match DocumentEngine::open(path) {
         Ok(loaded) => Ok(loaded.engine),
         Err(_) => {

@@ -14,6 +14,7 @@ impl std::fmt::Display for DocId {
 }
 
 pub use engine::{
-    CropImage, InlineMathSave, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage, TILE_PX,
+    CropImage, Error, InlineMathSave, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage,
+    TILE_PX,
 };
 pub use worker::{PdfReply, PdfWorker};

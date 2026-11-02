@@ -26,6 +26,36 @@ pub const TILE_PX: i32 = 1024;
 pub const THUMB_WIDTH_PX: f32 = 120.0;
 const LIST_CACHE: usize = 8;
 
+/// Typed PDF engine failures. Converted to [`String`] at the worker reply boundary
+/// (`PdfReply::{Failed,Crop,Saved,SavedAs}`) so the UI stays stringly until a later PR.
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Mupdf(#[from] mupdf::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("No document is open.")]
+    NoDocument,
+    #[error("Page is out of range.")]
+    PageOutOfRange { page: usize, count: usize },
+    #[error("image encode failed")]
+    Encode,
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&str> for Error {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct PageInfo {
     pub x0: f32,
@@ -130,19 +160,19 @@ pub struct DocumentEngine {
 }
 
 impl DocumentEngine {
-    pub fn open(path: &Path) -> Result<LoadedPdf, String> {
-        let doc = PdfDocument::open(path).map_err(show)?;
+    pub fn open(path: &Path) -> Result<LoadedPdf, Error> {
+        let doc = PdfDocument::open(path)?;
         if doc.needs_password().unwrap_or(false) {
             return Err("This PDF is password protected.".into());
         }
-        let count = doc.page_count().map_err(show)?;
+        let count = doc.page_count()?;
         if count <= 0 {
             return Err("This PDF has no readable pages. It may be damaged.".into());
         }
         let mut pages = Vec::with_capacity(count as usize);
         for index in 0..count {
-            let page = doc.load_pdf_page(index).map_err(show)?;
-            let bounds = page.bounds().map_err(show)?;
+            let page = doc.load_pdf_page(index)?;
+            let bounds = page.bounds()?;
             pages.push(PageInfo {
                 x0: bounds.x0,
                 y0: bounds.y0,
@@ -151,7 +181,7 @@ impl DocumentEngine {
             });
         }
         let outline = doc.outlines().map(convert_outline).unwrap_or_default();
-        let annotations = import_annotations(&doc).map_err(show)?;
+        let annotations = import_annotations(&doc)?;
         let opened_len = std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0);
         Ok(LoadedPdf {
             engine: Self {
@@ -176,18 +206,14 @@ impl DocumentEngine {
         &self.outline
     }
 
-    pub fn glyphs(&self, page: usize) -> Result<PageGlyphs, String> {
+    pub fn glyphs(&self, page: usize) -> Result<PageGlyphs, Error> {
         // Prefer a cached display list so we do not load the page again.
         if let Some(list) = self.lists.get(&page) {
-            let text = list
-                .to_text_page(TextPageFlags::ACCURATE_BBOXES)
-                .map_err(show)?;
+            let text = list.to_text_page(TextPageFlags::ACCURATE_BBOXES)?;
             return Ok(glyphs_from_structured(&text.structured()));
         }
-        let pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
-        let text = pdf_page
-            .to_text_page(TextPageFlags::ACCURATE_BBOXES)
-            .map_err(show)?;
+        let pdf_page = self.doc.load_pdf_page(page as i32)?;
+        let text = pdf_page.to_text_page(TextPageFlags::ACCURATE_BBOXES)?;
         Ok(glyphs_from_structured(&text.structured()))
     }
 
@@ -196,24 +222,17 @@ impl DocumentEngine {
         page: usize,
         needle: &str,
         case_sensitive: bool,
-    ) -> Result<Vec<PdfRect>, String> {
+    ) -> Result<Vec<PdfRect>, Error> {
         if needle.is_empty() || page >= self.pages.len() {
             return Ok(Vec::new());
         }
-        let pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
-        let text = pdf_page
-            .to_text_page(TextPageFlags::empty())
-            .map_err(show)?;
+        let pdf_page = self.doc.load_pdf_page(page as i32)?;
+        let text = pdf_page.to_text_page(TextPageFlags::empty())?;
         if case_sensitive {
             return Ok(search_structured_exact(&text.structured(), needle));
         }
         // MuPDF's TextPage::search folds case (FZ_SEARCH_IGNORE_CASE).
-        Ok(text
-            .search(needle)
-            .map_err(show)?
-            .into_iter()
-            .map(quad_bounds)
-            .collect())
+        Ok(text.search(needle)?.into_iter().map(quad_bounds).collect())
     }
 
     /// Rasterize one contents-only tile. Annotations stay in the overlay.
@@ -223,8 +242,11 @@ impl DocumentEngine {
         scale: f32,
         col: i32,
         row: i32,
-    ) -> Result<Option<TileImage>, String> {
-        let info = *self.pages.get(page).ok_or("Page is out of range.")?;
+    ) -> Result<Option<TileImage>, Error> {
+        let info = *self.pages.get(page).ok_or(Error::PageOutOfRange {
+            page,
+            count: self.pages.len(),
+        })?;
         let scale = scale.max(0.05);
         let (tx0, ty0, tx1, ty1) = tile_device_rect(info, scale, col, row);
         if tx1 <= tx0 || ty1 <= ty0 {
@@ -233,14 +255,11 @@ impl DocumentEngine {
 
         let ctm = Matrix::new_scale(scale, scale);
         let irect = IRect::new(tx0, ty0, tx1, ty1);
-        let mut pixmap =
-            Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false).map_err(show)?;
-        pixmap.clear_with(255).map_err(show)?;
-        let device = Device::from_pixmap(&pixmap).map_err(show)?;
+        let mut pixmap = Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false)?;
+        pixmap.clear_with(255)?;
+        let device = Device::from_pixmap(&pixmap)?;
         let scissor = Rect::new(tx0 as f32, ty0 as f32, tx1 as f32, ty1 as f32);
-        self.display_list(page)?
-            .run(&device, &ctm, scissor)
-            .map_err(show)?;
+        self.display_list(page)?.run(&device, &ctm, scissor)?;
         drop(device);
 
         let width = pixmap.width();
@@ -261,8 +280,11 @@ impl DocumentEngine {
 
     /// Rasterize a whole page at ~[`THUMB_WIDTH_PX`] wide for the side panel.
     /// Uses the same contents-only path as tiles; not stored in the tile cache.
-    pub fn render_thumb(&mut self, page: usize) -> Result<Option<ThumbImage>, String> {
-        let info = *self.pages.get(page).ok_or("Page is out of range.")?;
+    pub fn render_thumb(&mut self, page: usize) -> Result<Option<ThumbImage>, Error> {
+        let info = *self.pages.get(page).ok_or(Error::PageOutOfRange {
+            page,
+            count: self.pages.len(),
+        })?;
         let page_w = info.width().max(1.0);
         let scale = (THUMB_WIDTH_PX / page_w).max(0.05);
         let tx0 = (info.x0 * scale).floor() as i32;
@@ -275,14 +297,11 @@ impl DocumentEngine {
 
         let ctm = Matrix::new_scale(scale, scale);
         let irect = IRect::new(tx0, ty0, tx1, ty1);
-        let mut pixmap =
-            Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false).map_err(show)?;
-        pixmap.clear_with(255).map_err(show)?;
-        let device = Device::from_pixmap(&pixmap).map_err(show)?;
+        let mut pixmap = Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false)?;
+        pixmap.clear_with(255)?;
+        let device = Device::from_pixmap(&pixmap)?;
         let scissor = Rect::new(tx0 as f32, ty0 as f32, tx1 as f32, ty1 as f32);
-        self.display_list(page)?
-            .run(&device, &ctm, scissor)
-            .map_err(show)?;
+        self.display_list(page)?.run(&device, &ctm, scissor)?;
         drop(device);
 
         let width = pixmap.width();
@@ -302,8 +321,11 @@ impl DocumentEngine {
         page: usize,
         rect: PdfRect,
         dpi: f32,
-    ) -> Result<CropImage, String> {
-        let info = *self.pages.get(page).ok_or("Page is out of range.")?;
+    ) -> Result<CropImage, Error> {
+        let info = *self.pages.get(page).ok_or(Error::PageOutOfRange {
+            page,
+            count: self.pages.len(),
+        })?;
         let rect = crate::assistant::clamp_crop_rect(rect, info);
         if rect.is_empty() {
             return Err("Crop region is empty.".into());
@@ -319,14 +341,11 @@ impl DocumentEngine {
 
         let ctm = Matrix::new_scale(scale, scale);
         let irect = IRect::new(tx0, ty0, tx1, ty1);
-        let mut pixmap =
-            Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false).map_err(show)?;
-        pixmap.clear_with(255).map_err(show)?;
-        let device = Device::from_pixmap(&pixmap).map_err(show)?;
+        let mut pixmap = Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false)?;
+        pixmap.clear_with(255)?;
+        let device = Device::from_pixmap(&pixmap)?;
         let scissor = Rect::new(tx0 as f32, ty0 as f32, tx1 as f32, ty1 as f32);
-        self.display_list(page)?
-            .run(&device, &ctm, scissor)
-            .map_err(show)?;
+        self.display_list(page)?.run(&device, &ctm, scissor)?;
         drop(device);
 
         let width = pixmap.width();
@@ -334,7 +353,10 @@ impl DocumentEngine {
         let pixels = rgba_from_pixmap(&pixmap);
         let png = encode_png(&pixels, width, height)?;
         if png.len() > crate::assistant::CROP_MAX_PNG_BYTES {
-            return Err(format!("Crop PNG is too large ({} bytes).", png.len()));
+            return Err(Error::Message(format!(
+                "Crop PNG is too large ({} bytes).",
+                png.len()
+            )));
         }
         Ok(CropImage {
             page,
@@ -345,7 +367,7 @@ impl DocumentEngine {
         })
     }
 
-    pub fn save(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, String> {
+    pub fn save(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, Error> {
         let saved = (|| {
             let mut xrefs = self.apply(snapshot)?;
             if self.persist()? {
@@ -371,7 +393,7 @@ impl DocumentEngine {
         &mut self,
         snapshot: &SaveSnapshot,
         new_path: &Path,
-    ) -> Result<Vec<SavedXref>, String> {
+    ) -> Result<Vec<SavedXref>, Error> {
         let old_path = self.path.clone();
         let same = paths_equal(&old_path, new_path);
         let saved = (|| {
@@ -399,7 +421,7 @@ impl DocumentEngine {
 
     /// Insert a blank page after `after` (0-based). Returns the new page index.
     /// Size matches `after` when present, otherwise the first page / A4.
-    pub fn insert_blank_page(&mut self, after: usize) -> Result<(usize, Vec<PageInfo>), String> {
+    pub fn insert_blank_page(&mut self, after: usize) -> Result<(usize, Vec<PageInfo>), Error> {
         let at = if self.pages.is_empty() {
             0
         } else {
@@ -409,7 +431,7 @@ impl DocumentEngine {
     }
 
     /// Insert a blank page at `at` (0-based). Returns the new page index.
-    pub fn insert_blank_page_at(&mut self, at: usize) -> Result<(usize, Vec<PageInfo>), String> {
+    pub fn insert_blank_page_at(&mut self, at: usize) -> Result<(usize, Vec<PageInfo>), Error> {
         let template = self
             .pages
             .get(at.saturating_sub(1).min(self.pages.len().saturating_sub(1)))
@@ -423,7 +445,7 @@ impl DocumentEngine {
             });
         let at = at.min(self.pages.len());
         let size = Size::new(template.width().max(1.0), template.height().max(1.0));
-        self.doc.new_page_at(at as i32, size).map_err(show)?;
+        self.doc.new_page_at(at as i32, size)?;
         self.lists.clear();
         self.list_order.clear();
         self.refresh_pages()?;
@@ -432,14 +454,14 @@ impl DocumentEngine {
     }
 
     /// Delete the page at `index` (0-based).
-    pub fn delete_page_at(&mut self, index: usize) -> Result<Vec<PageInfo>, String> {
+    pub fn delete_page_at(&mut self, index: usize) -> Result<Vec<PageInfo>, Error> {
         if index >= self.pages.len() {
             return Err("Page index out of range.".into());
         }
         if self.pages.len() <= 1 {
             return Err("Cannot delete the only page.".into());
         }
-        self.doc.delete_page(index as i32).map_err(show)?;
+        self.doc.delete_page(index as i32)?;
         self.lists.clear();
         self.list_order.clear();
         self.refresh_pages()?;
@@ -447,12 +469,12 @@ impl DocumentEngine {
         Ok(self.pages.clone())
     }
 
-    fn refresh_pages(&mut self) -> Result<(), String> {
-        let count = self.doc.page_count().map_err(show)?;
+    fn refresh_pages(&mut self) -> Result<(), Error> {
+        let count = self.doc.page_count()?;
         let mut pages = Vec::with_capacity(count as usize);
         for index in 0..count {
-            let page = self.doc.load_pdf_page(index).map_err(show)?;
-            let bounds = page.bounds().map_err(show)?;
+            let page = self.doc.load_pdf_page(index)?;
+            let bounds = page.bounds()?;
             pages.push(PageInfo {
                 x0: bounds.x0,
                 y0: bounds.y0,
@@ -464,10 +486,10 @@ impl DocumentEngine {
         Ok(())
     }
 
-    fn display_list(&mut self, page: usize) -> Result<&DisplayList, String> {
+    fn display_list(&mut self, page: usize) -> Result<&DisplayList, Error> {
         if !self.lists.contains_key(&page) {
-            let pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
-            let list = pdf_page.to_display_list(false).map_err(show)?;
+            let pdf_page = self.doc.load_pdf_page(page as i32)?;
+            let list = pdf_page.to_display_list(false)?;
             self.lists.insert(page, list);
             self.list_order.push_back(page);
             while self.list_order.len() > LIST_CACHE {
@@ -483,14 +505,14 @@ impl DocumentEngine {
             .ok_or_else(|| "Missing page cache.".into())
     }
 
-    fn apply(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, String> {
+    fn apply(&mut self, snapshot: &SaveSnapshot) -> Result<Vec<SavedXref>, Error> {
         for &(page, xref) in &snapshot.deletes {
-            let mut pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
-            delete_xref(&mut pdf_page, xref).map_err(show)?;
+            let mut pdf_page = self.doc.load_pdf_page(page as i32)?;
+            delete_xref(&mut pdf_page, xref)?;
         }
         for &(page, parent_id) in &snapshot.rich_text_parents {
-            let mut pdf_page = self.doc.load_pdf_page(page as i32).map_err(show)?;
-            delete_inline_math_children(&mut pdf_page, parent_id).map_err(show)?;
+            let mut pdf_page = self.doc.load_pdf_page(page as i32)?;
+            delete_inline_math_children(&mut pdf_page, parent_id)?;
         }
         let mut saved = Vec::new();
         for annot in &snapshot.upserts {
@@ -498,7 +520,7 @@ impl DocumentEngine {
                 continue;
             }
             let math = snapshot.math_pdfs.get(&annot.id).map(Vec::as_slice);
-            let mut pdf_page = self.doc.load_pdf_page(annot.page as i32).map_err(show)?;
+            let mut pdf_page = self.doc.load_pdf_page(annot.page as i32)?;
             let xref = upsert(&mut self.doc, &mut pdf_page, annot, math)?;
             saved.push(SavedXref {
                 id: annot.id,
@@ -507,14 +529,14 @@ impl DocumentEngine {
             });
         }
         for inline in &snapshot.inline_math {
-            let mut pdf_page = self.doc.load_pdf_page(inline.page as i32).map_err(show)?;
-            create_inline_math(&mut self.doc, &mut pdf_page, inline).map_err(show)?;
+            let mut pdf_page = self.doc.load_pdf_page(inline.page as i32)?;
+            create_inline_math(&mut self.doc, &mut pdf_page, inline)?;
         }
         Ok(saved)
     }
 
     /// `Ok(true)` when a compacting rewrite ran and annotation xrefs may have moved.
-    fn persist(&mut self) -> Result<bool, String> {
+    fn persist(&mut self) -> Result<bool, Error> {
         self.ensure_bak()?;
         let path = self.path.clone();
         let Some(path_str) = path.to_str() else {
@@ -534,13 +556,13 @@ impl DocumentEngine {
 
     /// Once per open: if `path.bak` is missing, copy the pristine on-disk bytes there
     /// before the first in-place write. Does not rotate or overwrite an existing bak.
-    fn ensure_bak(&mut self) -> Result<(), String> {
+    fn ensure_bak(&mut self) -> Result<(), Error> {
         if self.bak_ensured {
             return Ok(());
         }
         let bak = bak_path(&self.path);
         if !bak.exists() {
-            std::fs::copy(&self.path, &bak).map_err(|err| err.to_string())?;
+            std::fs::copy(&self.path, &bak)?;
         }
         self.bak_ensured = true;
         Ok(())
@@ -549,7 +571,7 @@ impl DocumentEngine {
     /// Full rewrite with garbage collection when incremental updates have grown
     /// the file by more than 25% since it was opened. Level 1 drops unreferenced
     /// objects without renumbering; xrefs are remapped anyway in case they move.
-    fn maybe_compact(&mut self) -> Result<bool, String> {
+    fn maybe_compact(&mut self) -> Result<bool, Error> {
         if self.opened_len == 0 {
             return Ok(false);
         }
@@ -563,7 +585,7 @@ impl DocumentEngine {
         Ok(true)
     }
 
-    fn compact_rewrite(&mut self) -> Result<(), String> {
+    fn compact_rewrite(&mut self) -> Result<(), Error> {
         let path = self.path.clone();
         let tmp = temp_path(&path);
         {
@@ -571,14 +593,12 @@ impl DocumentEngine {
             options.set_incremental(false);
             options.set_appearance(false);
             options.set_garbage(true);
-            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
-            self.doc
-                .write_to_with_options(&mut file, options)
-                .map_err(show)?;
-            file.sync_all().map_err(|err| err.to_string())?;
+            let mut file = File::create(&tmp)?;
+            self.doc.write_to_with_options(&mut file, options)?;
+            file.sync_all()?;
         }
-        std::fs::rename(&tmp, &path).map_err(|err| err.to_string())?;
-        self.doc = PdfDocument::open(path.as_path()).map_err(show)?;
+        std::fs::rename(&tmp, &path)?;
+        self.doc = PdfDocument::open(path.as_path())?;
         self.lists.clear();
         self.list_order.clear();
         if let Ok(meta) = std::fs::metadata(&path) {
@@ -607,15 +627,15 @@ impl DocumentEngine {
         None
     }
 
-    fn rewrite_all(&mut self, path: &Path) -> Result<(), String> {
+    fn rewrite_all(&mut self, path: &Path) -> Result<(), Error> {
         let tmp = temp_path(path);
         {
-            let mut file = File::create(&tmp).map_err(|err| err.to_string())?;
-            self.doc.write_to(&mut file).map_err(show)?;
-            file.sync_all().map_err(|err| err.to_string())?;
+            let mut file = File::create(&tmp)?;
+            self.doc.write_to(&mut file)?;
+            file.sync_all()?;
         }
-        std::fs::rename(&tmp, path).map_err(|err| err.to_string())?;
-        self.doc = PdfDocument::open(path).map_err(show)?;
+        std::fs::rename(&tmp, path)?;
+        self.doc = PdfDocument::open(path)?;
         self.lists.clear();
         self.list_order.clear();
         Ok(())
@@ -779,10 +799,6 @@ fn unpremul_against_white(c: u8, a: u16) -> u8 {
     debug_assert!(a > 0);
     let v = 255u32.saturating_sub(((255u32 - c as u32) * 255) / a as u32);
     v.min(255) as u8
-}
-
-fn show(err: impl ToString) -> String {
-    err.to_string()
 }
 
 fn to_rect(rect: PdfRect) -> Rect {
@@ -1401,13 +1417,13 @@ fn upsert(
     page: &mut PdfPage,
     annot: &Annotation,
     math_pdf: Option<&[u8]>,
-) -> Result<i32, String> {
+) -> Result<i32, Error> {
     if let Some(xref) = annot.xref {
         if let Some(mut existing) = find_annot(page, xref) {
             if apply_existing(doc, &mut existing, annot, math_pdf).is_ok() {
                 return Ok(xref);
             }
-            delete_xref(page, xref).map_err(show)?;
+            delete_xref(page, xref)?;
         }
     }
     create_annot(doc, page, annot, math_pdf)
@@ -1634,16 +1650,16 @@ fn create_annot(
     page: &mut PdfPage,
     source: &Annotation,
     math_pdf: Option<&[u8]>,
-) -> Result<i32, String> {
+) -> Result<i32, Error> {
     let mut annot = match &source.kind {
         AnnotKind::Highlight { quads, color } => {
             let pdf_quads: Vec<Quad> = quads.iter().copied().map(rect_quad).collect();
             if pdf_quads.is_empty() {
                 return Err("Highlight is empty.".into());
             }
-            let mut annot = page.add_highlight_annotation(pdf_quads).map_err(show)?;
-            annot.set_color(rgb_color(*color)).map_err(show)?;
-            annot.set_opacity(HIGHLIGHT_OPACITY).map_err(show)?;
+            let mut annot = page.add_highlight_annotation(pdf_quads)?;
+            annot.set_color(rgb_color(*color))?;
+            annot.set_opacity(HIGHLIGHT_OPACITY)?;
             write_marker(
                 doc,
                 &annot,
@@ -1652,8 +1668,7 @@ fn create_annot(
                 None,
                 Some(*color),
                 None,
-            )
-            .map_err(show)?;
+            )?;
             annot
         }
         AnnotKind::Markup {
@@ -1665,12 +1680,10 @@ fn create_annot(
             if pdf_quads.is_empty() {
                 return Err("Markup is empty.".into());
             }
-            let mut annot = page
-                .create_annotation(pdf_markup_type(*style))
-                .map_err(show)?;
-            annot.set_quad_points(pdf_quads).map_err(show)?;
-            annot.set_color(rgb_color(*color)).map_err(show)?;
-            annot.set_opacity(1.0).map_err(show)?;
+            let mut annot = page.create_annotation(pdf_markup_type(*style))?;
+            annot.set_quad_points(pdf_quads)?;
+            annot.set_color(rgb_color(*color))?;
+            annot.set_opacity(1.0)?;
             write_marker(
                 doc,
                 &annot,
@@ -1679,8 +1692,7 @@ fn create_annot(
                 None,
                 Some(*color),
                 None,
-            )
-            .map_err(show)?;
+            )?;
             annot
         }
         AnnotKind::Text {
@@ -1695,15 +1707,9 @@ fn create_annot(
             } else {
                 content.clone()
             };
-            let mut annot = page
-                .add_free_text_annotation(to_rect(*rect), &visible)
-                .map_err(show)?;
-            annot
-                .set_default_appearance("Helv", *size, Some(rgb_color(*color)))
-                .map_err(show)?;
-            annot
-                .set_quadding(AnnotationTextAlign::Left)
-                .map_err(show)?;
+            let mut annot = page.add_free_text_annotation(to_rect(*rect), &visible)?;
+            annot.set_default_appearance("Helv", *size, Some(rgb_color(*color)))?;
+            annot.set_quadding(AnnotationTextAlign::Left)?;
             write_marker(
                 doc,
                 &annot,
@@ -1712,8 +1718,7 @@ fn create_annot(
                 Some(*size),
                 Some(*color),
                 rich.then_some(content.as_str()),
-            )
-            .map_err(show)?;
+            )?;
             annot
         }
         AnnotKind::Note {
@@ -1721,12 +1726,10 @@ fn create_annot(
             content,
             color,
         } => {
-            let mut annot = page
-                .add_text_annotation(to_rect(*rect), content)
-                .map_err(show)?;
-            annot.set_color(rgb_color(*color)).map_err(show)?;
-            annot.set_icon_name("Comment").map_err(show)?;
-            write_marker(doc, &annot, "Note", source.id, None, Some(*color), None).map_err(show)?;
+            let mut annot = page.add_text_annotation(to_rect(*rect), content)?;
+            annot.set_color(rgb_color(*color))?;
+            annot.set_icon_name("Comment")?;
+            write_marker(doc, &annot, "Note", source.id, None, Some(*color), None)?;
             annot
         }
         AnnotKind::Shape {
@@ -1739,19 +1742,16 @@ fn create_annot(
             width,
         } => {
             let mut annot = match kind {
-                ShapeKind::Rect => page.add_square_annotation(to_rect(*rect)).map_err(show)?,
-                ShapeKind::Ellipse => page.add_circle_annotation(to_rect(*rect)).map_err(show)?,
-                ShapeKind::Line => page
-                    .add_line_annotation(to_point(*start), to_point(*end))
-                    .map_err(show)?,
+                ShapeKind::Rect => page.add_square_annotation(to_rect(*rect))?,
+                ShapeKind::Ellipse => page.add_circle_annotation(to_rect(*rect))?,
+                ShapeKind::Line => page.add_line_annotation(to_point(*start), to_point(*end))?,
             };
-            annot.set_color(rgb_color(*stroke)).map_err(show)?;
-            annot.set_border_width(width.max(0.25)).map_err(show)?;
+            annot.set_color(rgb_color(*stroke))?;
+            annot.set_border_width(width.max(0.25))?;
             if let Some(fill) = fill {
-                annot.set_interior_color(rgb_color(*fill)).map_err(show)?;
+                annot.set_interior_color(rgb_color(*fill))?;
             }
-            write_marker(doc, &annot, "Shape", source.id, None, Some(*stroke), None)
-                .map_err(show)?;
+            write_marker(doc, &annot, "Shape", source.id, None, Some(*stroke), None)?;
             annot
         }
         AnnotKind::Math {
@@ -1761,11 +1761,9 @@ fn create_annot(
             color,
             ..
         } => {
-            let mut annot = page
-                .create_annotation(PdfAnnotationType::Stamp)
-                .map_err(show)?;
-            annot.set_rect(to_rect(*rect)).map_err(show)?;
-            annot.set_contents(latex).map_err(show)?;
+            let mut annot = page.create_annotation(PdfAnnotationType::Stamp)?;
+            annot.set_rect(to_rect(*rect))?;
+            annot.set_contents(latex)?;
             write_marker(
                 doc,
                 &annot,
@@ -1774,13 +1772,12 @@ fn create_annot(
                 Some(*size),
                 Some(*color),
                 Some(latex),
-            )
-            .map_err(show)?;
+            )?;
             if let Some(bytes) = math_pdf {
-                install_math_appearance(doc, &mut annot, bytes).map_err(show)?;
+                install_math_appearance(doc, &mut annot, bytes)?;
             }
-            annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
-            return annot.xref().map_err(show);
+            annot.set_flags(AnnotationFlags::IS_PRINT)?;
+            return Ok(annot.xref()?);
         }
         AnnotKind::Image {
             rect,
@@ -1788,22 +1785,20 @@ fn create_annot(
             width,
             height,
         } => {
-            let mut annot = page
-                .create_annotation(PdfAnnotationType::Stamp)
-                .map_err(show)?;
-            annot.set_rect(to_rect(*rect)).map_err(show)?;
-            write_image_marker(doc, &annot, source.id, rgba, *width, *height).map_err(show)?;
-            install_image_appearance(doc, &mut annot, rgba, *width, *height).map_err(show)?;
-            annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
-            return annot.xref().map_err(show);
+            let mut annot = page.create_annotation(PdfAnnotationType::Stamp)?;
+            annot.set_rect(to_rect(*rect))?;
+            write_image_marker(doc, &annot, source.id, rgba, *width, *height)?;
+            install_image_appearance(doc, &mut annot, rgba, *width, *height)?;
+            annot.set_flags(AnnotationFlags::IS_PRINT)?;
+            return Ok(annot.xref()?);
         }
         AnnotKind::Foreign { .. } => {
             return Err("Foreign annotations are read-only.".into());
         }
     };
-    annot.set_flags(AnnotationFlags::IS_PRINT).map_err(show)?;
-    annot.update().map_err(show)?;
-    annot.xref().map_err(show)
+    annot.set_flags(AnnotationFlags::IS_PRINT)?;
+    annot.update()?;
+    Ok(annot.xref()?)
 }
 
 fn delete_inline_math_children(page: &mut PdfPage, parent_id: u64) -> Result<(), mupdf::Error> {
@@ -1883,9 +1878,8 @@ fn write_image_marker(
     width: u32,
     height: u32,
 ) -> Result<(), mupdf::Error> {
-    let png = encode_png(rgba, width, height).map_err(|message| {
-        mupdf::Error::InvalidArgument(format!("png encode failed: {message}"))
-    })?;
+    let png = encode_png(rgba, width, height)
+        .map_err(|err| mupdf::Error::InvalidArgument(format!("png encode failed: {err}")))?;
     let mut marker = doc.new_dict()?;
     marker.dict_put("Kind", doc.new_name("Image")?)?;
     marker.dict_put("Id", doc.new_int(id as i32)?)?;
@@ -1911,21 +1905,21 @@ fn pixel_hash(rgba: &[u8]) -> u64 {
     hash
 }
 
-fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, String> {
+fn encode_png(rgba: &[u8], width: u32, height: u32) -> Result<Vec<u8>, Error> {
     let expected = width as usize * height as usize * 4;
     if rgba.len() != expected {
-        return Err(format!(
+        return Err(Error::Message(format!(
             "rgba length {} != {}x{}x4",
             rgba.len(),
             width,
             height
-        ));
+        )));
     }
     let mut out = Vec::new();
     let encoder = image::codecs::png::PngEncoder::new(&mut out);
     encoder
         .write_image(rgba, width, height, image::ExtendedColorType::Rgba8)
-        .map_err(|err| err.to_string())?;
+        .map_err(|_| Error::Encode)?;
     Ok(out)
 }
 
@@ -2063,7 +2057,8 @@ mod tests {
 
         assert!(matches!(
             result,
-            Err(message) if message == "This PDF has no readable pages. It may be damaged."
+            Err(Error::Message(ref message))
+                if message == "This PDF has no readable pages. It may be damaged."
         ));
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -1,9 +1,9 @@
 //! Shared UI ↔ background-worker channel.
 //!
-//! [`Channel`] owns the job sender and reply receiver used by `PdfWorker`,
-//! `MathWorker`, and `AssistantWorker`. Each worker still supplies its own
-//! loop body; this module only covers spawn / send / poll / shutdown-on-drop
-//! and the worker-side reply helper that wakes the UI through [`Wake`].
+//! [`Channel`] owns the job sender and reply receiver used by `PdfWorker` and
+//! `MathWorker`. Each worker still supplies its own loop body; this module only
+//! covers spawn / send / poll / shutdown-on-drop and the worker-side reply
+//! helper that wakes the UI through [`Wake`].
 
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;

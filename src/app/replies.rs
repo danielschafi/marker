@@ -42,7 +42,6 @@ impl MarkerApp {
             }
             Ok(DialogReply::ExportCards { path: None, .. }) => {
                 self.dialog_busy = false;
-                self.pending_generated_csv = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.dialog_busy = false,
@@ -59,9 +58,6 @@ impl MarkerApp {
         self.upload_pending_tiles(ctx);
         for reply in self.math.poll() {
             self.on_math(ctx, reply);
-        }
-        for event in self.assistant.poll() {
-            self.on_assistant(ctx, event);
         }
     }
 
@@ -203,7 +199,6 @@ impl MarkerApp {
                     let pinned = pinned_glyph_pages(tab);
                     tab.doc.trim_glyph_cache(&pinned);
                 }
-                self.finish_pending_study(doc_id, page);
                 self.try_finish_pending_export(doc_id);
             }
             PdfReply::Search {
@@ -232,11 +227,6 @@ impl MarkerApp {
                 path,
                 result,
             } => self.on_saved_as(doc_id, path, result),
-            PdfReply::Crop {
-                doc_id,
-                seq,
-                result,
-            } => self.on_crop(ctx, doc_id, seq, result),
             PdfReply::PageInserted {
                 doc_id,
                 index,
@@ -310,7 +300,6 @@ impl MarkerApp {
         tab.thumb_order.clear();
         tab.thumbs_inflight.clear();
         tab.glyphs_waiting.clear();
-        tab.pending_study = None;
         tab.pending_export = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
@@ -372,7 +361,6 @@ impl MarkerApp {
         tab.thumb_order.clear();
         tab.thumbs_inflight.clear();
         tab.glyphs_waiting.clear();
-        tab.pending_study = None;
         tab.pending_export = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);

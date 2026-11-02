@@ -675,22 +675,12 @@ fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, pane: Pane
     let Some(tab) = app.tab_by_id(pane.tab_id) else {
         return;
     };
-    // Skip while actively dragging a new learning / text select.
-    if matches!(
-        tab.drag,
-        Some(Drag::LearningSelect { .. } | Drag::TextSelect { .. })
-    ) {
+    // Skip while actively dragging a new text select.
+    if matches!(tab.drag, Some(Drag::TextSelect { .. })) {
         return;
     }
     let fill = Color32::from_rgba_unmultiplied(80, 160, 255, 56);
-    if let Some(sel) = &tab.text_sel {
-        if let Some(glyphs) = tab.doc.glyphs.get(&sel.page) {
-            for rect in highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi) {
-                painter.rect_filled(pdf_rect_screen(&tab.doc, sel.page, rect, view), 1.0, fill);
-            }
-        }
-    }
-    let Some(sel) = &tab.assistant.learning else {
+    let Some(sel) = &tab.text_sel else {
         return;
     };
     let Some(glyphs) = tab.doc.glyphs.get(&sel.page) else {
@@ -707,14 +697,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
         return;
     };
     match &tab.drag {
-        Some(Drag::LearningSelect {
-            page,
-            anchor,
-            current,
-            origin,
-            current_pt,
-        })
-        | Some(Drag::TextSelect {
+        Some(Drag::TextSelect {
             page,
             anchor,
             current,
@@ -732,12 +715,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                 painter.rect_filled(pdf_rect_screen(&tab.doc, *page, rect, view), 1.0, fill);
             }
         }
-        Some(Drag::Region {
-            page,
-            origin,
-            current,
-        })
-        | Some(Drag::Marquee {
+        Some(Drag::Marquee {
             page,
             origin,
             current,

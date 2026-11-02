@@ -11,7 +11,7 @@ use crate::geom::PdfRect;
 use crate::worker::{self, Channel, ShutdownJob, Wake};
 
 use super::engine::{
-    CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, ThumbImage,
+    DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, ThumbImage,
     TileImage,
 };
 
@@ -36,13 +36,6 @@ pub enum PdfJob {
     Thumb {
         doc_id: DocId,
         page: usize,
-    },
-    Crop {
-        doc_id: DocId,
-        seq: u64,
-        page: usize,
-        rect: PdfRect,
-        dpi: f32,
     },
     Save {
         doc_id: DocId,
@@ -138,12 +131,6 @@ pub enum PdfReply {
         doc_id: DocId,
         page: usize,
         glyphs: PageGlyphs,
-    },
-    Crop {
-        doc_id: DocId,
-        seq: u64,
-        /// Stringly error at the reply boundary; see [`PdfReply`] module note.
-        result: Result<CropImage, String>,
     },
     Search {
         doc_id: DocId,
@@ -269,16 +256,6 @@ impl PdfWorker {
         let _ = self.reads.send(ReadJob::Glyphs { doc_id, page });
     }
 
-    pub fn crop(&self, doc_id: DocId, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
-        self.channel.send(PdfJob::Crop {
-            doc_id,
-            seq,
-            page,
-            rect,
-            dpi,
-        });
-    }
-
     pub fn search(&self, doc_id: DocId, seq: u64, needle: String) {
         // Case flag lives in Settings; app.rs cannot pass it this wave (FP9).
         let case_sensitive = crate::settings::live_search_case_sensitive();
@@ -330,8 +307,8 @@ impl Drop for PdfWorker {
 }
 
 /// Tile-thread order. Search and glyphs are not ranked here; they run on
-/// `marker-pdf-read`. Thumbs sit below tiles and crop so the panel never
-/// starves document work (and never shares the reader with search).
+/// `marker-pdf-read`. Thumbs sit below tiles so the panel never starves
+/// document work (and never shares the reader with search).
 fn job_sort_key(job: &PdfJob) -> (u8, u32) {
     match job {
         PdfJob::Shutdown
@@ -351,7 +328,6 @@ fn job_sort_key(job: &PdfJob) -> (u8, u32) {
                 (1, *distance)
             }
         }
-        PdfJob::Crop { .. } => (3, 0),
         PdfJob::Thumb { page, .. } => (4, *page as u32),
     }
 }
@@ -483,25 +459,6 @@ fn handle_thumb(
     }
 }
 
-fn handle_crop(
-    ctx: &mut WorkerCtx<'_>,
-    doc_id: DocId,
-    seq: u64,
-    page: usize,
-    rect: PdfRect,
-    dpi: f32,
-) {
-    let result = match engine_mut(ctx.engines, doc_id) {
-        Ok(engine) => engine.render_crop_png(page, rect, dpi).map_err(reply_err),
-        Err(_) => Err(reply_err(Error::NoDocument)),
-    };
-    ctx.send(PdfReply::Crop {
-        doc_id,
-        seq,
-        result,
-    });
-}
-
 fn handle_save(ctx: &mut WorkerCtx<'_>, doc_id: DocId, snapshot: SaveSnapshot) {
     release_reader(ctx.reads, doc_id);
     let reply = match engine_mut(ctx.engines, doc_id) {
@@ -628,16 +585,6 @@ fn handle_job(
         }
         PdfJob::Thumb { doc_id, page } => {
             handle_thumb(ctx, doc_id, page, thumb_wanted);
-            false
-        }
-        PdfJob::Crop {
-            doc_id,
-            seq,
-            page,
-            rect,
-            dpi,
-        } => {
-            handle_crop(ctx, doc_id, seq, page, rect, dpi);
             false
         }
         PdfJob::Save { doc_id, snapshot } => {

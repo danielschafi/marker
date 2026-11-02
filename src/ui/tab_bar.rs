@@ -161,14 +161,7 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
         {
             app.toggle_zen(ui.ctx());
         }
-        if chrome_button(ui, "Assistant", app.assistant_open)
-            .on_hover_text(
-                "Cursor learning assistant (Ctrl+Alt+I). Hiding the panel keeps the session alive.",
-            )
-            .clicked()
-        {
-            app.toggle_assistant();
-        }
+
     }
 }
 

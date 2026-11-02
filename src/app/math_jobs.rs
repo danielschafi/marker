@@ -1,6 +1,6 @@
 //! Thin MarkerApp adapter over [`crate::math::MathPipeline`].
 //!
-//! Tab binding, egui save triggers, and assistant PNG upload stay here; cache /
+//! Tab binding and egui save triggers stay here; cache /
 //! deadline / scan / request / reply policy lives in the pipeline module.
 
 use crate::annot::AnnotKind;
@@ -217,15 +217,6 @@ impl MarkerApp {
             .request_inline(doc_id, id, span_key, live, content, *size, *color);
     }
 
-    /// Enqueue a background preview for math in an assistant answer.
-    pub(crate) fn request_answer_math(&mut self, source: String, display: bool, color: Rgb) {
-        let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) else {
-            return;
-        };
-        self.math
-            .request_answer_math(doc_id, source, display, color);
-    }
-
     /// Request any preview or PDF a dirty annotation still needs, and report
     /// whether the save snapshot can be built now.
     pub(crate) fn ensure_math_for_save(&mut self, doc_id: DocId) -> bool {
@@ -291,24 +282,4 @@ fn span_is_live(tabs: &[Tab], doc_id: DocId, id: u64, span_key: u64) -> bool {
         let inner = &content[span.inner_start..span.inner_end];
         math_spans::span_key(inner, span.display) == span_key
     })
-}
-
-pub(crate) fn upload_png_texture(
-    ctx: &egui::Context,
-    doc_id: DocId,
-    seq: u64,
-    png: &[u8],
-    width: u32,
-    height: u32,
-) -> Option<egui::TextureHandle> {
-    let decoded = image::load_from_memory(png).ok()?.to_rgba8();
-    let pixels = egui::ColorImage::from_rgba_unmultiplied(
-        [width as usize, height as usize],
-        decoded.as_raw(),
-    );
-    Some(ctx.load_texture(
-        format!("assistant-crop-{doc_id}-{seq}"),
-        pixels,
-        egui::TextureOptions::LINEAR,
-    ))
 }

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::annot::{Glyph, PageGlyphs};
-use crate::assistant::{glyphs_intersecting_rects, reconstruct_text};
+use crate::page_text::{glyphs_intersecting_rects, reconstruct_text};
 use crate::geom::{PdfRect, Rgb};
 use crate::settings::HighlightPreset;
 
@@ -212,101 +212,6 @@ pub fn highlights_to_csv(
     out
 }
 
-/// Build CSV from assistant-generated front/back pairs (ST3).
-pub fn generated_cards_to_csv(cards: &[(String, String)], tag: &str, source: &str) -> String {
-    let mut out = String::from("front,back,tag,source\n");
-    for (front, back) in cards {
-        push_csv_row(&mut out, front, back, tag, source);
-    }
-    out
-}
-
-/// Extract the body of the first fenced code block in `reply`.
-///
-/// Prefers a fence whose info string starts with `tsv` (case-insensitive).
-/// Falls back to the first fence of any language. Returns `None` when no
-/// complete opening/closing fence pair is found.
-fn first_fenced_body(reply: &str) -> Option<&str> {
-    let bytes = reply.as_bytes();
-    let mut i = 0;
-    let mut first_any: Option<&str> = None;
-    while i + 3 <= bytes.len() {
-        if &bytes[i..i + 3] != b"```" {
-            i += 1;
-            continue;
-        }
-        let after_ticks = i + 3;
-        let line_end = reply[after_ticks..]
-            .find('\n')
-            .map(|n| after_ticks + n)
-            .unwrap_or(reply.len());
-        let info = reply[after_ticks..line_end].trim();
-        let body_start = if line_end < reply.len() {
-            line_end + 1
-        } else {
-            line_end
-        };
-        let rest = &reply[body_start..];
-        let Some(close) = rest.find("```") else {
-            break;
-        };
-        let body = rest[..close].trim_end_matches('\r').trim_end_matches('\n');
-        let is_tsv = info
-            .split_whitespace()
-            .next()
-            .is_some_and(|lang| lang.eq_ignore_ascii_case("tsv"));
-        if is_tsv {
-            return Some(body);
-        }
-        if first_any.is_none() {
-            first_any = Some(body);
-        }
-        i = body_start + close + 3;
-    }
-    first_any
-}
-
-/// Parse a fenced TSV flashcard block from an assistant reply.
-///
-/// Each non-empty line is `front<TAB>back`. No header row. On failure returns
-/// `Err` so the caller can show the raw reply and skip writing a file.
-pub fn parse_cards_tsv_fence(reply: &str) -> Result<Vec<(String, String)>, String> {
-    let Some(body) = first_fenced_body(reply) else {
-        return Err("no fenced TSV block in reply".into());
-    };
-    let mut cards = Vec::new();
-    for line in body.lines() {
-        let line = line.trim_end_matches('\r');
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Some((front, back)) = line.split_once('\t') else {
-            return Err(format!(
-                "TSV line missing tab separator: {}",
-                truncate_for_err(line)
-            ));
-        };
-        let front = front.trim().to_owned();
-        let back = back.trim().to_owned();
-        if front.is_empty() {
-            return Err("TSV card has empty front".into());
-        }
-        cards.push((front, back));
-    }
-    if cards.is_empty() {
-        return Err("fenced TSV block has no cards".into());
-    }
-    Ok(cards)
-}
-
-fn truncate_for_err(s: &str) -> String {
-    let mut out: String = s.chars().take(48).collect();
-    if s.chars().count() > 48 {
-        out.push('…');
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -509,41 +414,4 @@ mod tests {
         assert_eq!(csv_escape("line\nbreak"), "\"line\nbreak\"");
     }
 
-    #[test]
-    fn parse_tsv_fence_ok() {
-        let reply = "Here you go:\n\n```tsv\nWhat is 2+2?\t4\nCapital of France?\tParis\n```\n";
-        let cards = parse_cards_tsv_fence(reply).expect("parse");
-        assert_eq!(
-            cards,
-            vec![
-                ("What is 2+2?".into(), "4".into()),
-                ("Capital of France?".into(), "Paris".into()),
-            ]
-        );
-    }
-
-    #[test]
-    fn parse_tsv_broken_fence_errors() {
-        let no_fence = "front\tback\nwithout a fence";
-        assert!(parse_cards_tsv_fence(no_fence).is_err());
-
-        let empty_fence = "```tsv\n```\n";
-        assert!(parse_cards_tsv_fence(empty_fence).is_err());
-
-        let unclosed = "```tsv\nQ\tA\n";
-        assert!(parse_cards_tsv_fence(unclosed).is_err());
-
-        let missing_tab = "```tsv\nno tab here\n```\n";
-        assert!(parse_cards_tsv_fence(missing_tab).is_err());
-    }
-
-    #[test]
-    fn generated_cards_csv_quotes() {
-        let cards = vec![("Q, with comma".into(), "A \"quoted\"".into())];
-        let csv = generated_cards_to_csv(&cards, "generated", "paper.pdf#page=2");
-        assert_eq!(
-            csv,
-            "front,back,tag,source\n\"Q, with comma\",\"A \"\"quoted\"\"\",generated,paper.pdf#page=2\n"
-        );
-    }
 }

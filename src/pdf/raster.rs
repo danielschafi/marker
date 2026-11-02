@@ -20,30 +20,6 @@ pub(crate) fn tile_device_rect(
     (tx0, ty0, tx1, ty1)
 }
 
-pub(crate) fn rgba_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
-    let width = pixmap.width() as usize;
-    let height = pixmap.height() as usize;
-    let components = pixmap.n() as usize;
-    let stride = pixmap.stride() as usize;
-    let samples = pixmap.samples();
-    let mut out = vec![255u8; width * height * 4];
-    for y in 0..height {
-        let row = &samples[y * stride..];
-        for x in 0..width {
-            let source = x * components;
-            let dest = (y * width + x) * 4;
-            if components >= 3 {
-                let (r, g, b, a) = knock_out_paper(row[source], row[source + 1], row[source + 2]);
-                out[dest] = r;
-                out[dest + 1] = g;
-                out[dest + 2] = b;
-                out[dest + 3] = a;
-            }
-        }
-    }
-    out
-}
-
 pub(crate) fn premultiplied_tile_pixels_from_pixmap(pixmap: &Pixmap) -> Vec<u8> {
     let width = pixmap.width() as usize;
     let height = pixmap.height() as usize;

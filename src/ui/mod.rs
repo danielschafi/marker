@@ -10,13 +10,12 @@ use egui::{
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{AnnotFilterKind, MarkerApp, ReviewGroupMode, ShortcutSection, Tab, SHORTCUTS};
-use crate::assistant::{glyphs_intersecting_rects, reconstruct_text};
+use crate::page_text::{glyphs_intersecting_rects, reconstruct_text};
 use crate::geom::{Rgb, INK_COLORS};
 use crate::pdf::OutlineNode;
 use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
 
-mod assistant_panel;
 mod empty_state;
 mod split_drop;
 mod style_bar;
@@ -26,7 +25,6 @@ mod toolbar;
 pub(crate) use empty_state::empty_state;
 pub(crate) use split_drop::{split_viewports, tab_drag_overlay};
 
-use assistant_panel::assistant_panel;
 use empty_state::outline_node;
 use tab_bar::{paint_tab_list, paint_tab_menu, tab_bar};
 use toolbar::tool_bar;
@@ -55,7 +53,6 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
         thumbs_panel(app, ctx);
         annot_sidebar(app, ctx);
         review_panel(app, ctx);
-        assistant_panel(app, ctx);
     }
     paint_tab_list(app, ctx, show_chrome);
     // Menu must paint even in zen (tab list still opens there).

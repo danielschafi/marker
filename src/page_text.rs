@@ -1,7 +1,7 @@
+//! Reconstruct reading-order text from page glyphs (cite, copy, export).
+
 use crate::annot::Glyph;
 use crate::geom::PdfRect;
-
-pub const MAX_TEXT_CHARS: usize = 20_000;
 
 /// Reconstruct reading-order text from a contiguous glyph index range.
 pub fn reconstruct_text(glyphs: &[Glyph], lo: usize, hi: usize) -> String {
@@ -43,16 +43,6 @@ fn rects_overlap(a: PdfRect, b: PdfRect) -> bool {
     a.x0 < b.x1 && a.x1 > b.x0 && a.y0 < b.y1 && a.y1 > b.y0
 }
 
-/// Cap text length; returns (text, truncated).
-pub fn truncate_text(text: &str, max_chars: usize) -> (String, bool) {
-    let count = text.chars().count();
-    if count <= max_chars {
-        return (text.to_string(), false);
-    }
-    let truncated: String = text.chars().take(max_chars).collect();
-    (truncated, true)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -79,16 +69,6 @@ mod tests {
             g('e', 1, 2, 5.0),
         ];
         assert_eq!(reconstruct_text(&glyphs, 0, 6), "Hi the\nre");
-    }
-
-    #[test]
-    fn truncate_marks_overflow() {
-        let (t, truncated) = truncate_text("abcdef", 3);
-        assert_eq!(t, "abc");
-        assert!(truncated);
-        let (t, truncated) = truncate_text("ab", 3);
-        assert_eq!(t, "ab");
-        assert!(!truncated);
     }
 
     #[test]

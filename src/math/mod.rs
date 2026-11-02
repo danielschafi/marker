@@ -18,7 +18,7 @@ mod pipeline;
 pub use crate::rich_text;
 pub use pipeline::{
     upload_preview, upload_white_preview, white_preview_image, BlockReplyEffect, InlinePreview,
-    InlineReady, MathPipeline, MathPreview, VisibleMathPane, ASSISTANT_MATH_SIZE,
+    InlineReady, MathPipeline, MathPreview, VisibleMathPane,
 };
 
 /// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
@@ -1641,8 +1641,8 @@ mod tests {
         );
     }
 
-    /// Manual artifact: assistant-panel mock with rendered `$E = mc^2$` (ST7).
-    /// `ST7_MATH_ANSWER_PNG=/path/to.png cargo test --bin marker write_st7_math_answer_png -- --exact --nocapture`
+    /// Manual artifact: panel mock with rendered `$E = mc^2$` (legacy ST7).
+    /// `ST7_MATH_ANSWER_PNG=/path/to.png cargo test --lib write_st7_math_answer_png -- --exact --nocapture`
     #[test]
     fn write_st7_math_answer_png() {
         let Ok(path) = std::env::var("ST7_MATH_ANSWER_PNG") else {
@@ -1661,7 +1661,7 @@ mod tests {
         assert!(rendered.error.is_none(), "{:?}", rendered.error);
         assert!(
             rendered.pdf.is_none(),
-            "assistant math must not request PDF"
+            "UI-only math must not request PDF"
         );
         let eq = rendered.preview.expect("preview");
 
@@ -1669,7 +1669,7 @@ mod tests {
         let panel = r##"
 #set page(width: 360pt, height: auto, margin: 14pt, fill: rgb("#ececf0"))
 #set text(size: 12pt, fill: rgb("#1c1c20"))
-#text(weight: "bold", size: 12pt)[Cursor]
+#text(weight: "bold", size: 12pt)[Answer]
 #v(8pt)
 Energy relates mass and the speed of light: $E = m c^2$.
 #v(12pt)
@@ -1677,7 +1677,7 @@ Energy relates mass and the speed of light: $E = m c^2$.
   #text(size: 10pt)[Copy]
 ]
 #h(8pt)
-#text(size: 10pt, fill: rgb("#555555"))[Save to page   Save as note]
+#text(size: 10pt, fill: rgb("#555555"))[Copy]
 "##;
         let panel_engine = TypstEngine::builder()
             .main_file(panel)

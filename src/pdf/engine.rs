@@ -21,6 +21,9 @@ use crate::geom::{PdfPoint, PdfRect, Rgb};
 use egui::Color32;
 
 pub const TILE_PX: i32 = 1024;
+/// Target width in device pixels for page thumbnails (FT10). Separate from
+/// [`TILE_PX`] so thumbs never share the document tile cache.
+pub const THUMB_WIDTH_PX: f32 = 120.0;
 const LIST_CACHE: usize = 8;
 
 #[derive(Clone, Copy, Debug)]
@@ -64,6 +67,15 @@ pub struct TileImage {
     pub row: i32,
     pub x: i32,
     pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    /// Premultiplied RGBA8, row-major (`egui::ColorImage::from_rgba_premultiplied` byte order).
+    pub pixels: Vec<u8>,
+}
+
+/// Small full-page raster for the thumbnails panel (not a document tile).
+pub struct ThumbImage {
+    pub page: usize,
     pub width: u32,
     pub height: u32,
     /// Premultiplied RGBA8, row-major (`egui::ColorImage::from_rgba_premultiplied` byte order).
@@ -241,6 +253,43 @@ impl DocumentEngine {
             row,
             x: tx0,
             y: ty0,
+            width,
+            height,
+            pixels,
+        }))
+    }
+
+    /// Rasterize a whole page at ~[`THUMB_WIDTH_PX`] wide for the side panel.
+    /// Uses the same contents-only path as tiles; not stored in the tile cache.
+    pub fn render_thumb(&mut self, page: usize) -> Result<Option<ThumbImage>, String> {
+        let info = *self.pages.get(page).ok_or("Page is out of range.")?;
+        let page_w = info.width().max(1.0);
+        let scale = (THUMB_WIDTH_PX / page_w).max(0.05);
+        let tx0 = (info.x0 * scale).floor() as i32;
+        let ty0 = (info.y0 * scale).floor() as i32;
+        let tx1 = (info.x1 * scale).ceil() as i32;
+        let ty1 = (info.y1 * scale).ceil() as i32;
+        if tx1 <= tx0 || ty1 <= ty0 {
+            return Ok(None);
+        }
+
+        let ctm = Matrix::new_scale(scale, scale);
+        let irect = IRect::new(tx0, ty0, tx1, ty1);
+        let mut pixmap =
+            Pixmap::new_with_rect(&Colorspace::device_rgb(), irect, false).map_err(show)?;
+        pixmap.clear_with(255).map_err(show)?;
+        let device = Device::from_pixmap(&pixmap).map_err(show)?;
+        let scissor = Rect::new(tx0 as f32, ty0 as f32, tx1 as f32, ty1 as f32);
+        self.display_list(page)?
+            .run(&device, &ctm, scissor)
+            .map_err(show)?;
+        drop(device);
+
+        let width = pixmap.width();
+        let height = pixmap.height();
+        let pixels = premultiplied_tile_pixels_from_pixmap(&pixmap);
+        Ok(Some(ThumbImage {
+            page,
             width,
             height,
             pixels,
@@ -2013,6 +2062,33 @@ mod tests {
             result,
             Err(message) if message == "This PDF has no readable pages. It may be damaged."
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn render_thumb_is_about_target_width() {
+        let dir = std::env::temp_dir().join(format!(
+            "marker-thumb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+        let mut engine = DocumentEngine::open(&path).unwrap().engine;
+        let thumb = engine.render_thumb(0).unwrap().unwrap();
+        assert_eq!(thumb.page, 0);
+        assert!(
+            (thumb.width as f32 - THUMB_WIDTH_PX).abs() <= 2.0,
+            "thumb width {} should be near {}",
+            thumb.width,
+            THUMB_WIDTH_PX
+        );
+        assert!(thumb.height > 0);
+        assert_eq!(thumb.pixels.len(), (thumb.width * thumb.height * 4) as usize);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

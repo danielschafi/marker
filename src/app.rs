@@ -107,6 +107,8 @@ pub(crate) struct MarkerApp {
     tile_focus_tab: usize,
     /// Latest wanted tile keys per document generation (read by the pdf worker).
     tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    /// Latest wanted thumbnail pages per document generation (read by the pdf worker).
+    thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
     /// Generated Anki CSV waiting for the cards save dialog (ST3).
     pending_generated_csv: Option<(u64, String)>,
 }
@@ -188,8 +190,15 @@ pub(crate) struct Tab {
     /// After a successful save, spawn this tab in a new window and drop it here.
     pub(crate) detach_after_save: bool,
     pub(crate) outline_open: bool,
+    pub(crate) thumbs_open: bool,
     pub(crate) annots_open: bool,
     pub(crate) review_open: bool,
+    /// Page → texture for the thumbnails panel; capped by [`THUMB_CACHE_PAGES`].
+    pub(crate) thumbs: HashMap<usize, CachedThumb>,
+    /// LRU order for `thumbs` (oldest at the front).
+    pub(crate) thumb_order: VecDeque<usize>,
+    /// In-flight thumbnail renders (page indices).
+    pub(crate) thumbs_inflight: HashSet<usize>,
     pub(crate) annot_sidebar: AnnotSidebarState,
     pub(crate) review: ReviewState,
     pub(crate) assistant: TabAssistant,
@@ -267,6 +276,17 @@ impl Tab {
 
     pub(crate) fn is_selected(&self, id: u64) -> bool {
         self.selected.contains(&id)
+    }
+
+    /// Mark `page` as most-recently used and drop older thumbs past the soft cap.
+    pub(crate) fn touch_thumb(&mut self, page: usize) {
+        self.thumb_order.retain(|&p| p != page);
+        self.thumb_order.push_back(page);
+        while self.thumb_order.len() > THUMB_CACHE_PAGES {
+            if let Some(old) = self.thumb_order.pop_front() {
+                self.thumbs.remove(&old);
+            }
+        }
     }
 }
 
@@ -466,6 +486,13 @@ pub(crate) struct CachedTile {
     pub(crate) w: u32,
     pub(crate) h: u32,
     pub(crate) last_used_frame: u64,
+    pub(crate) texture: egui::TextureHandle,
+}
+
+/// Soft cap on cached page thumbnails per tab (FT10). Separate from the tile budget.
+pub(crate) const THUMB_CACHE_PAGES: usize = 40;
+
+pub(crate) struct CachedThumb {
     pub(crate) texture: egui::TextureHandle,
 }
 
@@ -882,6 +909,7 @@ impl MarkerApp {
             inbox.bind_ctx(egui_ctx.clone());
         }
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
         let mut app = Self {
             settings: Settings::load(),
             tool: Tool::Select,
@@ -906,7 +934,11 @@ impl MarkerApp {
             preset_editor_open: false,
             vim_count: 0,
             vim_g: false,
-            worker: PdfWorker::spawn(egui_ctx.clone(), Arc::clone(&tile_wanted)),
+            worker: PdfWorker::spawn(
+                egui_ctx.clone(),
+                Arc::clone(&tile_wanted),
+                Arc::clone(&thumb_wanted),
+            ),
             math: MathWorker::spawn(egui_ctx.clone()),
             assistant: AssistantWorker::spawn(egui_ctx.clone()),
             math_seq: 1,
@@ -930,6 +962,7 @@ impl MarkerApp {
             tile_frame: 0,
             tile_focus_tab: 0,
             tile_wanted,
+            thumb_wanted,
             pending_generated_csv: None,
         };
         for path in paths {
@@ -999,6 +1032,55 @@ impl MarkerApp {
     pub(crate) fn queue_jump(&mut self, page: usize, y: Option<f32>) {
         if let Some(tab) = self.tab_mut() {
             tab.pending_jump = Some((page, y));
+        }
+    }
+
+    /// Ask the worker for visible (+ lookahead) thumbnail pages. Updates the
+    /// cancel set so scrolled-away pages become `ThumbMiss` instead of work.
+    pub(crate) fn request_thumbs(&mut self, pages: &[usize]) {
+        let (gen, page_count, open) = match self.tab() {
+            Some(tab) => (tab.doc.gen, tab.doc.pages.len(), tab.thumbs_open),
+            None => return,
+        };
+        if !open {
+            self.thumb_wanted
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .remove(&gen);
+            return;
+        }
+        let mut wanted: HashSet<usize> = HashSet::new();
+        for &page in pages {
+            if page < page_count {
+                wanted.insert(page);
+            }
+        }
+        {
+            let mut guard = self
+                .thumb_wanted
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            guard.insert(gen, wanted.clone());
+        }
+        let mut to_queue = Vec::new();
+        if let Some(tab) = self.tab_mut() {
+            for &page in &wanted {
+                if tab.thumbs.contains_key(&page) {
+                    tab.touch_thumb(page);
+                    continue;
+                }
+                if !tab.thumbs_inflight.contains(&page) {
+                    to_queue.push(page);
+                }
+            }
+        }
+        // Cap new jobs per frame so a long scroll does not flood the tile thread.
+        to_queue.sort_unstable();
+        for page in to_queue.into_iter().take(8) {
+            if let Some(tab) = self.tab_mut() {
+                tab.thumbs_inflight.insert(page);
+            }
+            self.worker.thumb(gen, page);
         }
     }
 
@@ -1490,6 +1572,10 @@ impl MarkerApp {
         }
         self.worker.close(tab.doc.gen);
         self.tile_wanted
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&tab.doc.gen);
+        self.thumb_wanted
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(&tab.doc.gen);
@@ -2738,6 +2824,7 @@ impl eframe::App for MarkerApp {
             || self.tabs.iter().any(|tab| {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
+                    || !tab.thumbs_inflight.is_empty()
                     || tab.search.pending
                     || tab.pending_export.is_some()
                     || tab.assistant.streaming
@@ -2900,8 +2987,12 @@ impl MarkerApp {
                         close_after_save: false,
                         detach_after_save: false,
                         outline_open: has_outline,
+                        thumbs_open: false,
                         annots_open: false,
                         review_open: false,
+                        thumbs: HashMap::new(),
+                        thumb_order: VecDeque::new(),
+                        thumbs_inflight: HashSet::new(),
                         annot_sidebar: AnnotSidebarState::default(),
                         review: ReviewState::default(),
                         assistant: TabAssistant::default(),
@@ -2983,6 +3074,31 @@ impl MarkerApp {
                     });
                 }
             }
+            PdfReply::Thumb { gen, thumb } => {
+                let Some(tab) = self.tab_by_gen_mut(gen) else {
+                    return;
+                };
+                tab.thumbs_inflight.remove(&thumb.page);
+                if !tab.thumbs_open {
+                    return;
+                }
+                let image = egui::ColorImage::from_rgba_premultiplied(
+                    [thumb.width as usize, thumb.height as usize],
+                    &thumb.pixels,
+                );
+                let texture = ctx.load_texture(
+                    format!("thumb-{}-{}", gen, thumb.page),
+                    image,
+                    egui::TextureOptions::LINEAR,
+                );
+                tab.thumbs.insert(thumb.page, CachedThumb { texture });
+                tab.touch_thumb(thumb.page);
+            }
+            PdfReply::ThumbMiss { gen, page } => {
+                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                    tab.thumbs_inflight.remove(&page);
+                }
+            }
             PdfReply::Glyphs { gen, page, glyphs } => {
                 if let Some(tab) = self.tab_by_gen_mut(gen) {
                     tab.glyphs_waiting.remove(&page);
@@ -3027,6 +3143,7 @@ impl MarkerApp {
                     self.opening.remove(&gen);
                     if let Some(tab) = self.tab_by_gen_mut(gen) {
                         tab.inflight.clear();
+                        tab.thumbs_inflight.clear();
                         tab.search.pending = false;
                         if let Some(op) = tab.page_op.take() {
                             let revert = match op {
@@ -3081,6 +3198,9 @@ impl MarkerApp {
         tab.doc.tops = DocState::rebuild_tops(&tab.doc.pages);
         tab.doc.tiles.clear();
         tab.inflight.clear();
+        tab.thumbs.clear();
+        tab.thumb_order.clear();
+        tab.thumbs_inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
         tab.pending_export = None;
@@ -3139,6 +3259,9 @@ impl MarkerApp {
         tab.doc.tops = DocState::rebuild_tops(&tab.doc.pages);
         tab.doc.tiles.clear();
         tab.inflight.clear();
+        tab.thumbs.clear();
+        tab.thumb_order.clear();
+        tab.thumbs_inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
         tab.pending_export = None;

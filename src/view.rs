@@ -31,6 +31,15 @@ use crate::theme;
 const GAP: f32 = 16.0;
 const PAD: f32 = 24.0;
 
+/// Per-pane paint/pointer context. Identity of the tab being drawn or hit-tested,
+/// without temporarily rewriting [`MarkerApp::active`].
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PaneCtx {
+    pub tab_id: TabId,
+    pub rect: Rect,
+    pub focused: bool,
+}
+
 impl DocState {
     pub(crate) fn rebuild_tops(pages: &[PageInfo]) -> Vec<f32> {
         let mut y = PAD;
@@ -210,48 +219,52 @@ pub(crate) fn viewport_tab(app: &mut MarkerApp, ui: &mut egui::Ui, tab_id: TabId
         app.split_view_rect = response.rect;
     }
 
-    let prev = app.active;
-    app.active = tab_id;
+    let pane = PaneCtx {
+        tab_id,
+        rect: response.rect,
+        focused,
+    };
 
-    let Some(tab) = app.tab_mut() else {
-        app.active = prev;
+    // Resolve the pane tab by id — never swap `app.active` on the paint path.
+    // Early returns here are safe; focus for keys stays on `app.active` until a
+    // click on an unfocused pane steals it below.
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
     };
-    if !tab.doc.fitted && response.rect.width() > 64.0 {
-        tab.doc.fit_width(response.rect.width());
+    if !tab.doc.fitted && pane.rect.width() > 64.0 {
+        tab.doc.fit_width(pane.rect.width());
         tab.doc.fitted = true;
     }
     if let Some((page, y)) = tab.pending_jump.take() {
-        tab.doc.jump_to(page, y, response.rect);
+        tab.doc.jump_to(page, y, pane.rect);
     }
-    tab.doc.clamp_scroll(response.rect);
+    tab.doc.clamp_scroll(pane.rect);
 
-    handle_scroll(app, &response);
-    if focused {
-        handle_pointer(app, &response);
+    handle_scroll(app, &response, pane);
+    if pane.focused {
+        handle_pointer(app, &response, pane);
     }
 
-    let painter = ui.painter_at(response.rect);
-    painter.rect_filled(response.rect, 0.0, theme::palette(ui.ctx()).backdrop);
-    ensure_image_textures(app, ui.ctx());
-    paint_document(app, &painter, response.rect, ui.ctx().pixels_per_point());
-    paint_scrollbar(app, ui, response.rect);
-    if focused {
+    let painter = ui.painter_at(pane.rect);
+    painter.rect_filled(pane.rect, 0.0, theme::palette(ui.ctx()).backdrop);
+    ensure_image_textures(app, ui.ctx(), pane);
+    paint_document(app, &painter, pane, ui.ctx().pixels_per_point());
+    paint_scrollbar(app, ui, pane);
+    if pane.focused {
         reclaim_edit_after_completion_escape(app, ui.ctx());
-        inline_editors(app, ui.ctx(), response.rect);
+        inline_editors(app, ui.ctx(), pane.rect);
         paint_menu(app, ui.ctx());
-        paint_style_bar(app, ui.ctx(), response.rect);
+        paint_style_bar(app, ui.ctx(), pane.rect);
     }
 
-    let steal_focus = !focused && (response.clicked() || response.drag_started());
-    app.active = prev;
-    if steal_focus {
-        app.active = tab_id;
-        app.view_rect = response.rect;
+    // Clicking the unfocused split pane focuses it for keys; scroll above does not.
+    if !pane.focused && (response.clicked() || response.drag_started()) {
+        app.active = pane.tab_id;
+        app.view_rect = pane.rect;
     }
 }
 
-fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
+fn handle_scroll(app: &mut MarkerApp, response: &egui::Response, pane: PaneCtx) {
     // Match egui::Scene: drive gestures from pointer-in-rect, not hovered(),
     // so a sibling (scrollbar) doesn't swallow pinch mid-gesture.
     if !response.contains_pointer() {
@@ -265,7 +278,7 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
             input.pointer.hover_pos().or(input.pointer.latest_pos()),
         )
     });
-    let Some(tab) = app.tab_mut() else {
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
     };
     // Pinch keeps a cursor position on most platforms; fall back to the view
@@ -303,8 +316,8 @@ fn handle_scroll(app: &mut MarkerApp, response: &egui::Response) {
     }
 }
 
-fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
-    let rect = response.rect;
+fn handle_pointer(app: &mut MarkerApp, response: &egui::Response, pane: PaneCtx) {
+    let rect = pane.rect;
     let space = response.ctx.input(|input| input.key_down(egui::Key::Space));
     let middle = response.ctx.input(|input| {
         (
@@ -318,13 +331,13 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
     if middle.0 {
         if let Some(pos) = middle.3 {
             if rect.contains(pos) {
-                if let Some(tab) = app.tab() {
+                if let Some(tab) = app.tab_by_id(pane.tab_id) {
                     let drag = Drag::Pan {
                         scroll_x: tab.doc.scroll_x,
                         scroll_y: tab.doc.scroll_y,
                         pos,
                     };
-                    if let Some(tab) = app.tab_mut() {
+                    if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                         tab.drag = Some(drag);
                     }
                 }
@@ -336,10 +349,10 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
             scroll_x,
             scroll_y,
             pos,
-        }) = app.tab().and_then(|tab| tab.drag.clone())
+        }) = app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.clone())
         {
             if let Some(now) = middle.3 {
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.doc.scroll_x = scroll_x - (now.x - pos.x);
                     tab.doc.scroll_y = scroll_y - (now.y - pos.y);
                     tab.doc.clamp_scroll(rect);
@@ -351,11 +364,11 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
     }
     if middle.2
         && matches!(
-            app.tab().and_then(|tab| tab.drag.as_ref()),
+            app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
             Some(Drag::Pan { .. })
         )
     {
-        if let Some(tab) = app.tab_mut() {
+        if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
             tab.drag = None;
         }
     }
@@ -365,37 +378,37 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
             .interact_pointer_pos()
             .or_else(|| response.ctx.input(|input| input.pointer.hover_pos()));
         if let Some(pos) = pos {
-            open_context_menu(app, pos, rect);
+            open_context_menu(app, pos, pane);
         }
     }
 
     if response.drag_started_by(PointerButton::Primary) {
         if let Some(pos) = response.interact_pointer_pos() {
-            begin_primary(app, pos, rect, space);
+            begin_primary(app, pos, pane, space);
         }
     }
     if response.dragged_by(PointerButton::Primary) {
         if let Some(pos) = response.interact_pointer_pos() {
-            update_primary(app, pos, rect);
+            update_primary(app, pos, pane);
         }
     }
     if response.drag_stopped_by(PointerButton::Primary) {
         let pos = response.interact_pointer_pos();
-        end_primary(app, pos, rect, response.double_clicked());
+        end_primary(app, pos, pane, response.double_clicked());
     } else if response.clicked() {
         if let Some(pos) = response.interact_pointer_pos() {
-            click(app, pos, rect, response.double_clicked());
+            click(app, pos, pane, response.double_clicked());
         }
     }
 
     if matches!(
-        app.tab().and_then(|tab| tab.drag.as_ref()),
+        app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
         Some(Drag::Pan { .. })
     ) {
         response.ctx.set_cursor_icon(CursorIcon::Grabbing);
     } else if matches!(app.capture, CaptureMode::Region)
         || matches!(
-            app.tab().and_then(|tab| tab.drag.as_ref()),
+            app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
             Some(Drag::Marquee { .. })
         )
     {
@@ -404,7 +417,7 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         || app.tool.is_text_mark()
         || matches!(app.tool, Tool::Text | Tool::Math)
         || matches!(
-            app.tab().and_then(|tab| tab.drag.as_ref()),
+            app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.as_ref()),
             Some(Drag::TextSelect { .. })
         )
     {
@@ -412,10 +425,11 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
     }
 }
 
-fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
+fn begin_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, space: bool) {
+    let view = pane.rect;
     if app.capture != CaptureMode::None && !space {
         let capture = app.capture;
-        let Some(tab) = app.tab_mut() else {
+        let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
             return;
         };
         let Some((page, point)) = tab.doc.screen_to_page(pos, view) else {
@@ -449,7 +463,7 @@ fn begin_primary(app: &mut MarkerApp, pos: Pos2, view: Rect, space: bool) {
     }
 
     let tool = app.tool;
-    let Some(tab) = app.tab_mut() else {
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
     };
     if space {
@@ -679,8 +693,9 @@ fn begin_highlight(tab: &mut Tab, page: usize, point: PdfPoint, style: Option<Ma
     });
 }
 
-fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
-    let drag = app.tab().and_then(|tab| tab.drag.clone());
+fn update_primary(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx) {
+    let view = pane.rect;
+    let drag = app.tab_by_id(pane.tab_id).and_then(|tab| tab.drag.clone());
     let Some(drag) = drag else {
         return;
     };
@@ -690,7 +705,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             scroll_y,
             pos: start,
         } => {
-            if let Some(tab) = app.tab_mut() {
+            if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                 tab.doc.scroll_x = scroll_x - (pos.x - start.x);
                 tab.doc.scroll_y = scroll_y - (pos.y - start.y);
                 tab.doc.clamp_scroll(view);
@@ -707,7 +722,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             style,
             ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let point = tab
@@ -739,7 +754,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             origin,
             ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let point = tab
@@ -767,7 +782,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             origin,
             ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let point = tab
@@ -790,7 +805,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             });
         }
         Drag::Marquee { page, origin, .. } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let point = tab
@@ -806,7 +821,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             });
         }
         Drag::Region { page, origin, .. } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let point = tab
@@ -824,7 +839,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         Drag::Shape {
             page, kind, origin, ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let current = tab
@@ -843,7 +858,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         Drag::Create {
             page, origin, kind, ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let current = tab
@@ -867,7 +882,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         } => {
             app.seal_then_arm();
             {
-                let Some(tab) = app.tab_mut() else {
+                let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                     return;
                 };
                 let Some((_, point)) = tab
@@ -887,7 +902,9 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                     }
                 }
             }
-            if let Some(Drag::Move { moved, .. }) = app.tab_mut().and_then(|tab| tab.drag.as_mut())
+            if let Some(Drag::Move { moved, .. }) = app
+                .tab_by_id_mut(pane.tab_id)
+                .and_then(|tab| tab.drag.as_mut())
             {
                 *moved = true;
             }
@@ -899,7 +916,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
             page,
         } => {
             app.seal_then_arm();
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let Some((_, point)) = tab
@@ -918,19 +935,21 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
     }
 }
 
-fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool) {
-    let drag = app.tab_mut().and_then(|tab| tab.drag.take());
+fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, pane: PaneCtx, double: bool) {
+    let drag = app
+        .tab_by_id_mut(pane.tab_id)
+        .and_then(|tab| tab.drag.take());
     let Some(pos) = pos else {
         if let Some(drag) = drag {
-            commit_drag(app, drag, view);
+            commit_drag(app, drag, pane);
         }
         return;
     };
     let Some(drag) = drag else {
-        click(app, pos, view, double);
+        click(app, pos, pane, double);
         return;
     };
-    if !drag_moved(&drag, app, pos, view) {
+    if !drag_moved(&drag, app, pos, pane) {
         match &drag {
             Drag::Highlight {
                 anchor: Some(_), ..
@@ -940,32 +959,33 @@ fn end_primary(app: &mut MarkerApp, pos: Option<Pos2>, view: Rect, double: bool)
             }
             | Drag::TextSelect {
                 anchor: Some(_), ..
-            } => commit_drag(app, drag, view),
+            } => commit_drag(app, drag, pane),
             Drag::Region { .. } | Drag::Marquee { .. } => {
                 // Tiny click — ignore empty crop / marquee.
             }
             Drag::Create {
                 page, origin, kind, ..
             } => {
-                place_box(app, *page, *origin, None, *kind);
+                place_box(app, pane, *page, *origin, None, *kind);
             }
             Drag::Move { ids, .. } => {
-                click(app, pos, view, double);
-                if let Some(tab) = app.tab_mut() {
+                click(app, pos, pane, double);
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     if !ids.is_empty() {
                         tab.select_many(ids.clone());
                     }
                 }
             }
-            _ => click(app, pos, view, double),
+            _ => click(app, pos, pane, double),
         }
         return;
     }
-    commit_drag(app, drag, view);
+    commit_drag(app, drag, pane);
 }
 
-fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
-    let Some(tab) = app.tab() else {
+fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, pane: PaneCtx) -> bool {
+    let view = pane.rect;
+    let Some(tab) = app.tab_by_id(pane.tab_id) else {
         return false;
     };
     match drag {
@@ -1035,16 +1055,19 @@ fn drag_moved(drag: &Drag, app: &MarkerApp, pos: Pos2, view: Rect) -> bool {
     }
 }
 
-fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
+fn click(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx, double: bool) {
+    let view = pane.rect;
     // True clicks never start a drag (`Sense::click_and_drag` waits for movement), so
     // text / highlight / learning selection must be handled here — including double-click
     // whole-word selection (#34).
     if app.capture == CaptureMode::LearningText {
-        let Some((page, point)) = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view))
+        let Some((page, point)) = app
+            .tab_by_id(pane.tab_id)
+            .and_then(|tab| tab.doc.screen_to_page(pos, view))
         else {
             return;
         };
-        select_glyphs_at_point(app, page, point, double, GlyphClick::Learning);
+        select_glyphs_at_point(app, pane, page, point, double, GlyphClick::Learning);
         return;
     }
     if app.capture == CaptureMode::Region {
@@ -1052,33 +1075,43 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
     }
 
     let tool = app.tool;
-    let located = app.tab().and_then(|tab| tab.doc.screen_to_page(pos, view));
+    let located = app
+        .tab_by_id(pane.tab_id)
+        .and_then(|tab| tab.doc.screen_to_page(pos, view));
     let Some((page, point)) = located else {
         app.end_edit_undo();
         app.clear_page_selection();
         return;
     };
-    let slop = app.tab().map(|tab| 4.0 / tab.doc.scale).unwrap_or(4.0);
+    let slop = app
+        .tab_by_id(pane.tab_id)
+        .map(|tab| 4.0 / tab.doc.scale)
+        .unwrap_or(4.0);
     let hit = app
-        .tab()
+        .tab_by_id(pane.tab_id)
         .and_then(|tab| tab.doc.session.hit_test(page, point, slop));
     match tool {
         Tool::Select => {
             if let Some(id) = hit {
                 let open = double
-                    || app.tab().is_some_and(|tab| {
+                    || app.tab_by_id(pane.tab_id).is_some_and(|tab| {
                         matches!(
                             tab.doc.session.get(id).map(|annot| &annot.kind),
                             Some(AnnotKind::Note { .. })
                         )
                     });
-                let editable = app.tab().is_some_and(|tab| is_editable(tab, id));
+                let editable = app
+                    .tab_by_id(pane.tab_id)
+                    .is_some_and(|tab| is_editable(tab, id));
                 if open && editable {
                     app.begin_edit_undo(id);
-                } else if app.tab().is_some_and(|tab| tab.editing.is_some()) {
+                } else if app
+                    .tab_by_id(pane.tab_id)
+                    .is_some_and(|tab| tab.editing.is_some())
+                {
                     app.end_edit_undo();
                 }
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.style_bar = None;
@@ -1090,7 +1123,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                     }
                 }
             } else if double
-                && select_glyphs_at_point(app, page, point, true, GlyphClick::TextSelect)
+                && select_glyphs_at_point(app, pane, page, point, true, GlyphClick::TextSelect)
             {
                 app.end_edit_undo();
             } else {
@@ -1101,6 +1134,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
         Tool::Highlight | Tool::Underline | Tool::StrikeOut | Tool::Squiggly => {
             if select_glyphs_at_point(
                 app,
+                pane,
                 page,
                 point,
                 double,
@@ -1113,7 +1147,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
         }
         Tool::Text => {
             let text = hit.filter(|id| {
-                app.tab().is_some_and(|tab| {
+                app.tab_by_id(pane.tab_id).is_some_and(|tab| {
                     matches!(
                         tab.doc.session.get(*id).map(|annot| &annot.kind),
                         Some(AnnotKind::Text { .. })
@@ -1122,7 +1156,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
             });
             if let Some(id) = text {
                 app.begin_edit_undo(id);
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.editing = Some(id);
@@ -1132,12 +1166,12 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 if hit.is_none() {
                     app.clear_page_selection();
                 }
-                place_box(app, page, point, None, CreateKind::Text);
+                place_box(app, pane, page, point, None, CreateKind::Text);
             }
         }
         Tool::Note => {
             let note = hit.filter(|id| {
-                app.tab().is_some_and(|tab| {
+                app.tab_by_id(pane.tab_id).is_some_and(|tab| {
                     matches!(
                         tab.doc.session.get(*id).map(|annot| &annot.kind),
                         Some(AnnotKind::Note { .. })
@@ -1146,7 +1180,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
             });
             if let Some(id) = note {
                 app.begin_edit_undo(id);
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.editing = Some(id);
@@ -1157,12 +1191,12 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                     app.clear_page_selection();
                 }
                 // Click places a default-size note; notes are not drag-to-size.
-                place_box(app, page, point, None, CreateKind::Note);
+                place_box(app, pane, page, point, None, CreateKind::Note);
             }
         }
         Tool::Math => {
             let math = hit.filter(|id| {
-                app.tab().is_some_and(|tab| {
+                app.tab_by_id(pane.tab_id).is_some_and(|tab| {
                     matches!(
                         tab.doc.session.get(*id).map(|annot| &annot.kind),
                         Some(AnnotKind::Math { .. })
@@ -1171,7 +1205,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
             });
             if let Some(id) = math {
                 app.begin_edit_undo(id);
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     tab.select_only(id);
                     tab.assistant.learning = None;
                     tab.editing = Some(id);
@@ -1181,7 +1215,7 @@ fn click(app: &mut MarkerApp, pos: Pos2, view: Rect, double: bool) {
                 if hit.is_none() {
                     app.clear_page_selection();
                 }
-                place_box(app, page, point, None, CreateKind::Math);
+                place_box(app, pane, page, point, None, CreateKind::Math);
             }
         }
         Tool::Rect | Tool::Ellipse | Tool::Line => {
@@ -1211,13 +1245,14 @@ enum GlyphClick {
 /// Returns false when no glyph is under the point.
 fn select_glyphs_at_point(
     app: &mut MarkerApp,
+    pane: PaneCtx,
     page: usize,
     point: PdfPoint,
     whole_word: bool,
     kind: GlyphClick,
 ) -> bool {
     let (lo, hi, word) = {
-        let Some(tab) = app.tab() else {
+        let Some(tab) = app.tab_by_id(pane.tab_id) else {
             return false;
         };
         let Some(glyphs) = tab.doc.glyphs.get(&page) else {
@@ -1235,7 +1270,7 @@ fn select_glyphs_at_point(
 
     match kind {
         GlyphClick::TextSelect => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return false;
             };
             tab.selected.clear();
@@ -1250,7 +1285,7 @@ fn select_glyphs_at_point(
             true
         }
         GlyphClick::Learning => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return false;
             };
             tab.assistant.learning = Some(LearningSelection {
@@ -1266,7 +1301,7 @@ fn select_glyphs_at_point(
         GlyphClick::Mark(style) => {
             let color = app.settings.highlight_color;
             let replace = {
-                let Some(tab) = app.tab() else {
+                let Some(tab) = app.tab_by_id(pane.tab_id) else {
                     return false;
                 };
                 if !whole_word {
@@ -1282,7 +1317,7 @@ fn select_glyphs_at_point(
                 }
             };
             let quads = {
-                let Some(tab) = app.tab() else {
+                let Some(tab) = app.tab_by_id(pane.tab_id) else {
                     return false;
                 };
                 let Some(glyphs) = tab.doc.glyphs.get(&page) else {
@@ -1294,7 +1329,7 @@ fn select_glyphs_at_point(
                 return false;
             }
             app.seal_then_arm();
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return false;
             };
             if let Some(old) = replace {
@@ -1319,7 +1354,7 @@ fn select_glyphs_at_point(
     }
 }
 
-fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
+fn commit_drag(app: &mut MarkerApp, drag: Drag, pane: PaneCtx) {
     match drag {
         Drag::LearningSelect {
             page,
@@ -1327,7 +1362,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             current,
             ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             if let (Some(a), Some(c)) = (anchor, current) {
@@ -1347,7 +1382,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             current,
             ..
         } => {
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             if let (Some(a), Some(c)) = (anchor, current) {
@@ -1369,7 +1404,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 return;
             }
             let style_id = {
-                let Some(tab) = app.tab_mut() else {
+                let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                     return;
                 };
                 let ids = tab.doc.session.ids_centered_in(page, rect);
@@ -1418,7 +1453,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
         } => {
             let color = app.settings.highlight_color;
             let quads = {
-                let Some(tab) = app.tab() else {
+                let Some(tab) = app.tab_by_id(pane.tab_id) else {
                     return;
                 };
                 mark_drag_quads(
@@ -1435,7 +1470,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 return;
             }
             app.seal_then_arm();
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             if let Some(old) = replace {
@@ -1476,7 +1511,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
             let stroke = app.settings.shape_color;
             let width = app.settings.shape_width;
             app.seal_then_arm();
-            let Some(tab) = app.tab_mut() else {
+            let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
                 return;
             };
             let id = tab.doc.session.insert(
@@ -1510,7 +1545,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                 let sized = rect.width() >= 12.0 && rect.height() >= 8.0;
                 sized.then_some(rect)
             };
-            place_box(app, page, origin, rect, kind);
+            place_box(app, pane, page, origin, rect, kind);
         }
         Drag::Move {
             ids,
@@ -1520,7 +1555,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
         } => {
             if moved {
                 let mut dirty = Vec::new();
-                if let Some(tab) = app.tab_mut() {
+                if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                     for (id, origin) in &origins {
                         if tab
                             .doc
@@ -1540,13 +1575,13 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                     app.queue_math(id);
                 }
             }
-            if let Some(tab) = app.tab_mut() {
+            if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                 tab.select_many(ids);
             }
             app.seal_undo();
         }
         Drag::Resize { id, .. } => {
-            if let Some(tab) = app.tab_mut() {
+            if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
                 tab.doc.session.mark_dirty(id);
                 if !tab.is_selected(id) {
                     tab.select_only(id);
@@ -1562,6 +1597,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
 
 fn place_box(
     app: &mut MarkerApp,
+    pane: PaneCtx,
     page: usize,
     point: PdfPoint,
     rect: Option<PdfRect>,
@@ -1570,7 +1606,7 @@ fn place_box(
     let settings = app.settings.clone();
     app.seal_then_arm();
     let id = {
-        let Some(tab) = app.tab_mut() else {
+        let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
             return;
         };
         place_box_tab(tab, page, point, rect, kind, &settings, String::new());
@@ -1823,8 +1859,14 @@ fn resize_target(
     None
 }
 
-fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
-    let Some(tab_idx) = app.tab_index(app.active) else {
+fn paint_document(
+    app: &mut MarkerApp,
+    painter: &egui::Painter,
+    pane: PaneCtx,
+    pixels_per_point: f32,
+) {
+    let view = pane.rect;
+    let Some(tab_idx) = app.tab_index(pane.tab_id) else {
         return;
     };
     if app.tabs[tab_idx].doc.pages.is_empty() {
@@ -1876,8 +1918,8 @@ fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixe
         paint_search_hits(tab, painter, page, view);
         paint_annotations(tab, &app.math_cache, painter, page, view);
     }
-    paint_drag_preview(app, painter, view);
-    paint_learning_selection(app, painter, view);
+    paint_drag_preview(app, painter, pane);
+    paint_learning_selection(app, painter, pane);
 }
 
 /// Marker-tint fill used for on-screen highlights (underpainted before tiles).
@@ -2452,8 +2494,9 @@ fn fit_math(box_rect: Rect, nat_w: f32, nat_h: f32, scale: f32) -> Rect {
     Rect::from_min_size(box_rect.min, size)
 }
 
-fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
-    let Some(tab) = app.tab() else {
+fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
+    let view = pane.rect;
+    let Some(tab) = app.tab_by_id(pane.tab_id) else {
         return;
     };
     // Skip while actively dragging a new learning / text select.
@@ -2482,8 +2525,9 @@ fn paint_learning_selection(app: &MarkerApp, painter: &egui::Painter, view: Rect
     }
 }
 
-fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
-    let Some(tab) = app.tab() else {
+fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
+    let view = pane.rect;
+    let Some(tab) = app.tab_by_id(pane.tab_id) else {
         return;
     };
     match &tab.drag {
@@ -3849,8 +3893,8 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     }
 }
 
-fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
-    let Some(tab) = app.tab_mut() else {
+fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context, pane: PaneCtx) {
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
     };
     let epoch = tab.doc.session.epoch;
@@ -3910,8 +3954,9 @@ fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
     }
 }
 
-fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
-    let located = app.tab().and_then(|tab| {
+fn open_context_menu(app: &mut MarkerApp, pos: Pos2, pane: PaneCtx) {
+    let view = pane.rect;
+    let located = app.tab_by_id(pane.tab_id).and_then(|tab| {
         let (page, point) = tab.doc.screen_to_page(pos, view)?;
         let hit = tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale);
         Some((page, point, hit))
@@ -3920,7 +3965,7 @@ fn open_context_menu(app: &mut MarkerApp, pos: Pos2, view: Rect) {
         return;
     };
     let can_paste = clipboard_has_image();
-    if let Some(tab) = app.tab_mut() {
+    if let Some(tab) = app.tab_by_id_mut(pane.tab_id) {
         tab.style_bar = None;
         if let Some(id) = hit {
             // Right-click on an annotation: target that object (keep multi if already in it).
@@ -4523,9 +4568,10 @@ fn annot_menu_label(kind: &AnnotKind) -> &'static str {
     }
 }
 
-fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
-    let scroll_id = app.active;
-    let Some(tab) = app.tab_mut() else {
+fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, pane: PaneCtx) {
+    let view = pane.rect;
+    let scroll_id = pane.tab_id;
+    let Some(tab) = app.tab_by_id_mut(pane.tab_id) else {
         return;
     };
     let height = tab.doc.doc_height_px();

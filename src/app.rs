@@ -636,14 +636,33 @@ enum UndoEntry {
     Annots(Session),
     /// A blank page was inserted at this index.
     InsertPage { index: usize },
+    /// A page was deleted at this index (undo re-inserts a blank page).
+    DeletePage { index: usize },
+}
+
+/// How to restore undo/redo stacks when a page op fails after they were pre-mutated.
+#[derive(Clone, Copy)]
+enum PageOpFailRevert {
+    /// Entry was moved undo→redo; on failure pop redo and push undo.
+    FromRedo,
+    /// Entry was moved redo→undo; on failure pop undo and push redo.
+    FromUndo,
 }
 
 #[derive(Clone, Copy)]
 enum PendingPageOp {
     /// Insert blank page at `index`. `record_undo` is set for user-driven inserts.
-    Insert { index: usize, record_undo: bool },
-    /// Undo of InsertPage — waiting for delete.
-    Delete { index: usize },
+    Insert {
+        index: usize,
+        record_undo: bool,
+        revert: Option<PageOpFailRevert>,
+    },
+    /// Delete page at `index`. `record_undo` is set for user-driven deletes.
+    Delete {
+        index: usize,
+        record_undo: bool,
+        revert: Option<PageOpFailRevert>,
+    },
 }
 
 #[derive(Clone)]
@@ -1462,9 +1481,28 @@ impl MarkerApp {
                     return;
                 };
                 tab.redo.push(UndoEntry::InsertPage { index });
-                tab.page_op = Some(PendingPageOp::Delete { index });
+                tab.page_op = Some(PendingPageOp::Delete {
+                    index,
+                    record_undo: false,
+                    revert: Some(PageOpFailRevert::FromRedo),
+                });
                 if let Some(gen) = gen {
                     self.worker.delete_page(gen, index);
+                }
+            }
+            UndoEntry::DeletePage { index } => {
+                let gen = self.tab().map(|tab| tab.doc.gen);
+                let Some(tab) = self.tab_mut() else {
+                    return;
+                };
+                tab.redo.push(UndoEntry::DeletePage { index });
+                tab.page_op = Some(PendingPageOp::Insert {
+                    index,
+                    record_undo: false,
+                    revert: Some(PageOpFailRevert::FromRedo),
+                });
+                if let Some(gen) = gen {
+                    self.worker.insert_page_at(gen, index);
                 }
             }
         }
@@ -1510,9 +1548,25 @@ impl MarkerApp {
                 tab.page_op = Some(PendingPageOp::Insert {
                     index,
                     record_undo: false,
+                    revert: Some(PageOpFailRevert::FromUndo),
                 });
                 if let Some(gen) = gen {
                     self.worker.insert_page_at(gen, index);
+                }
+            }
+            UndoEntry::DeletePage { index } => {
+                let gen = self.tab().map(|tab| tab.doc.gen);
+                let Some(tab) = self.tab_mut() else {
+                    return;
+                };
+                tab.undo.push(UndoEntry::DeletePage { index });
+                tab.page_op = Some(PendingPageOp::Delete {
+                    index,
+                    record_undo: false,
+                    revert: Some(PageOpFailRevert::FromUndo),
+                });
+                if let Some(gen) = gen {
+                    self.worker.delete_page(gen, index);
                 }
             }
         }
@@ -2131,6 +2185,11 @@ pub(crate) const SHORTCUTS: &[ShortcutEntry] = &[
         keys: "Ctrl+Shift+Enter",
         action: "Insert blank page",
     },
+    ShortcutEntry {
+        section: ShortcutSection::Edit,
+        keys: "Ctrl+Shift+Backspace",
+        action: "Delete current page",
+    },
     // View
     ShortcutEntry {
         section: ShortcutSection::View,
@@ -2541,20 +2600,22 @@ impl MarkerApp {
                         tab.inflight.clear();
                         tab.search.pending = false;
                         if let Some(op) = tab.page_op.take() {
-                            match op {
-                                PendingPageOp::Delete { index } => {
-                                    tab.redo.pop();
-                                    tab.undo.push(UndoEntry::InsertPage { index });
-                                }
-                                PendingPageOp::Insert {
-                                    index,
-                                    record_undo,
-                                } => {
-                                    if !record_undo {
-                                        tab.undo.pop();
-                                        tab.redo.push(UndoEntry::InsertPage { index });
+                            let revert = match op {
+                                PendingPageOp::Delete { revert, .. }
+                                | PendingPageOp::Insert { revert, .. } => revert,
+                            };
+                            match revert {
+                                Some(PageOpFailRevert::FromRedo) => {
+                                    if let Some(entry) = tab.redo.pop() {
+                                        tab.undo.push(entry);
                                     }
                                 }
+                                Some(PageOpFailRevert::FromUndo) => {
+                                    if let Some(entry) = tab.undo.pop() {
+                                        tab.redo.push(entry);
+                                    }
+                                }
+                                None => {}
                             }
                         }
                     }
@@ -2571,10 +2632,14 @@ impl MarkerApp {
             };
             let op = tab.page_op.take();
             match op {
-                Some(PendingPageOp::Insert { record_undo, .. }) => record_undo,
+                Some(PendingPageOp::Insert {
+                    index: expected,
+                    record_undo,
+                    ..
+                }) if expected == index => record_undo,
                 None => true,
-                Some(PendingPageOp::Delete { .. }) => {
-                    tab.page_op = op;
+                other => {
+                    tab.page_op = other;
                     return;
                 }
             }
@@ -2619,16 +2684,25 @@ impl MarkerApp {
     }
 
     fn on_page_deleted(&mut self, gen: u64, index: usize, pages: Vec<crate::pdf::PageInfo>) {
+        let record_undo = {
+            let Some(tab) = self.tab_by_gen_mut(gen) else {
+                return;
+            };
+            match tab.page_op.take() {
+                Some(PendingPageOp::Delete {
+                    index: expected,
+                    record_undo,
+                    ..
+                }) if expected == index => record_undo,
+                other => {
+                    tab.page_op = other;
+                    return;
+                }
+            }
+        };
         let Some(tab) = self.tab_by_gen_mut(gen) else {
             return;
         };
-        match tab.page_op.take() {
-            Some(PendingPageOp::Delete { index: expected }) if expected == index => {}
-            other => {
-                tab.page_op = other;
-                return;
-            }
-        }
         tab.doc.session.unshift_pages_from(index);
         tab.doc.pages = pages;
         tab.doc.tops = DocState::rebuild_tops(&tab.doc.pages);
@@ -2668,6 +2742,13 @@ impl MarkerApp {
         }
         let jump = index.min(tab.doc.pages.len().saturating_sub(1));
         tab.pending_jump = Some((jump, Some(0.0)));
+        if record_undo {
+            tab.undo.push(UndoEntry::DeletePage { index });
+            if tab.undo.len() > 80 {
+                tab.undo.remove(0);
+            }
+            tab.redo.clear();
+        }
         self.error = None;
     }
 
@@ -2690,9 +2771,52 @@ impl MarkerApp {
             tab.page_op = Some(PendingPageOp::Insert {
                 index: at,
                 record_undo: true,
+                revert: None,
             });
         }
         self.worker.insert_page(gen, after);
+    }
+
+    /// Delete the page under the viewport focus.
+    pub(crate) fn delete_current_page(&mut self) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        let index = tab.doc.current_page(self.view_rect.height().max(1.0));
+        self.delete_page_at(index);
+    }
+
+    /// Delete page `index`. Refuses the only page and while a text edit is open.
+    pub(crate) fn delete_page_at(&mut self, index: usize) {
+        let Some(tab) = self.tab() else {
+            return;
+        };
+        if tab.editing.is_some() {
+            self.error = Some("Finish or cancel the text edit before deleting a page.".into());
+            return;
+        }
+        if matches!(tab.save, SaveState::Saving) || tab.page_op.is_some() {
+            return;
+        }
+        if tab.doc.pages.len() <= 1 {
+            self.error = Some("Cannot delete the only page.".into());
+            return;
+        }
+        if index >= tab.doc.pages.len() {
+            self.error = Some("Page index out of range.".into());
+            return;
+        }
+        let gen = tab.doc.gen;
+        self.seal_undo();
+        if let Some(tab) = self.tab_mut() {
+            tab.menu = None;
+            tab.page_op = Some(PendingPageOp::Delete {
+                index,
+                record_undo: true,
+                revert: None,
+            });
+        }
+        self.worker.delete_page(gen, index);
     }
 
     fn on_saved(&mut self, gen: u64, result: Result<Vec<crate::pdf::SavedXref>, String>) {
@@ -3805,6 +3929,13 @@ impl MarkerApp {
                 && input.modifiers.shift
         }) {
             self.insert_page_after_current();
+        }
+        if ctx.input(|input| {
+            input.key_pressed(Key::Backspace)
+                && input.modifiers.command
+                && input.modifiers.shift
+        }) {
+            self.delete_current_page();
         }
         if ctx.input(|input| input.key_pressed(Key::W) && input.modifiers.command) {
             let active = self.active;
@@ -5897,6 +6028,9 @@ mod shortcut_tests {
         assert!(SHORTCUTS.iter().any(|row| row.keys == "X"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "W"));
         assert!(SHORTCUTS.iter().any(|row| row.keys == "N"));
+        assert!(SHORTCUTS
+            .iter()
+            .any(|row| row.keys == "Ctrl+Shift+Backspace" && row.action.contains("Delete")));
     }
 }
 

@@ -9,8 +9,8 @@ use egui::{
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{
-    AnnotFilterKind, CreateKind, MarkerApp, SaveState, ShortcutSection, SplitDropZone, SplitState,
-    Tab, TabListState, Tool, SHORTCUTS,
+    AnnotFilterKind, CreateKind, MarkerApp, ReviewGroupMode, SaveState, ShortcutSection,
+    SplitDropZone, SplitState, Tab, TabListState, Tool, SHORTCUTS,
 };
 use crate::assistant::{
     assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
@@ -38,6 +38,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     if show_chrome {
         outline_panel(app, ctx);
         annot_sidebar(app, ctx);
+        review_panel(app, ctx);
         assistant_panel(app, ctx);
     }
     paint_tab_list(app, ctx, show_chrome);
@@ -153,6 +154,16 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         if let Some(tab) = app.tab_mut() {
             tab.annots_open = !tab.annots_open;
+        }
+    }
+    let review_on = app.tab().map(|tab| tab.review_open).unwrap_or(false);
+    if app.tab().is_some()
+        && chrome_button(ui, "Review", review_on)
+            .on_hover_text("Review highlights and notes by preset or outline")
+            .clicked()
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.review_open = !tab.review_open;
         }
     }
     if app.tab().is_some() {
@@ -1393,6 +1404,311 @@ fn annot_sidebar(app: &mut MarkerApp, ctx: &egui::Context) {
             tab.pending_jump = Some((page, y));
         }
     }
+}
+
+fn review_panel(app: &mut MarkerApp, ctx: &egui::Context) {
+    let colors = p(ctx);
+    let presets = app.settings.highlight_presets.clone();
+    let Some(tab) = app.tab() else {
+        return;
+    };
+    if !tab.review_open {
+        return;
+    }
+
+    let rows = collect_review_rows(tab, &presets);
+    let outline = tab.doc.outline.clone();
+    let mut group_by = tab.review.group_by;
+    let mut hide_text = tab.review.hide_text;
+    let revealed = tab.review.revealed.clone();
+    let mut activate: Option<u64> = None;
+    let mut reveal: Option<u64> = None;
+    let mut close = false;
+    let mut clear_revealed = false;
+
+    // Empty outline falls back to preset grouping (ST4 pitfall).
+    let outline_starts = flatten_outline_starts(&outline);
+    let use_outline = group_by == ReviewGroupMode::Outline && !outline_starts.is_empty();
+    let groups = group_review_rows(&rows, use_outline, &outline_starts);
+
+    egui::SidePanel::left("review-panel")
+        .resizable(true)
+        .default_width(300.0)
+        .width_range(220.0..=480.0)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome)
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
+                .inner_margin(10.0),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Review").strong().size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Hide review")
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                if filter_chip(ui, "Preset", group_by == ReviewGroupMode::Preset).clicked() {
+                    group_by = ReviewGroupMode::Preset;
+                }
+                if filter_chip(ui, "Outline", group_by == ReviewGroupMode::Outline).clicked() {
+                    group_by = ReviewGroupMode::Outline;
+                }
+            });
+            if group_by == ReviewGroupMode::Outline && outline_starts.is_empty() {
+                ui.label(
+                    RichText::new("No outline — grouping by preset.")
+                        .size(11.0)
+                        .weak(),
+                );
+            }
+            ui.add_space(2.0);
+            let hide_was = hide_text;
+            if ui
+                .checkbox(&mut hide_text, "Hide text")
+                .on_hover_text("Show only page and preset until a row is clicked")
+                .changed()
+                && hide_text
+                && !hide_was
+            {
+                clear_revealed = true;
+            }
+            ui.add_space(6.0);
+
+            ScrollArea::vertical()
+                .id_salt("review-panel-list")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if rows.is_empty() {
+                        ui.label(RichText::new("No highlights or notes").weak());
+                        return;
+                    }
+                    for (heading, items) in &groups {
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(heading).strong().size(12.0));
+                        ui.add_space(2.0);
+                        for row in items {
+                            let show_quote = !hide_text || revealed.contains(&row.id);
+                            let response = review_row(ui, row, show_quote);
+                            if response.clicked() {
+                                if hide_text && !show_quote {
+                                    reveal = Some(row.id);
+                                } else {
+                                    activate = Some(row.id);
+                                }
+                            }
+                        }
+                    }
+                });
+        });
+
+    if let Some(tab) = app.tab_mut() {
+        tab.review.group_by = group_by;
+        tab.review.hide_text = hide_text;
+        if clear_revealed {
+            tab.review.revealed.clear();
+        }
+        if let Some(id) = reveal {
+            tab.review.revealed.insert(id);
+        }
+        if close {
+            tab.review_open = false;
+        }
+    }
+    if let Some(id) = activate {
+        if let Some(tab) = app.tab_mut() {
+            let (page, y) = tab
+                .doc
+                .session
+                .get(id)
+                .map(|annot| (annot.page, annot.bounds().map(|b| b.y0)))
+                .unwrap_or((0, None));
+            tab.select_only(id);
+            tab.pending_jump = Some((page, y));
+        }
+    }
+}
+
+struct ReviewRow {
+    id: u64,
+    page: usize,
+    preset: String,
+    kind_label: &'static str,
+    color: Option<Rgb>,
+    quote: String,
+}
+
+fn collect_review_rows(tab: &Tab, presets: &[HighlightPreset]) -> Vec<ReviewRow> {
+    tab.doc
+        .session
+        .annotations
+        .iter()
+        .filter_map(|annot| review_row_data(tab, annot, presets))
+        .collect()
+}
+
+fn review_row_data(
+    tab: &Tab,
+    annot: &Annotation,
+    presets: &[HighlightPreset],
+) -> Option<ReviewRow> {
+    let (kind_label, color, quote) = match &annot.kind {
+        AnnotKind::Highlight { quads, color } | AnnotKind::Markup { quads, color, .. } => {
+            let quote = if let Some(glyphs) = tab.doc.glyphs.get(&annot.page) {
+                let indices = glyphs_intersecting_rects(glyphs, quads);
+                if let (Some(&lo), Some(&hi)) = (indices.first(), indices.last()) {
+                    reconstruct_text(glyphs, lo, hi)
+                } else {
+                    String::new()
+                }
+            } else {
+                String::new()
+            };
+            (annot_kind_label(&annot.kind), Some(*color), quote)
+        }
+        AnnotKind::Note { content, color, .. } => {
+            ("Note", Some(*color), content.clone())
+        }
+        _ => return None,
+    };
+    let preset = color
+        .map(|c| highlight_color_name(presets, c).to_owned())
+        .unwrap_or_else(|| "Custom".into());
+    Some(ReviewRow {
+        id: annot.id,
+        page: annot.page,
+        preset,
+        kind_label,
+        color,
+        quote: one_line_snippet(&quote, 120),
+    })
+}
+
+/// DFS order of outline nodes that have a destination page.
+fn flatten_outline_starts(nodes: &[OutlineNode]) -> Vec<(String, usize)> {
+    let mut out = Vec::new();
+    flatten_outline_starts_into(nodes, &mut out);
+    out
+}
+
+fn flatten_outline_starts_into(nodes: &[OutlineNode], out: &mut Vec<(String, usize)>) {
+    for node in nodes {
+        if let Some(page) = node.page {
+            out.push((node.title.clone(), page));
+        }
+        flatten_outline_starts_into(&node.children, out);
+    }
+}
+
+/// Last outline entry whose start page is ≤ `page`, else "Front matter".
+fn outline_bucket_for(starts: &[(String, usize)], page: usize) -> String {
+    let mut best: Option<&str> = None;
+    let mut best_page = 0usize;
+    for (title, start) in starts {
+        if *start <= page && (best.is_none() || *start >= best_page) {
+            best = Some(title.as_str());
+            best_page = *start;
+        }
+    }
+    best.unwrap_or("Front matter").to_owned()
+}
+
+fn group_review_rows<'a>(
+    rows: &'a [ReviewRow],
+    by_outline: bool,
+    outline_starts: &[(String, usize)],
+) -> Vec<(String, Vec<&'a ReviewRow>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut map: std::collections::HashMap<String, Vec<&ReviewRow>> =
+        std::collections::HashMap::new();
+    for row in rows {
+        let key = if by_outline {
+            outline_bucket_for(outline_starts, row.page)
+        } else {
+            row.preset.clone()
+        };
+        if !map.contains_key(&key) {
+            order.push(key.clone());
+        }
+        map.entry(key).or_default().push(row);
+    }
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let items = map.remove(&key)?;
+            Some((key, items))
+        })
+        .collect()
+}
+
+fn review_row(ui: &mut egui::Ui, row: &ReviewRow, show_quote: bool) -> egui::Response {
+    let colors = p(ui.ctx());
+    let available = ui.available_width();
+    let prompt = format!("p.{} · {}", row.page + 1, row.preset);
+    let response = egui::Frame::new()
+        .fill(Color32::TRANSPARENT)
+        .corner_radius(5.0)
+        .inner_margin(egui::Margin::symmetric(6, 5))
+        .show(ui, |ui| {
+            ui.set_width(available - 4.0);
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let (swatch, _) = ui.allocate_exact_size(Vec2::splat(12.0), Sense::hover());
+                if let Some(color) = row.color {
+                    ui.painter()
+                        .circle_filled(swatch.center(), 5.0, color.to_color32());
+                } else {
+                    ui.painter().circle_stroke(
+                        swatch.center(),
+                        5.0,
+                        Stroke::new(1.0_f32, colors.hairline),
+                    );
+                }
+                ui.vertical(|ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(RichText::new(&prompt).size(12.5).strong());
+                        ui.label(RichText::new(row.kind_label).size(11.0).weak());
+                    });
+                    if show_quote {
+                        let quote = if row.quote.is_empty() {
+                            "—"
+                        } else {
+                            row.quote.as_str()
+                        };
+                        ui.label(
+                            RichText::new(quote)
+                                .size(11.5)
+                                .color(colors.text.gamma_multiply(0.85)),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("Click to reveal")
+                                .size(11.0)
+                                .italics()
+                                .weak(),
+                        );
+                    }
+                });
+            });
+        })
+        .response
+        .interact(Sense::click());
+    if show_quote && !row.quote.is_empty() {
+        response.clone().on_hover_text(&row.quote);
+    } else if !show_quote {
+        response.clone().on_hover_text("Click to reveal quote");
+    }
+    response
 }
 
 struct AnnotSidebarRow {
@@ -2989,6 +3305,80 @@ mod tests {
         let presets = crate::settings::default_highlight_presets();
         assert_eq!(highlight_color_name(&presets, HIGHLIGHT_COLORS[0]), "Key idea");
         assert_eq!(highlight_color_name(&presets, Rgb::new(1, 2, 3)), "Custom");
+    }
+
+    #[test]
+    fn outline_bucket_picks_last_start_at_or_before_page() {
+        let starts = vec![
+            ("Intro".into(), 0usize),
+            ("Middle".into(), 3usize),
+            ("End".into(), 8usize),
+        ];
+        assert_eq!(outline_bucket_for(&starts, 0), "Intro");
+        assert_eq!(outline_bucket_for(&starts, 2), "Intro");
+        assert_eq!(outline_bucket_for(&starts, 3), "Middle");
+        assert_eq!(outline_bucket_for(&starts, 9), "End");
+        assert_eq!(outline_bucket_for(&[], 1), "Front matter");
+    }
+
+    #[test]
+    fn flatten_outline_starts_is_depth_first() {
+        let outline = vec![OutlineNode {
+            title: "A".into(),
+            page: Some(0),
+            y: None,
+            children: vec![OutlineNode {
+                title: "A.1".into(),
+                page: Some(2),
+                y: None,
+                children: Vec::new(),
+            }],
+        }];
+        let flat = flatten_outline_starts(&outline);
+        assert_eq!(flat, vec![("A".into(), 0), ("A.1".into(), 2)]);
+    }
+
+    #[test]
+    fn group_review_rows_by_preset_and_outline() {
+        let rows = vec![
+            ReviewRow {
+                id: 1,
+                page: 0,
+                preset: "Key idea".into(),
+                kind_label: "Highlight",
+                color: None,
+                quote: "alpha".into(),
+            },
+            ReviewRow {
+                id: 2,
+                page: 4,
+                preset: "Key idea".into(),
+                kind_label: "Note",
+                color: None,
+                quote: "beta".into(),
+            },
+            ReviewRow {
+                id: 3,
+                page: 5,
+                preset: "Question".into(),
+                kind_label: "Highlight",
+                color: None,
+                quote: "gamma".into(),
+            },
+        ];
+        let by_preset = group_review_rows(&rows, false, &[]);
+        assert_eq!(by_preset.len(), 2);
+        assert_eq!(by_preset[0].0, "Key idea");
+        assert_eq!(by_preset[0].1.len(), 2);
+        assert_eq!(by_preset[1].0, "Question");
+
+        let starts = vec![("Ch1".into(), 0usize), ("Ch2".into(), 5usize)];
+        let by_outline = group_review_rows(&rows, true, &starts);
+        assert_eq!(by_outline.len(), 2);
+        assert_eq!(by_outline[0].0, "Ch1");
+        assert_eq!(by_outline[0].1.len(), 2);
+        assert_eq!(by_outline[1].0, "Ch2");
+        assert_eq!(by_outline[1].1.len(), 1);
     }
 
     #[test]

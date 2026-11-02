@@ -44,6 +44,9 @@ pub(super) fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                     |ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
                         for tool in Tool::ALL {
+                            if !app.settings.tool_visible(tool.settings_id()) {
+                                continue;
+                            }
                             tool_chip(ui, &mut app.tool, tool);
                         }
                         vbar(ui);

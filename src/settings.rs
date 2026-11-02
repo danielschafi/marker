@@ -45,6 +45,48 @@ pub struct HighlightPreset {
     pub rgb: Rgb,
 }
 
+/// Chrome color scheme. PDF page tiles stay unstyled regardless of theme.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UiTheme {
+    #[default]
+    System,
+    Dark,
+    Light,
+    TokyoNight,
+    Everforest,
+}
+
+impl UiTheme {
+    pub const ALL: [Self; 5] = [
+        Self::System,
+        Self::Dark,
+        Self::Light,
+        Self::TokyoNight,
+        Self::Everforest,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "System",
+            Self::Dark => "Dark",
+            Self::Light => "Light",
+            Self::TokyoNight => "Tokyo Night",
+            Self::Everforest => "Everforest",
+        }
+    }
+
+    pub fn hint(self) -> &'static str {
+        match self {
+            Self::System => "Follow the desktop light/dark preference",
+            Self::Dark => "Marker dark chrome",
+            Self::Light => "Marker light chrome",
+            Self::TokyoNight => "Tokyo Night–inspired dark chrome",
+            Self::Everforest => "Everforest–inspired dark chrome",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Settings {
     pub text_size: f32,
@@ -68,6 +110,15 @@ pub struct Settings {
     /// Named highlight colors used by the toolbar, style bar, and sidebar filter.
     #[serde(default = "default_highlight_presets")]
     pub highlight_presets: Vec<HighlightPreset>,
+    /// UI chrome theme. Page rasterization is unchanged.
+    #[serde(default)]
+    pub ui_theme: UiTheme,
+    /// Soft translucent panels / backdrop around pages (not the PDF ink).
+    #[serde(default)]
+    pub translucent_chrome: bool,
+    /// Tool settings ids hidden from the toolbar strip (`select` cannot hide).
+    #[serde(default)]
+    pub hidden_tools: Vec<String>,
     #[serde(default)]
     pub recent: Vec<PathBuf>,
 }
@@ -115,6 +166,9 @@ impl Default for Settings {
             math_autosnippets: false,
             search_case_sensitive: false,
             highlight_presets: default_highlight_presets(),
+            ui_theme: UiTheme::System,
+            translucent_chrome: false,
+            hidden_tools: Vec::new(),
             recent: Vec::new(),
         }
     }
@@ -220,6 +274,26 @@ impl Settings {
         }
         if self.recent.len() != before {
             self.save();
+        }
+    }
+
+    /// Whether `tool_id` (see tool settings ids) should appear on the toolbar.
+    pub fn tool_visible(&self, tool_id: &str) -> bool {
+        if tool_id == "select" {
+            return true;
+        }
+        !self.hidden_tools.iter().any(|id| id == tool_id)
+    }
+
+    pub fn set_tool_visible(&mut self, tool_id: &str, visible: bool) {
+        if tool_id == "select" {
+            return;
+        }
+        let hidden = self.hidden_tools.iter().any(|id| id == tool_id);
+        if visible && hidden {
+            self.hidden_tools.retain(|id| id != tool_id);
+        } else if !visible && !hidden {
+            self.hidden_tools.push(tool_id.to_owned());
         }
     }
 }
@@ -394,6 +468,53 @@ mod tests {
             Some("Key idea")
         );
         assert_eq!(loaded.highlight_name_for(Rgb::new(1, 2, 3)), None);
+        cleanup(&dir);
+    }
+
+    #[test]
+    fn ui_theme_and_tools_round_trip() {
+        assert_eq!(Settings::default().ui_theme, UiTheme::System);
+        assert!(!Settings::default().translucent_chrome);
+        assert!(Settings::default().hidden_tools.is_empty());
+
+        let (dir, path) = test_config_path("ui-theme");
+        Settings::default().save_to(&path);
+        let text = fs::read_to_string(&path).expect("read");
+        let without: String = text
+            .lines()
+            .filter(|line| {
+                !line.contains("ui_theme")
+                    && !line.contains("translucent_chrome")
+                    && !line.contains("hidden_tools")
+            })
+            .flat_map(|line| [line, "\n"])
+            .collect();
+        fs::write(&path, without).expect("write");
+        let loaded = Settings::load_from(&path);
+        assert_eq!(loaded.ui_theme, UiTheme::System);
+        assert!(!loaded.translucent_chrome);
+        assert!(loaded.tool_visible("highlight"));
+
+        let mut settings = Settings {
+            ui_theme: UiTheme::TokyoNight,
+            translucent_chrome: true,
+            hidden_tools: vec!["math".into(), "line".into()],
+            ..Settings::default()
+        };
+        assert!(!settings.tool_visible("math"));
+        assert!(settings.tool_visible("select"));
+        settings.set_tool_visible("math", true);
+        assert!(settings.tool_visible("math"));
+        settings.set_tool_visible("ellipse", false);
+        settings.set_tool_visible("select", false);
+        assert!(settings.tool_visible("select"));
+        settings.save_to(&path);
+        let again = Settings::load_from(&path);
+        assert_eq!(again.ui_theme, UiTheme::TokyoNight);
+        assert!(again.translucent_chrome);
+        assert!(again.tool_visible("math"));
+        assert!(!again.tool_visible("ellipse"));
+        assert!(!again.tool_visible("line"));
         cleanup(&dir);
     }
 

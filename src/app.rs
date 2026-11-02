@@ -29,22 +29,36 @@ use crate::undo::{Direction, PageOpKind, PendingPageOp, StepOutcome, UndoEntry, 
 use crate::view::{self, viewport};
 use egui_commonmark::CommonMarkCache;
 
+/// Identity of one open tab in the strip (stable across reorders / closes).
+///
+/// Distinct from [`DocId`]: a tab keeps its id for its lifetime, while the
+/// document id is allocated when a path is opened. Prefer a separate counter so
+/// retargeting a document cannot look like a new tab.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct TabId(pub u64);
+
+impl std::fmt::Display for TabId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
 pub(crate) struct MarkerApp {
     pub(crate) settings: Settings,
     pub(crate) tool: Tool,
     pub(crate) tabs: Vec<Tab>,
-    pub(crate) active: usize,
+    pub(crate) active: TabId,
     pub(crate) view_rect: egui::Rect,
     /// Second pane rect when a split is open.
     pub(crate) split_view_rect: egui::Rect,
     /// Side-by-side or stacked second document pane.
     pub(crate) split: Option<SplitState>,
-    /// Right-click menu on a tab pill: (tab index, screen pos).
-    pub(crate) tab_menu: Option<(usize, egui::Pos2)>,
+    /// Right-click menu on a tab pill: (tab id, screen pos).
+    pub(crate) tab_menu: Option<(TabId, egui::Pos2)>,
     /// Tab being dragged for split / pane assignment.
-    pub(crate) tab_drag: Option<usize>,
+    pub(crate) tab_drag: Option<TabId>,
     /// While dragging, open-tabs row under the pointer (if any).
-    pub(crate) tab_drag_over: Option<usize>,
+    pub(crate) tab_drag_over: Option<TabId>,
     /// Ephemeral or pinned open-tabs overlay (top-right).
     pub(crate) tab_list: Option<TabListState>,
     pub(crate) opening: HashSet<DocId>,
@@ -81,6 +95,7 @@ pub(crate) struct MarkerApp {
     /// Last prepare_visible_math scan: doc_id → (epoch, cache rev, first, last, zoom×ppp bits).
     math_scan: HashMap<DocId, (u64, u64, usize, usize, u32)>,
     next_doc_id: DocId,
+    next_tab_id: TabId,
     dialog_tx: Sender<DialogReply>,
     dialog_rx: Receiver<DialogReply>,
     dialog_busy: bool,
@@ -102,7 +117,7 @@ pub(crate) struct MarkerApp {
     /// Monotonic frame id for tile LRU (incremented each `update`).
     pub(crate) tile_frame: u64,
     /// Keyboard-focused tab; unfocused tabs are trimmed to a smaller tile share.
-    tile_focus_tab: usize,
+    tile_focus_tab: TabId,
     /// Latest wanted tile keys per document id (read by the pdf worker).
     tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
     /// Latest wanted thumbnail pages per document id (read by the pdf worker).
@@ -113,20 +128,20 @@ pub(crate) struct MarkerApp {
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
 /// Focus is `MarkerApp::active`, which must be one of the two pane tabs.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct SplitState {
-    pub first: usize,
-    pub second: usize,
+    pub first: TabId,
+    pub second: TabId,
     pub stacked: bool,
     pub ratio: f32,
 }
 
 impl SplitState {
-    pub(crate) fn contains(self, index: usize) -> bool {
-        self.first == index || self.second == index
+    pub(crate) fn contains(self, id: TabId) -> bool {
+        self.first == id || self.second == id
     }
 
-    pub(crate) fn other(self, active: usize) -> usize {
+    pub(crate) fn other(self, active: TabId) -> TabId {
         if active == self.first {
             self.second
         } else {
@@ -154,10 +169,11 @@ pub(crate) enum SplitDropZone {
     /// Focus / place the dragged tab in the focused pane.
     ActivePane,
     /// Pair with this tab (drop on a row in the open-tabs list).
-    Tab(usize),
+    Tab(TabId),
 }
 
 pub(crate) struct Tab {
+    pub(crate) id: TabId,
     pub(crate) doc: DocState,
     /// Selected annotation ids (order = primary first for style/edit).
     pub(crate) selected: Vec<u64>,
@@ -914,7 +930,7 @@ impl MarkerApp {
             settings: Settings::load(),
             tool: Tool::Select,
             tabs: Vec::new(),
-            active: 0,
+            active: TabId(0),
             view_rect: egui::Rect::NOTHING,
             split_view_rect: egui::Rect::NOTHING,
             split: None,
@@ -947,6 +963,7 @@ impl MarkerApp {
             math_last_good: HashMap::new(),
             math_scan: HashMap::new(),
             next_doc_id: DocId(1),
+            next_tab_id: TabId(1),
             dialog_tx,
             dialog_rx,
             dialog_busy: false,
@@ -960,7 +977,7 @@ impl MarkerApp {
             exit_flush_done: false,
             pending_pdf_tiles: VecDeque::new(),
             tile_frame: 0,
-            tile_focus_tab: 0,
+            tile_focus_tab: TabId(0),
             tile_wanted,
             thumb_wanted,
             pending_generated_csv: None,
@@ -972,11 +989,41 @@ impl MarkerApp {
     }
 
     pub(crate) fn tab(&self) -> Option<&Tab> {
-        self.tabs.get(self.active)
+        self.tab_by_id(self.active)
     }
 
     pub(crate) fn tab_mut(&mut self) -> Option<&mut Tab> {
-        self.tabs.get_mut(self.active)
+        self.tab_by_id_mut(self.active)
+    }
+
+    /// Strip position for a live [`TabId`], if any.
+    pub(crate) fn tab_index(&self, id: TabId) -> Option<usize> {
+        self.tabs.iter().position(|tab| tab.id == id)
+    }
+
+    pub(crate) fn tab_by_id(&self, id: TabId) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.id == id)
+    }
+
+    pub(crate) fn tab_by_id_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|tab| tab.id == id)
+    }
+
+    fn alloc_tab_id(&mut self) -> TabId {
+        let id = self.next_tab_id;
+        self.next_tab_id = TabId(self.next_tab_id.0.saturating_add(1));
+        id
+    }
+
+    /// Neighbor in strip order (`delta` = ±1), wrapping.
+    fn adjacent_tab_id(&self, id: TabId, delta: isize) -> Option<TabId> {
+        let index = self.tab_index(id)?;
+        let len = self.tabs.len();
+        if len == 0 {
+            return None;
+        }
+        let next = (index as isize + delta).rem_euclid(len as isize) as usize;
+        Some(self.tabs[next].id)
     }
 
     /// Cache and the active tab together, so the conceal layouter can read
@@ -984,11 +1031,8 @@ impl MarkerApp {
     pub(crate) fn math_cache_and_tab_mut(
         &mut self,
     ) -> Option<(&crate::math::MathCache<InlineReady>, &mut Tab)> {
-        let active = self.active;
-        if active >= self.tabs.len() {
-            return None;
-        }
-        Some((&self.math_cache, &mut self.tabs[active]))
+        let index = self.tab_index(self.active)?;
+        Some((&self.math_cache, &mut self.tabs[index]))
     }
 
     pub(crate) fn doc(&self) -> Option<&DocState> {
@@ -1414,9 +1458,10 @@ impl MarkerApp {
     }
 
     pub(crate) fn open_path(&mut self, path: PathBuf) {
-        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.path == path) {
-            if self.active != index {
-                self.active = index;
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.doc.path == path) {
+            let id = tab.id;
+            if self.active != id {
+                self.active = id;
                 self.pulse_tab_list();
             }
             self.settings.remember_open(&path);
@@ -1430,8 +1475,8 @@ impl MarkerApp {
     }
 
     /// Move a tab into its own Marker process/window, then close it here.
-    pub(crate) fn move_tab_to_new_window(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get_mut(index) else {
+    pub(crate) fn move_tab_to_new_window(&mut self, id: TabId) {
+        let Some(tab) = self.tab_by_id_mut(id) else {
             return;
         };
         if tab.doc.session.is_dirty() {
@@ -1444,22 +1489,22 @@ impl MarkerApp {
             self.error = Some(format!("Could not open new window: {message}"));
             return;
         }
-        self.drop_tab(index);
+        self.drop_tab(id);
     }
 
-    fn finish_detach_tab(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get(index) else {
+    fn finish_detach_tab(&mut self, id: TabId) {
+        let Some(tab) = self.tab_by_id(id) else {
             return;
         };
         let path = tab.doc.path.clone();
         if let Err(message) = instance::spawn_new_window(&path) {
-            if let Some(tab) = self.tabs.get_mut(index) {
+            if let Some(tab) = self.tab_by_id_mut(id) {
                 tab.detach_after_save = false;
             }
             self.error = Some(format!("Could not open new window: {message}"));
             return;
         }
-        self.drop_tab(index);
+        self.drop_tab(id);
     }
 
     fn focus_main_window(&self, ctx: &egui::Context) {
@@ -1519,32 +1564,32 @@ impl MarkerApp {
     }
 
     /// Activate a tab from the switcher / list, respecting split pane assignment.
-    pub(crate) fn activate_tab(&mut self, index: usize) {
-        if index >= self.tabs.len() {
+    pub(crate) fn activate_tab(&mut self, id: TabId) {
+        if self.tab_index(id).is_none() {
             return;
         }
         if let Some(split) = self.split {
-            if split.contains(index) {
-                self.active = index;
+            if split.contains(id) {
+                self.active = id;
             } else {
                 let focus_first = self.active == split.first;
                 if let Some(s) = self.split.as_mut() {
                     if focus_first {
-                        s.first = index;
+                        s.first = id;
                     } else {
-                        s.second = index;
+                        s.second = id;
                     }
                 }
-                self.active = index;
+                self.active = id;
             }
         } else {
-            self.active = index;
+            self.active = id;
         }
         self.pulse_tab_list();
     }
 
-    pub(crate) fn close_tab(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get_mut(index) else {
+    pub(crate) fn close_tab(&mut self, id: TabId) {
+        let Some(tab) = self.tab_by_id_mut(id) else {
             return;
         };
         if tab.doc.session.is_dirty() {
@@ -1552,14 +1597,15 @@ impl MarkerApp {
             tab.close_after_save = true;
             return;
         }
-        self.drop_tab(index);
+        self.drop_tab(id);
     }
 
-    fn drop_tab(&mut self, index: usize) {
-        if index >= self.tabs.len() {
+    fn drop_tab(&mut self, id: TabId) {
+        let Some(index) = self.tab_index(id) else {
             return;
-        }
+        };
         let tab = self.tabs.remove(index);
+        debug_assert_eq!(tab.id, id);
         let doc_id = tab.doc.doc_id;
         self.math_scan.remove(&doc_id);
         self.math_deadlines.retain(|(g, _, _), _| *g != doc_id);
@@ -1577,64 +1623,28 @@ impl MarkerApp {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(&tab.doc.doc_id);
-        if let Some(drag) = self.tab_drag {
-            if drag == index {
-                self.tab_drag = None;
-            } else if drag > index {
-                self.tab_drag = Some(drag - 1);
-            }
-        }
-        if let Some((menu_index, pos)) = self.tab_menu {
-            if menu_index == index {
-                self.tab_menu = None;
-            } else if menu_index > index {
-                self.tab_menu = Some((menu_index - 1, pos));
-            }
-        }
-        if self.tabs.is_empty() {
-            self.active = 0;
-            self.split = None;
-            self.tab_drag = None;
-            self.tab_menu = None;
-            self.tab_list = None;
-            return;
-        }
-        if self.active >= self.tabs.len() {
-            self.active = self.tabs.len() - 1;
-        } else if self.active > index {
-            self.active -= 1;
-        }
-        if let Some(split) = self.split {
-            if split.first == index || split.second == index {
-                let survivor = if split.first == index {
-                    split.second
-                } else {
-                    split.first
-                };
-                let survivor = if survivor > index {
-                    survivor - 1
-                } else {
-                    survivor
-                };
-                self.split = None;
-                if survivor < self.tabs.len() {
-                    self.active = survivor;
-                }
-            } else {
-                let mut split = split;
-                if split.first > index {
-                    split.first -= 1;
-                }
-                if split.second > index {
-                    split.second -= 1;
-                }
-                self.split = Some(split);
-            }
+
+        let remaining: Vec<TabId> = self.tabs.iter().map(|t| t.id).collect();
+        reconcile_tab_ids_after_close(
+            TabIdChrome {
+                active: &mut self.active,
+                split: &mut self.split,
+                tab_menu: &mut self.tab_menu,
+                tab_drag: &mut self.tab_drag,
+                tab_drag_over: &mut self.tab_drag_over,
+                tab_list: &mut self.tab_list,
+            },
+            id,
+            &remaining,
+            index,
+        );
+        if self.tile_focus_tab == id {
+            self.tile_focus_tab = self.active;
         }
     }
 
-    pub(crate) fn split_with(&mut self, other: usize, stacked: bool) {
-        if other >= self.tabs.len() || other == self.active || self.tabs.len() < 2 {
+    pub(crate) fn split_with(&mut self, other: TabId, stacked: bool) {
+        if self.tab_index(other).is_none() || other == self.active || self.tabs.len() < 2 {
             return;
         }
         let ratio = self.split.map(|s| s.ratio).unwrap_or(0.5);
@@ -1646,15 +1656,18 @@ impl MarkerApp {
         });
     }
 
-    /// Split using `index` as the other pane, or the next tab when `index` is active.
-    pub(crate) fn split_from_tab(&mut self, index: usize, stacked: bool) {
-        if self.tabs.len() < 2 || index >= self.tabs.len() {
+    /// Split using `id` as the other pane, or the next tab when `id` is active.
+    pub(crate) fn split_from_tab(&mut self, id: TabId, stacked: bool) {
+        if self.tabs.len() < 2 || self.tab_index(id).is_none() {
             return;
         }
-        let other = if index == self.active {
-            (self.active + 1) % self.tabs.len()
+        let other = if id == self.active {
+            match self.adjacent_tab_id(self.active, 1) {
+                Some(next) => next,
+                None => return,
+            }
         } else {
-            index
+            id
         };
         self.split_with(other, stacked);
     }
@@ -1671,13 +1684,15 @@ impl MarkerApp {
                 s.stacked = stacked;
             }
         } else {
-            let other = (self.active + 1) % self.tabs.len();
+            let Some(other) = self.adjacent_tab_id(self.active, 1) else {
+                return;
+            };
             self.split_with(other, stacked);
         }
     }
 
-    fn set_split_panes(&mut self, first: usize, second: usize, stacked: bool) {
-        if first == second || first >= self.tabs.len() || second >= self.tabs.len() {
+    fn set_split_panes(&mut self, first: TabId, second: TabId, stacked: bool) {
+        if first == second || self.tab_index(first).is_none() || self.tab_index(second).is_none() {
             return;
         }
         let ratio = self.split.map(|s| s.ratio).unwrap_or(0.5);
@@ -1693,15 +1708,17 @@ impl MarkerApp {
     }
 
     /// Place `dragged` into a new or existing split according to an edge / pane drop.
-    pub(crate) fn apply_tab_drop(&mut self, dragged: usize, zone: SplitDropZone) {
-        if self.tabs.len() < 2 || dragged >= self.tabs.len() {
+    pub(crate) fn apply_tab_drop(&mut self, dragged: TabId, zone: SplitDropZone) {
+        if self.tabs.len() < 2 || self.tab_index(dragged).is_none() {
             return;
         }
         match zone {
             SplitDropZone::Left | SplitDropZone::Top => {
                 let stacked = matches!(zone, SplitDropZone::Top);
                 if dragged == self.active {
-                    let other = (self.active + 1) % self.tabs.len();
+                    let Some(other) = self.adjacent_tab_id(self.active, 1) else {
+                        return;
+                    };
                     self.set_split_panes(dragged, other, stacked);
                 } else {
                     let prev = self.active;
@@ -1712,7 +1729,9 @@ impl MarkerApp {
             SplitDropZone::Right | SplitDropZone::Bottom => {
                 let stacked = matches!(zone, SplitDropZone::Bottom);
                 if dragged == self.active {
-                    let next = (self.active + 1) % self.tabs.len();
+                    let Some(next) = self.adjacent_tab_id(self.active, 1) else {
+                        return;
+                    };
                     self.set_split_panes(next, dragged, stacked);
                     self.active = next;
                 } else {
@@ -1761,7 +1780,7 @@ impl MarkerApp {
                 }
             }
             SplitDropZone::Tab(target) => {
-                if target == dragged || target >= self.tabs.len() {
+                if target == dragged || self.tab_index(target).is_none() {
                     return;
                 }
                 let stacked = self.split.map(|s| s.stacked).unwrap_or(false);
@@ -2665,15 +2684,10 @@ impl eframe::App for MarkerApp {
             self.flush_on_exit_if_needed();
         }
         let pixels_per_point = ctx.pixels_per_point();
-        if self.active != self.tile_focus_tab && self.tile_focus_tab < self.tabs.len() {
-            trim_tab_tiles(
-                self,
-                self.tile_focus_tab,
-                UNFOCUSED_TAB_TILE_BYTES,
-                pixels_per_point,
-            );
-        }
         if self.active != self.tile_focus_tab {
+            if let Some(prev) = self.tab_index(self.tile_focus_tab) {
+                trim_tab_tiles(self, prev, UNFOCUSED_TAB_TILE_BYTES, pixels_per_point);
+            }
             self.tile_focus_tab = self.active;
         }
         self.tile_frame += 1;
@@ -2847,11 +2861,10 @@ impl MarkerApp {
                 self.opening.remove(&opened.doc_id);
                 if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
                     self.worker.close(opened.doc_id);
-                    if let Some(index) =
-                        self.tabs.iter().position(|tab| tab.doc.path == opened.path)
-                    {
-                        if self.active != index {
-                            self.active = index;
+                    if let Some(tab) = self.tabs.iter().find(|tab| tab.doc.path == opened.path) {
+                        let id = tab.id;
+                        if self.active != id {
+                            self.active = id;
                             self.pulse_tab_list();
                         }
                     }
@@ -2861,7 +2874,9 @@ impl MarkerApp {
                 let tops = DocState::rebuild_tops(&opened.pages);
                 let has_outline = !opened.outline.is_empty();
                 self.settings.remember_open(&opened.path);
+                let tab_id = self.alloc_tab_id();
                 self.tabs.push(Tab {
+                    id: tab_id,
                     doc: DocState {
                         path: opened.path,
                         doc_id: opened.doc_id,
@@ -2924,7 +2939,7 @@ impl MarkerApp {
                     autosave_dirty_epoch: 0,
                     autosave_dirty: false,
                 });
-                self.active = self.tabs.len() - 1;
+                self.active = tab_id;
                 if self.tabs.len() > 1 {
                     self.pulse_tab_list();
                 }
@@ -3317,10 +3332,11 @@ impl MarkerApp {
                         tab.detach_after_save && clean,
                     )
                 };
+                let tab_id = self.tabs[index].id;
                 if detach {
-                    self.finish_detach_tab(index);
+                    self.finish_detach_tab(tab_id);
                 } else if close {
-                    self.drop_tab(index);
+                    self.drop_tab(tab_id);
                 }
             }
             Err(message) => {
@@ -3670,13 +3686,15 @@ impl MarkerApp {
     /// Re-scan only when the document, the cache, or the visible page range changes.
     fn prepare_visible_math(&mut self, pixels_per_point: f32) {
         let mut panes: Vec<(usize, egui::Rect)> = Vec::new();
-        if self.active < self.tabs.len() {
-            panes.push((self.active, self.view_rect));
+        if let Some(index) = self.tab_index(self.active) {
+            panes.push((index, self.view_rect));
         }
         if let Some(split) = self.split {
             let other = split.other(self.active);
-            if other != self.active && other < self.tabs.len() {
-                panes.push((other, self.split_view_rect));
+            if other != self.active {
+                if let Some(index) = self.tab_index(other) {
+                    panes.push((index, self.split_view_rect));
+                }
             }
         }
         let revision = self.math_cache.revision();
@@ -4300,13 +4318,13 @@ impl MarkerApp {
     }
 
     pub(crate) fn dispatch_tiles(&mut self, pixels_per_point: f32) {
-        self.dispatch_tiles_at(self.active, self.view_rect, pixels_per_point);
+        if let Some(index) = self.tab_index(self.active) {
+            self.dispatch_tiles_at(index, self.view_rect, pixels_per_point);
+        }
         if let Some(split) = self.split {
-            self.dispatch_tiles_at(
-                split.other(self.active),
-                self.split_view_rect,
-                pixels_per_point,
-            );
+            if let Some(index) = self.tab_index(split.other(self.active)) {
+                self.dispatch_tiles_at(index, self.split_view_rect, pixels_per_point);
+            }
         }
     }
 
@@ -4464,10 +4482,9 @@ impl MarkerApp {
         if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command)
             && self.tabs.len() >= 2
         {
-            if input_shift(ctx) {
-                self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
-            } else {
-                self.active = (self.active + 1) % self.tabs.len();
+            let delta = if input_shift(ctx) { -1 } else { 1 };
+            if let Some(next) = self.adjacent_tab_id(self.active, delta) {
+                self.active = next;
             }
             self.pulse_tab_list();
         }
@@ -4852,11 +4869,12 @@ impl MarkerApp {
         if quit {
             return;
         }
-        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.doc_id == doc_id) {
+        if let Some(tab) = self.tabs.iter().find(|tab| tab.doc.doc_id == doc_id) {
+            let tab_id = tab.id;
             if detach {
-                self.finish_detach_tab(index);
+                self.finish_detach_tab(tab_id);
             } else if close {
-                self.drop_tab(index);
+                self.drop_tab(tab_id);
             }
         }
     }
@@ -6190,7 +6208,8 @@ impl MarkerApp {
         if std::env::var_os("PERF_NO_TITLE").is_some_and(|v| v == "1") {
             return;
         }
-        let title = if let Some(tab) = self.tabs.get(self.active) {
+        let title = if let Some(index) = self.tab_index(self.active) {
+            let tab = &self.tabs[index];
             let name = tab
                 .doc
                 .path
@@ -6346,14 +6365,15 @@ fn process_tile_bytes(app: &MarkerApp) -> usize {
 /// Lower tier and older `last_used_frame` are evicted first.
 fn tile_eviction_tier(app: &MarkerApp, tab_idx: usize, key: &TileKey, pixels_per_point: f32) -> u8 {
     let tab = &app.tabs[tab_idx];
-    let on_screen = tab_idx == app.active
+    let tab_id = tab.id;
+    let on_screen = tab_id == app.active
         || app
             .split
-            .is_some_and(|split| split.other(app.active) == tab_idx);
+            .is_some_and(|split| split.other(app.active) == tab_id);
     if !on_screen {
         return 0;
     }
-    let view = if tab_idx == app.active {
+    let view = if tab_id == app.active {
         app.view_rect
     } else {
         app.split_view_rect
@@ -6652,6 +6672,186 @@ fn style_step(ui: &mut egui::Ui, label: &str, tip: &str) -> egui::Response {
         egui::Color32::from_rgb(232, 232, 236),
     );
     response.on_hover_text(tip)
+}
+
+/// Identity-keyed tab chrome passed through [`reconcile_tab_ids_after_close`].
+struct TabIdChrome<'a> {
+    active: &'a mut TabId,
+    split: &'a mut Option<SplitState>,
+    tab_menu: &'a mut Option<(TabId, egui::Pos2)>,
+    tab_drag: &'a mut Option<TabId>,
+    tab_drag_over: &'a mut Option<TabId>,
+    tab_list: &'a mut Option<TabListState>,
+}
+
+/// After removing `closed` from the strip, retarget identity-keyed chrome.
+///
+/// Surviving [`TabId`] values are left alone — no index arithmetic — so a missed
+/// field cannot drift. Cleared only when it named the closed tab; otherwise it
+/// must still refer to a live id in `remaining`.
+fn reconcile_tab_ids_after_close(
+    chrome: TabIdChrome<'_>,
+    closed: TabId,
+    remaining: &[TabId],
+    closed_index: usize,
+) {
+    let TabIdChrome {
+        active,
+        split,
+        tab_menu,
+        tab_drag,
+        tab_drag_over,
+        tab_list,
+    } = chrome;
+
+    if *tab_drag == Some(closed) {
+        *tab_drag = None;
+    }
+    if tab_menu.as_ref().is_some_and(|(id, _)| *id == closed) {
+        *tab_menu = None;
+    }
+    if *tab_drag_over == Some(closed) {
+        *tab_drag_over = None;
+    }
+
+    if remaining.is_empty() {
+        *active = TabId(0);
+        *split = None;
+        *tab_drag = None;
+        *tab_menu = None;
+        *tab_drag_over = None;
+        *tab_list = None;
+        return;
+    }
+
+    let live = |id: TabId| remaining.contains(&id);
+
+    if let Some(s) = *split {
+        if s.first == closed || s.second == closed {
+            let survivor = if s.first == closed { s.second } else { s.first };
+            *split = None;
+            if live(survivor) {
+                *active = survivor;
+            } else if *active == closed || !live(*active) {
+                let fallback = closed_index.min(remaining.len() - 1);
+                *active = remaining[fallback];
+            }
+        }
+        // Else: both pane ids still live; leave the split untouched.
+    }
+
+    if *active == closed || !live(*active) {
+        let fallback = closed_index.min(remaining.len() - 1);
+        *active = remaining[fallback];
+    }
+
+    debug_assert!(live(*active));
+    if let Some(id) = *tab_drag {
+        debug_assert!(live(id));
+    }
+    if let Some((id, _)) = *tab_menu {
+        debug_assert!(live(id));
+    }
+    if let Some(id) = *tab_drag_over {
+        debug_assert!(live(id));
+    }
+}
+
+#[cfg(test)]
+mod tab_id_tests {
+    use super::{reconcile_tab_ids_after_close, SplitState, TabId, TabIdChrome, TabListState};
+    use egui::Pos2;
+
+    #[test]
+    fn drop_middle_tab_keeps_surviving_ids() {
+        let a = TabId(1);
+        let b = TabId(2);
+        let c = TabId(3);
+        let mut active = a;
+        let mut split = Some(SplitState {
+            first: a,
+            second: c,
+            stacked: false,
+            ratio: 0.5,
+        });
+        let mut tab_menu = Some((a, Pos2::ZERO));
+        let mut tab_drag = Some(a);
+        let mut tab_drag_over = Some(c);
+        let mut tab_list = Some(TabListState::Pinned);
+
+        // Close the middle strip tab; panes and drag-over name A/C, not B.
+        let remaining = [a, c];
+        reconcile_tab_ids_after_close(
+            TabIdChrome {
+                active: &mut active,
+                split: &mut split,
+                tab_menu: &mut tab_menu,
+                tab_drag: &mut tab_drag,
+                tab_drag_over: &mut tab_drag_over,
+                tab_list: &mut tab_list,
+            },
+            b,
+            &remaining,
+            1,
+        );
+
+        assert_eq!(active, a);
+        assert_eq!(
+            split,
+            Some(SplitState {
+                first: a,
+                second: c,
+                stacked: false,
+                ratio: 0.5,
+            })
+        );
+        assert_eq!(tab_menu.map(|(id, _)| id), Some(a));
+        assert_eq!(tab_drag, Some(a));
+        assert_eq!(
+            tab_drag_over,
+            Some(c),
+            "tab_drag_over must keep naming a live tab (not be index-shifted)"
+        );
+        assert!(matches!(tab_list, Some(TabListState::Pinned)));
+    }
+
+    #[test]
+    fn drop_drag_over_target_clears_it() {
+        let a = TabId(10);
+        let b = TabId(20);
+        let c = TabId(30);
+        let mut active = a;
+        let mut split = Some(SplitState {
+            first: a,
+            second: c,
+            stacked: true,
+            ratio: 0.4,
+        });
+        let mut tab_menu = None;
+        let mut tab_drag = Some(a);
+        let mut tab_drag_over = Some(b);
+        let mut tab_list = None;
+
+        let remaining = [a, c];
+        reconcile_tab_ids_after_close(
+            TabIdChrome {
+                active: &mut active,
+                split: &mut split,
+                tab_menu: &mut tab_menu,
+                tab_drag: &mut tab_drag,
+                tab_drag_over: &mut tab_drag_over,
+                tab_list: &mut tab_list,
+            },
+            b,
+            &remaining,
+            1,
+        );
+
+        assert_eq!(active, a);
+        assert!(split.is_some());
+        assert_eq!(tab_drag, Some(a));
+        assert_eq!(tab_drag_over, None);
+    }
 }
 
 #[cfg(test)]

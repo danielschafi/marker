@@ -10,7 +10,7 @@ use egui::{
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{
     AnnotFilterKind, CreateKind, MarkerApp, ReviewGroupMode, SaveState, ShortcutSection,
-    SplitDropZone, SplitState, Tab, TabListState, Tool, SHORTCUTS,
+    SplitDropZone, SplitState, Tab, TabId, TabListState, Tool, SHORTCUTS,
 };
 use crate::assistant::{
     assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
@@ -463,15 +463,14 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
     let mut tab_menu = None;
     let mut drag_tab = None;
     let mut keep_alive = false;
-    let names: Vec<(usize, String, bool, bool)> = app
+    let names: Vec<(TabId, String, bool, bool)> = app
         .tabs
         .iter()
-        .enumerate()
-        .map(|(index, tab)| {
+        .map(|tab| {
             (
-                index,
+                tab.id,
                 tab_file_name(tab).to_owned(),
-                index == app.active,
+                tab.id == app.active,
                 tab.doc.session.is_dirty(),
             )
         })
@@ -520,26 +519,28 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                 .show(ui, |ui| {
                     ui.set_width(row_width);
                     ui.spacing_mut().item_spacing = Vec2::new(0.0, 2.0);
-                    for (index, name, selected, dirty) in &names {
+                    for (id, name, selected, dirty) in &names {
                         let is_drop =
-                            drop_over == Some(*index) && drag_src.is_some_and(|src| src != *index);
-                        let action =
-                            tab_list_row(ui, name, *selected, *dirty, *index, row_width, is_drop);
+                            drop_over == Some(*id) && drag_src.is_some_and(|src| src != *id);
+                        let row_index = app.tab_index(*id).unwrap_or(0);
+                        let action = tab_list_row(
+                            ui, name, *selected, *dirty, row_index, row_width, is_drop,
+                        );
                         if action.hovered {
                             keep_alive = true;
                         }
                         if action.select && !dragging {
-                            select = Some(*index);
+                            select = Some(*id);
                         }
                         if action.close && !dragging {
-                            close = Some(*index);
+                            close = Some(*id);
                         }
                         if action.drag {
-                            drag_tab = Some(*index);
+                            drag_tab = Some(*id);
                         }
                         if action.menu && !dragging {
-                            tab_menu = action.pointer.map(|pos| (*index, pos)).or_else(|| {
-                                Some((*index, ui.ctx().pointer_latest_pos().unwrap_or(Pos2::ZERO)))
+                            tab_menu = action.pointer.map(|pos| (*id, pos)).or_else(|| {
+                                Some((*id, ui.ctx().pointer_latest_pos().unwrap_or(Pos2::ZERO)))
                             });
                         }
                     }
@@ -552,13 +553,13 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         if area.response.rect.contains(pos) {
             let inner = area.response.rect.shrink(6.0);
             let mut y = inner.top();
-            for (index, _, _, _) in &names {
+            for (id, _, _, _) in &names {
                 let row = Rect::from_min_max(
                     Pos2::new(inner.left(), y),
                     Pos2::new(inner.right(), y + TAB_LIST_ROW_H),
                 );
-                if row.contains(pos) && *index != src {
-                    app.tab_drag_over = Some(*index);
+                if row.contains(pos) && *id != src {
+                    app.tab_drag_over = Some(*id);
                     break;
                 }
                 y += TAB_LIST_ROW_H + 2.0;
@@ -574,15 +575,15 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         }
     }
 
-    if let Some(index) = select {
-        app.activate_tab(index);
+    if let Some(id) = select {
+        app.activate_tab(id);
     }
-    if let Some(index) = close {
-        app.close_tab(index);
+    if let Some(id) = close {
+        app.close_tab(id);
     }
-    if let Some(index) = drag_tab {
+    if let Some(id) = drag_tab {
         if app.tabs.len() >= 2 {
-            app.tab_drag = Some(index);
+            app.tab_drag = Some(id);
             app.tab_menu = None;
         }
     }
@@ -2320,10 +2321,9 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
 
 /// Paint the transcript from a borrow of the live turns.
 fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
-    let active = app.active;
-    let streaming = app
-        .tabs
-        .get(active)
+    let active = app.tab_index(app.active);
+    let streaming = active
+        .and_then(|i| app.tabs.get(i))
         .is_some_and(|tab| tab.assistant.streaming);
     let math_color = {
         let c = palette(ui.ctx()).text;
@@ -2338,9 +2338,8 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
         // Disjoint fields so Markdown cache, math cache, and turns can be borrowed together.
         let math_cache = &app.math_cache;
         let md_cache = &mut app.assistant_md_cache;
-        let turns = app
-            .tabs
-            .get(active)
+        let turns = active
+            .and_then(|i| app.tabs.get(i))
             .map(|tab| tab.assistant.turns.as_slice())
             .unwrap_or(&[]);
         ScrollArea::vertical()
@@ -2417,9 +2416,8 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
             });
     }
     if let Some(index) = copy {
-        let text = app
-            .tabs
-            .get(active)
+        let text = active
+            .and_then(|i| app.tabs.get(i))
             .and_then(|tab| tab.assistant.turns.get(index))
             .map(|turn| turn.text.clone());
         if let Some(text) = text {
@@ -2427,9 +2425,8 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
         }
     }
     if let Some((index, kind)) = save {
-        let text = app
-            .tabs
-            .get(active)
+        let text = active
+            .and_then(|i| app.tabs.get(i))
             .and_then(|tab| tab.assistant.turns.get(index))
             .map(|turn| turn.text.clone());
         if let Some(text) = text {
@@ -2440,9 +2437,8 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
 
 /// Enqueue background LT0 cache jobs for closed math in finished assistant turns.
 fn prepare_assistant_answer_math(app: &mut MarkerApp, color: Rgb) {
-    let active = app.active;
     let jobs: Vec<(String, bool)> = {
-        let Some(tab) = app.tabs.get(active) else {
+        let Some(tab) = app.tab() else {
             return;
         };
         tab.assistant
@@ -2760,10 +2756,10 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
 }
 
 fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
-    let Some((index, pos)) = app.tab_menu else {
+    let Some((menu_id, pos)) = app.tab_menu else {
         return;
     };
-    if index >= app.tabs.len() {
+    if app.tab_index(menu_id).is_none() {
         app.tab_menu = None;
         return;
     }
@@ -2772,20 +2768,22 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
     let active = app.active;
     let mut split_side = false;
     let mut split_stack = false;
-    let mut split_with: Option<(usize, bool)> = None;
+    let mut split_with: Option<(TabId, bool)> = None;
     let mut unsplit = false;
     let mut move_window = false;
     let mut close_menu = false;
-    let others: Vec<(usize, String)> = app
+    let others: Vec<(TabId, String)> = app
         .tabs
         .iter()
-        .enumerate()
-        .filter(|(i, _)| *i != index)
-        .map(|(i, tab)| (i, tab_file_name(tab).to_owned()))
+        .filter(|tab| tab.id != menu_id)
+        .map(|tab| (tab.id, tab_file_name(tab).to_owned()))
         .collect();
+    let next_id = app
+        .tab_index(active)
+        .map(|i| app.tabs[(i + 1) % app.tabs.len().max(1)].id);
     let next_label = others
         .iter()
-        .find(|(i, _)| *i == (active + 1) % app.tabs.len().max(1))
+        .find(|(id, _)| Some(*id) == next_id)
         .or_else(|| others.first())
         .map(|(_, name)| format!(" with {name}"));
 
@@ -2797,7 +2795,7 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(188.0);
                 if can_split {
-                    if index == active && others.len() > 1 {
+                    if menu_id == active && others.len() > 1 {
                         ui.menu_button("Split side-by-side with…", |ui| {
                             for (other, name) in &others {
                                 if ui.button(name).clicked() {
@@ -2815,7 +2813,7 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                             }
                         });
                     } else {
-                        let suffix = if index == active {
+                        let suffix = if menu_id == active {
                             next_label.as_deref().unwrap_or("")
                         } else {
                             ""
@@ -2846,24 +2844,24 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         && !area.response.hovered()
         && !area.response.clicked();
     if let Some((other, stacked)) = split_with {
-        if index == app.active {
+        if menu_id == app.active {
             app.split_with(other, stacked);
         } else {
-            app.active = index;
+            app.active = menu_id;
             app.split_with(other, stacked);
         }
         close_menu = true;
     } else if split_side {
-        app.split_from_tab(index, false);
+        app.split_from_tab(menu_id, false);
         close_menu = true;
     } else if split_stack {
-        app.split_from_tab(index, true);
+        app.split_from_tab(menu_id, true);
         close_menu = true;
     } else if unsplit {
         app.unsplit();
         close_menu = true;
     } else if move_window {
-        app.move_tab_to_new_window(index);
+        app.move_tab_to_new_window(menu_id);
         close_menu = true;
     } else if outside {
         close_menu = true;
@@ -2878,7 +2876,7 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
     let Some(dragged) = app.tab_drag else {
         return;
     };
-    if dragged >= app.tabs.len() || app.tabs.len() < 2 {
+    if app.tab_index(dragged).is_none() || app.tabs.len() < 2 {
         app.tab_drag = None;
         app.tab_drag_over = None;
         return;
@@ -2983,7 +2981,7 @@ fn edge_drop_zone(full: Rect, pos: Pos2) -> Option<SplitDropZone> {
 fn paint_tab_drag_feedback(
     app: &MarkerApp,
     ctx: &egui::Context,
-    dragged: usize,
+    dragged: TabId,
     pos: Pos2,
     zone: Option<SplitDropZone>,
 ) {
@@ -3011,8 +3009,7 @@ fn paint_tab_drag_feedback(
     }
 
     let name = app
-        .tabs
-        .get(dragged)
+        .tab_by_id(dragged)
         .and_then(|tab| tab.doc.path.file_name())
         .and_then(|name| name.to_str())
         .unwrap_or("document.pdf");

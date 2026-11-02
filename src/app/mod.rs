@@ -143,7 +143,7 @@ pub(crate) enum TabListState {
 }
 
 /// Where a dragged tab would land relative to the viewport.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum SplitDropZone {
     Left,
     Right,
@@ -155,6 +155,23 @@ pub(crate) enum SplitDropZone {
     ActivePane,
     /// Pair with this tab (drop on a row in the open-tabs list).
     Tab(TabId),
+    /// Center of an unsplitted viewport: open beside the partner.
+    Center,
+}
+
+impl SplitDropZone {
+    pub(crate) fn tab_target(self) -> Option<TabId> {
+        match self {
+            SplitDropZone::Tab(id) => Some(id),
+            SplitDropZone::Left
+            | SplitDropZone::Right
+            | SplitDropZone::Top
+            | SplitDropZone::Bottom
+            | SplitDropZone::OtherPane
+            | SplitDropZone::ActivePane
+            | SplitDropZone::Center => None,
+        }
+    }
 }
 
 mod assistant;

@@ -38,6 +38,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     search_bar(app, ctx);
     if show_chrome {
         outline_panel(app, ctx);
+        thumbs_panel(app, ctx);
         annot_sidebar(app, ctx);
         review_panel(app, ctx);
         assistant_panel(app, ctx);
@@ -145,6 +146,16 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         if let Some(tab) = app.tab_mut() {
             tab.outline_open = !tab.outline_open;
+        }
+    }
+    let thumbs_on = app.tab().map(|tab| tab.thumbs_open).unwrap_or(false);
+    if app.tab().is_some()
+        && chrome_button(ui, "Thumbs", thumbs_on)
+            .on_hover_text("Page thumbnails")
+            .clicked()
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.thumbs_open = !tab.thumbs_open;
         }
     }
     let annots_on = app.tab().map(|tab| tab.annots_open).unwrap_or(false);
@@ -1271,6 +1282,156 @@ fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
         });
     if let Some((page, y)) = jump {
         app.queue_jump(page, y);
+    }
+}
+
+const THUMB_PANEL_IMG_W: f32 = 120.0;
+const THUMB_LOOKAHEAD: usize = 2;
+
+fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
+    let colors = p(ctx);
+    let view_h = app.view_rect.height().max(1.0);
+    let Some((page_count, current, aspects, textures)) = (|| {
+        let tab = app.tab()?;
+        if !tab.thumbs_open {
+            return None;
+        }
+        let page_count = tab.doc.pages.len();
+        let current = tab.doc.current_page(view_h);
+        let aspects: Vec<f32> = tab
+            .doc
+            .pages
+            .iter()
+            .map(|info| {
+                let w = info.width().max(1.0);
+                info.height().max(1.0) / w
+            })
+            .collect();
+        // At most THUMB_CACHE_PAGES handles; cheap Arc clones.
+        let textures: std::collections::HashMap<usize, egui::TextureHandle> = tab
+            .thumbs
+            .iter()
+            .map(|(&page, thumb)| (page, thumb.texture.clone()))
+            .collect();
+        Some((page_count, current, aspects, textures))
+    })() else {
+        return;
+    };
+    let mut jump: Option<usize> = None;
+    let mut close = false;
+    let mut wanted = Vec::new();
+
+    egui::SidePanel::left("thumbs")
+        .resizable(true)
+        .default_width(148.0)
+        .width_range(132.0..=280.0)
+        .frame(
+            egui::Frame::new()
+                .fill(colors.chrome)
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
+                .inner_margin(8.0),
+        )
+        .show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Pages").strong().size(14.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui
+                        .small_button("×")
+                        .on_hover_text("Hide page thumbnails")
+                        .clicked()
+                    {
+                        close = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ScrollArea::vertical()
+                .id_salt("thumbs-list")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if page_count == 0 {
+                        ui.label(RichText::new("No pages").weak());
+                        return;
+                    }
+                    let clip = ui.clip_rect();
+                    for page in 0..page_count {
+                        let aspect = aspects.get(page).copied().unwrap_or(1.414);
+                        let img_h = THUMB_PANEL_IMG_W * aspect;
+                        let row_h = img_h + 22.0;
+                        let (row_rect, response) =
+                            ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        if clip.intersects(row_rect) {
+                            wanted.push(page);
+                        }
+                        let selected = page == current;
+                        let fill = if selected {
+                            accent_fill(ui.ctx(), 28)
+                        } else {
+                            Color32::TRANSPARENT
+                        };
+                        ui.painter().rect_filled(row_rect, 4.0, fill);
+                        let img_rect = Rect::from_min_size(
+                            Pos2::new(
+                                row_rect.center().x - THUMB_PANEL_IMG_W * 0.5,
+                                row_rect.top() + 2.0,
+                            ),
+                            vec2(THUMB_PANEL_IMG_W, img_h),
+                        );
+                        ui.painter().rect_filled(img_rect, 2.0, Color32::WHITE);
+                        if let Some(texture) = textures.get(&page) {
+                            ui.painter().image(
+                                texture.id(),
+                                img_rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
+                        } else {
+                            ui.painter().rect_stroke(
+                                img_rect,
+                                2.0,
+                                Stroke::new(1.0_f32, colors.hairline),
+                                StrokeKind::Inside,
+                            );
+                        }
+                        let label = format!("{}", page + 1);
+                        let label_pos = Pos2::new(row_rect.center().x, img_rect.bottom() + 2.0);
+                        ui.painter().text(
+                            label_pos,
+                            Align2::CENTER_TOP,
+                            label,
+                            FontId::proportional(11.0),
+                            if selected {
+                                colors.accent
+                            } else {
+                                colors.text
+                            },
+                        );
+                        if response.clicked() {
+                            jump = Some(page);
+                        }
+                        response.on_hover_text(format!("Go to page {}", page + 1));
+                    }
+                });
+        });
+
+    if close {
+        if let Some(tab) = app.tab_mut() {
+            tab.thumbs_open = false;
+        }
+        app.request_thumbs(&[]);
+        return;
+    }
+
+    // Lookahead around the visible rows so scrolling stays smooth.
+    let mut request = wanted;
+    if let (Some(first), Some(last)) = (request.first().copied(), request.last().copied()) {
+        let lo = first.saturating_sub(THUMB_LOOKAHEAD);
+        let hi = (last + THUMB_LOOKAHEAD).min(page_count.saturating_sub(1));
+        request = (lo..=hi).collect();
+    }
+    app.request_thumbs(&request);
+    if let Some(page) = jump {
+        app.queue_jump(page, Some(0.0));
     }
 }
 

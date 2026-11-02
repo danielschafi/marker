@@ -11,7 +11,8 @@ use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
 
 use super::engine::{
-    CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage,
+    CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, ThumbImage,
+    TileImage,
 };
 
 pub enum PdfJob {
@@ -30,6 +31,11 @@ pub enum PdfJob {
         row: i32,
         prefetch: bool,
         distance: u32,
+    },
+    /// Small full-page raster for the thumbnails panel (FT10).
+    Thumb {
+        gen: u64,
+        page: usize,
     },
     Crop {
         gen: u64,
@@ -108,6 +114,15 @@ pub enum PdfReply {
         col: i32,
         row: i32,
     },
+    /// Thumbnail panel reply — not a document tile (do not feed into tile LRU).
+    Thumb {
+        gen: u64,
+        thumb: ThumbImage,
+    },
+    ThumbMiss {
+        gen: u64,
+        page: usize,
+    },
     Glyphs {
         gen: u64,
         page: usize,
@@ -168,6 +183,7 @@ impl PdfWorker {
     pub fn spawn(
         ctx: egui::Context,
         tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+        thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
     ) -> Self {
         let (job_tx, job_rx) = mpsc::channel();
         let (read_tx, read_rx) = mpsc::channel();
@@ -178,7 +194,16 @@ impl PdfWorker {
         let ctx_for_reader = ctx.clone();
         thread::Builder::new()
             .name("marker-pdf".into())
-            .spawn(move || worker_loop(ctx, job_rx, reply_tx, reads_for_tiles, tile_wanted))
+            .spawn(move || {
+                worker_loop(
+                    ctx,
+                    job_rx,
+                    reply_tx,
+                    reads_for_tiles,
+                    tile_wanted,
+                    thumb_wanted,
+                )
+            })
             .expect("pdf thread");
         thread::Builder::new()
             .name("marker-pdf-read".into())
@@ -225,6 +250,10 @@ impl PdfWorker {
             prefetch,
             distance,
         });
+    }
+
+    pub fn thumb(&self, gen: u64, page: usize) {
+        let _ = self.jobs.send(PdfJob::Thumb { gen, page });
     }
 
     pub fn glyphs(&self, gen: u64, page: usize) {
@@ -294,7 +323,8 @@ impl Drop for PdfWorker {
 }
 
 /// Tile-thread order. Search and glyphs are not ranked here; they run on
-/// `marker-pdf-read`.
+/// `marker-pdf-read`. Thumbs sit below tiles and crop so the panel never
+/// starves document work (and never shares the reader with search).
 fn job_sort_key(job: &PdfJob) -> (u8, u32) {
     match job {
         PdfJob::Shutdown
@@ -317,6 +347,7 @@ fn job_sort_key(job: &PdfJob) -> (u8, u32) {
             }
         }
         PdfJob::Crop { .. } => (3, 0),
+        PdfJob::Thumb { page, .. } => (4, *page as u32),
     }
 }
 
@@ -418,6 +449,31 @@ fn handle_tile(
                 row,
             });
         }
+        Err(err) => ctx.send(PdfReply::failed(gen, err)),
+    }
+}
+
+fn handle_thumb(
+    ctx: &mut WorkerCtx<'_>,
+    gen: u64,
+    page: usize,
+    thumb_wanted: &Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+) {
+    let still_wanted = thumb_wanted
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(&gen)
+        .is_some_and(|set| set.contains(&page));
+    if !still_wanted {
+        ctx.send(PdfReply::ThumbMiss { gen, page });
+        return;
+    }
+    let Some(engine) = ctx.engines.get_mut(&gen) else {
+        return;
+    };
+    match engine.render_thumb(page) {
+        Ok(Some(thumb)) => ctx.send(PdfReply::Thumb { gen, thumb }),
+        Ok(None) => ctx.send(PdfReply::ThumbMiss { gen, page }),
         Err(err) => ctx.send(PdfReply::failed(gen, err)),
     }
 }
@@ -526,6 +582,7 @@ fn handle_job(
     ctx: &mut WorkerCtx<'_>,
     job: PdfJob,
     tile_wanted: &Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    thumb_wanted: &Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
 ) -> bool {
     match job {
         PdfJob::Shutdown => true,
@@ -547,6 +604,10 @@ fn handle_job(
             ..
         } => {
             handle_tile(ctx, gen, page, scale, col, row, tile_wanted);
+            false
+        }
+        PdfJob::Thumb { gen, page } => {
+            handle_thumb(ctx, gen, page, thumb_wanted);
             false
         }
         PdfJob::Crop {
@@ -611,6 +672,7 @@ fn worker_loop(
     replies: Sender<PdfReply>,
     reads: Sender<ReadJob>,
     tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
 ) {
     let mut engines: HashMap<u64, DocumentEngine> = HashMap::new();
     let mut queued = VecDeque::new();
@@ -621,7 +683,7 @@ fn worker_loop(
             reads: &reads,
             engines: &mut engines,
         };
-        if handle_job(&mut worker, job, &tile_wanted) {
+        if handle_job(&mut worker, job, &tile_wanted, &thumb_wanted) {
             break;
         }
     }
@@ -1016,7 +1078,8 @@ mod tests {
 
         let ctx = egui::Context::default();
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
-        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted));
+        let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
         let gen = 3u64;
         worker.open(gen, path);
         let opened = wait_until(&worker, |replies| {
@@ -1127,7 +1190,8 @@ mod tests {
             PathBuf::from(std::env::var("BENCH_PDF").unwrap_or("/tmp/pdfs/progit.pdf".into()));
         let ctx = egui::Context::default();
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
-        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted));
+        let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
         worker.open(1, path);
         let opened = wait_until(&worker, |replies| {
             replies

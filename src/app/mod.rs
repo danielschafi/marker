@@ -1142,6 +1142,21 @@ impl MarkerApp {
         self.preset_editor_open = !self.preset_editor_open;
     }
 
+    /// Re-selecting a markup or shape tool restores that family's factory color (#85).
+    /// Text / note / math ink stays sticky on purpose.
+    pub(crate) fn restore_default_tool_color(&mut self, tool: Tool) {
+        let changed = if tool.is_text_mark() {
+            self.settings.restore_default_highlight_color()
+        } else if tool.is_shape() {
+            self.settings.restore_default_shape_color()
+        } else {
+            false
+        };
+        if changed {
+            self.settings.save();
+        }
+    }
+
     /// Clear annotation selection, style bar, and assistant learning selection.
     pub(crate) fn clear_page_selection(&mut self) {
         if let Some(tab) = self.tab_mut() {

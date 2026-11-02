@@ -1455,7 +1455,13 @@ impl MarkerApp {
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::ToggleCheatsheet => self.toggle_cheatsheet(),
-            Action::SetTool(tool) => self.tool = tool,
+            Action::SetTool(tool) => {
+                // Pressing H / U / X / W / R / E / I again restores the factory swatch (#85).
+                if self.tool == tool {
+                    self.restore_default_tool_color(tool);
+                }
+                self.tool = tool;
+            }
             Action::NextSearchHit => self.search_step(1),
             Action::PrevSearchHit => self.search_step(-1),
             Action::DeleteSelected => self.delete_selected(),

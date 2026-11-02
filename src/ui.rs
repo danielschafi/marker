@@ -9,8 +9,8 @@ use egui::{
 
 use crate::annot::{AnnotKind, Annotation, ForeignKind, MarkupStyle, ShapeKind};
 use crate::app::{
-    AnnotFilterKind, MarkerApp, SaveState, ShortcutSection, SplitDropZone, SplitState, Tab,
-    TabListState, Tool, SHORTCUTS,
+    AnnotFilterKind, CreateKind, MarkerApp, SaveState, ShortcutSection, SplitDropZone, SplitState,
+    Tab, TabListState, Tool, SHORTCUTS,
 };
 use crate::assistant::{
     assistant_session_hint, glyphs_intersecting_rects, reconstruct_text, AssistantAttachment,
@@ -1846,12 +1846,17 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
 /// Paint the transcript from a borrow of the live turns.
 fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
     let active = app.active;
+    let streaming = app
+        .tabs
+        .get(active)
+        .is_some_and(|tab| tab.assistant.streaming);
     let cache = &mut app.assistant_md_cache;
     let turns = app
         .tabs
         .get(active)
         .map(|tab| tab.assistant.turns.as_slice())
         .unwrap_or(&[]);
+    let mut save: Option<(usize, CreateKind)> = None;
     ScrollArea::vertical()
         .id_salt("assistant-transcript")
         .auto_shrink([false, false])
@@ -1866,7 +1871,7 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
                     .weak(),
                 );
             }
-            for turn in turns {
+            for (index, turn) in turns.iter().enumerate() {
                 let who = match turn.role {
                     AssistantRole::User => "You",
                     AssistantRole::Assistant => "Cursor",
@@ -1890,10 +1895,37 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
                 }
                 if turn.incomplete {
                     ui.label(RichText::new("…").weak());
+                } else if matches!(turn.role, AssistantRole::Assistant) && !turn.text.is_empty() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!streaming, Button::new("Save to page"))
+                            .on_hover_text("Insert this answer as a text annotation on the page")
+                            .clicked()
+                        {
+                            save = Some((index, CreateKind::Text));
+                        }
+                        if ui
+                            .add_enabled(!streaming, Button::new("Save as note"))
+                            .on_hover_text("Insert this answer as a sticky note on the page")
+                            .clicked()
+                        {
+                            save = Some((index, CreateKind::Note));
+                        }
+                    });
                 }
                 ui.add_space(8.0);
             }
         });
+    if let Some((index, kind)) = save {
+        let text = app
+            .tabs
+            .get(active)
+            .and_then(|tab| tab.assistant.turns.get(index))
+            .map(|turn| turn.text.clone());
+        if let Some(text) = text {
+            app.save_assistant_answer(&text, kind);
+        }
+    }
 }
 
 fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {

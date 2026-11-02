@@ -104,9 +104,8 @@ pub fn find_arxiv(text: &str) -> Option<String> {
     while let Some(rel) = lower[search_from..].find("arxiv") {
         let at = search_from + rel;
         let after = &text[at + 5..];
-        let after_trim = after.trim_start_matches(|c: char| {
-            c.is_whitespace() || c == ':' || c == '.'
-        });
+        let after_trim =
+            after.trim_start_matches(|c: char| c.is_whitespace() || c == ':' || c == '.');
         // Skip "arxiv.org/abs/" or "arxiv.org/pdf/" prefix if present.
         let after_trim = strip_arxiv_url_prefix(after_trim);
         if let Some(id) = parse_arxiv_id(after_trim) {
@@ -182,11 +181,7 @@ fn parse_old_arxiv(s: &str) -> Option<String> {
     // archive-name/7digits, e.g. hep-th/9901001
     let slash = s.find('/')?;
     let archive = &s[..slash];
-    if archive.is_empty()
-        || !archive
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c == '-')
-    {
+    if archive.is_empty() || !archive.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
         return None;
     }
     let rest = &s[slash + 1..];
@@ -261,10 +256,7 @@ mod tests {
     #[test]
     fn finds_doi_in_prose() {
         let text = "See https://doi.org/10.1145/1234567.7654321 for details.";
-        assert_eq!(
-            find_doi(text).as_deref(),
-            Some("10.1145/1234567.7654321")
-        );
+        assert_eq!(find_doi(text).as_deref(), Some("10.1145/1234567.7654321"));
         assert_eq!(
             find_cite_id(text),
             Some(CiteId::Doi("10.1145/1234567.7654321".into()))
@@ -287,10 +279,7 @@ mod tests {
         assert_eq!(find_doi(text), None);
         assert_eq!(find_arxiv(text), None);
         assert_eq!(find_cite_id(text), None);
-        assert_eq!(
-            citation_line("notes.pdf", 3, text),
-            "notes.pdf, p. 3"
-        );
+        assert_eq!(citation_line("notes.pdf", 3, text), "notes.pdf, p. 3");
     }
 
     #[test]
@@ -307,9 +296,6 @@ mod tests {
     #[test]
     fn doi_preferred_over_arxiv() {
         let text = "arXiv:2301.00001 and doi:10.1000/abc";
-        assert_eq!(
-            find_cite_id(text),
-            Some(CiteId::Doi("10.1000/abc".into()))
-        );
+        assert_eq!(find_cite_id(text), Some(CiteId::Doi("10.1000/abc".into())));
     }
 }

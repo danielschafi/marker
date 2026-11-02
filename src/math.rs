@@ -547,7 +547,12 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
         match incoming {
             Job::Shutdown => break,
             Job::Render(request) => {
-                let key = MathKey::new(&request.source, request.display, request.size, request.color);
+                let key = MathKey::new(
+                    &request.source,
+                    request.display,
+                    request.size,
+                    request.color,
+                );
                 let lane = request.lane;
                 sched.push(
                     ScheduledJob {
@@ -843,9 +848,9 @@ fn mitex_to_typst(expr: &str) -> String {
     s = rewrite_call(&s, "Vmatrix", |args| format!("mat(delim: \"||\", {args})"));
     s = rewrite_call(&s, "matrix", |args| format!("mat({args})"));
     s = rewrite_call(&s, "aligned", |args| args);
-    s = rewrite_call(&s, "alignedat", |args| strip_first_arg(args));
+    s = rewrite_call(&s, "alignedat", strip_first_arg);
     s = rewrite_call(&s, "align", |args| args);
-    s = rewrite_call(&s, "alignat", |args| strip_first_arg(args));
+    s = rewrite_call(&s, "alignat", strip_first_arg);
     s = rewrite_call(&s, "gather", |args| args);
     s = rewrite_call(&s, "gathered", |args| args);
     s = rewrite_call(&s, "split", |args| args);
@@ -899,8 +904,7 @@ fn strip_tex_backslashes(input: &str) -> String {
                     // (often already invalid; better than "unknown symbol modifier").
                     continue;
                 }
-                Some(next) if matches!(next, '{' | '}' | '[' | ']' | '|' | ',' | ';' | ':' | '!' | ' ') =>
-                {
+                Some('{' | '}' | '[' | ']' | '|' | ',' | ';' | ':' | '!' | ' ') => {
                     // `\{` → `{`, `\,` already handled above; keep the following char.
                     continue;
                 }
@@ -1137,7 +1141,12 @@ mod tests {
         assert!(rendered.width_pt > 1.0 && rendered.height_pt > 1.0);
         let preview = rendered.preview.expect("preview");
         assert!(preview.width > 0 && preview.height > 0);
-        let transparent = preview.pixels.chunks_exact(4).any(|px| px[3] == 0);
+        let transparent = preview
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|px| px[3] == 0);
         assert!(transparent, "equation background should be transparent");
         let image_aspect = preview.width as f32 / preview.height as f32;
         let box_aspect = rendered.width_pt / rendered.height_pt;
@@ -1160,10 +1169,15 @@ mod tests {
         let preview = rendered.preview.expect("preview");
         let opaque = preview
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[3] > 20)
             .count();
-        assert!(opaque > 200, "matrix should paint visible ink, got {opaque}");
+        assert!(
+            opaque > 200,
+            "matrix should paint visible ink, got {opaque}"
+        );
     }
 
     #[test]
@@ -1191,26 +1205,16 @@ mod tests {
     #[test]
     fn mitex_rewrite_maps_sqrt_helpers() {
         assert_eq!(mitex_to_typst("mitexsqrt(x )"), "sqrt(x)");
-        assert_eq!(
-            mitex_to_typst(r"mitexsqrt(\[3 \],x )"),
-            "root(3, x)"
-        );
+        assert_eq!(mitex_to_typst(r"mitexsqrt(\[3 \],x )"), "root(3, x)");
         // Commas inside the radicand must not be treated as an optional index.
-        assert_eq!(
-            mitex_to_typst("mitexsqrt(f(a ,b ))"),
-            "sqrt(f(a ,b ))"
-        );
+        assert_eq!(mitex_to_typst("mitexsqrt(f(a ,b ))"), "sqrt(f(a ,b ))");
     }
 
     #[test]
     fn renders_sqrt_and_nth_root() {
         for latex in [r"\sqrt{x}", r"\sqrt{b^2 - 4ac}", r"\sqrt[3]{8}"] {
             let rendered = render_equation_blocking(latex, 16.0, Rgb::new(0, 0, 0));
-            assert!(
-                rendered.error.is_none(),
-                "{latex}: {:?}",
-                rendered.error
-            );
+            assert!(rendered.error.is_none(), "{latex}: {:?}", rendered.error);
             assert!(rendered.width_pt > 1.0 && rendered.height_pt > 1.0);
             assert!(rendered.pdf.is_some());
         }
@@ -1244,11 +1248,7 @@ mod tests {
     fn renders_mathbf_and_operatorname() {
         for latex in [r"\mathbf{v}", r"\operatorname{tr}(A)"] {
             let rendered = render_equation_blocking(latex, 16.0, Rgb::new(0, 0, 0));
-            assert!(
-                rendered.error.is_none(),
-                "{latex}: {:?}",
-                rendered.error
-            );
+            assert!(rendered.error.is_none(), "{latex}: {:?}", rendered.error);
         }
     }
 
@@ -1341,7 +1341,9 @@ mod tests {
             t0 + Duration::from_millis(10),
         );
         assert!(sched.poll(t0 + Duration::from_millis(30)).is_none());
-        let job = sched.poll(t0 + Duration::from_millis(50)).expect("live job");
+        let job = sched
+            .poll(t0 + Duration::from_millis(50))
+            .expect("live job");
         assert_eq!(job.payload, "b");
         assert!(sched.poll(t0 + Duration::from_millis(80)).is_none());
     }
@@ -1402,7 +1404,8 @@ mod tests {
         assert_eq!(sched.poll(now).expect("background").payload, "bg");
         assert!(sched.poll(now + Duration::from_millis(20)).is_none());
         assert_eq!(
-            sched.poll(now + Duration::from_millis(40))
+            sched
+                .poll(now + Duration::from_millis(40))
                 .expect("latest live")
                 .payload,
             "new"
@@ -1461,14 +1464,22 @@ mod tests {
     #[test]
     fn preview_omits_pdf_until_asked() {
         let engine = build_engine();
-        let preview = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), false, RASTER_SCALE);
+        let preview = render_equation(
+            &engine,
+            r"x^2",
+            14.0,
+            Rgb::new(0, 0, 0),
+            false,
+            RASTER_SCALE,
+        );
         assert!(preview.error.is_none(), "{:?}", preview.error);
         assert!(preview.pdf.is_none(), "preview must not build a PDF");
         assert!(preview.svg.is_some());
         assert!(preview.preview.is_some());
         assert!(preview.width_pt > 1.0);
         assert!((preview.raster_scale - RASTER_SCALE).abs() < f32::EPSILON);
-        let with_pdf = render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), true, RASTER_SCALE);
+        let with_pdf =
+            render_equation(&engine, r"x^2", 14.0, Rgb::new(0, 0, 0), true, RASTER_SCALE);
         assert!(with_pdf.pdf.is_some());
         // Page frames in this Typst version may or may not publish a baseline.
         // Paint centers when this is None; it aligns when it is Some.
@@ -1542,7 +1553,14 @@ mod tests {
     #[test]
     fn reraster_from_svg_skips_typst_and_pdf() {
         let engine = build_engine();
-        let first = render_equation(&engine, r"\frac{a}{b}", 14.0, Rgb::new(0, 0, 0), false, RASTER_SCALE);
+        let first = render_equation(
+            &engine,
+            r"\frac{a}{b}",
+            14.0,
+            Rgb::new(0, 0, 0),
+            false,
+            RASTER_SCALE,
+        );
         assert!(first.error.is_none(), "{:?}", first.error);
         let svg = first.svg.expect("svg");
         let sharp = RASTER_SCALE * std::f32::consts::SQRT_2;
@@ -1607,7 +1625,10 @@ mod tests {
             RASTER_SCALE,
         );
         assert!(rendered.error.is_none(), "{:?}", rendered.error);
-        assert!(rendered.pdf.is_none(), "assistant math must not request PDF");
+        assert!(
+            rendered.pdf.is_none(),
+            "assistant math must not request PDF"
+        );
         let eq = rendered.preview.expect("preview");
 
         // Panel mock laid out in Typst so role / prose / Copy stay readable.

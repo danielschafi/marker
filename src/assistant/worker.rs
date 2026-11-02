@@ -112,11 +112,7 @@ fn worker_loop(
     active: Arc<Mutex<Option<ActiveChild>>>,
 ) {
     let mut capability: Option<AgentCapability> = None;
-    loop {
-        let job = match jobs.recv() {
-            Ok(job) => job,
-            Err(_) => break,
-        };
+    while let Ok(job) = jobs.recv() {
         match job {
             Job::Shutdown => break,
             Job::Cancel { gen, seq } => {
@@ -247,7 +243,14 @@ fn run_turn(
     let cancel_stream = Arc::clone(&cancel);
     let ctx_stream = ctx.clone();
     let reader = thread::spawn(move || {
-        stream_stdout(stdout, gen, seq, &ctx_stream, &events_stream, &cancel_stream)
+        stream_stdout(
+            stdout,
+            gen,
+            seq,
+            &ctx_stream,
+            &events_stream,
+            &cancel_stream,
+        )
     });
 
     let status = loop {
@@ -312,20 +315,11 @@ fn run_turn(
     );
 }
 
+#[derive(Default)]
 struct StreamOutcome {
     assistant_text: String,
     had_result: bool,
     error: Option<String>,
-}
-
-impl Default for StreamOutcome {
-    fn default() -> Self {
-        Self {
-            assistant_text: String::new(),
-            had_result: false,
-            error: None,
-        }
-    }
 }
 
 fn stream_stdout(
@@ -398,11 +392,7 @@ fn stream_stdout(
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| assembled.clone());
                     assembled = text.clone();
-                    emit(
-                        ctx,
-                        events,
-                        AssistantEvent::Completed { gen, seq, text },
-                    );
+                    emit(ctx, events, AssistantEvent::Completed { gen, seq, text });
                 }
             }
             _ => {}
@@ -556,17 +546,21 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello"}'
         )
         .unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-        let child = Command::new(&script)
+        let mut child = Command::new(&script)
             .stdout(Stdio::piped())
             .spawn()
             .unwrap();
+        let stdout = child.stdout.take();
         let (tx, rx) = mpsc::channel();
         let cancel = AtomicBool::new(false);
         let ctx = egui::Context::default();
-        let outcome = stream_stdout(child.stdout, 1, 1, &ctx, &tx, &cancel);
+        let outcome = stream_stdout(stdout, 1, 1, &ctx, &tx, &cancel);
+        let _ = child.wait();
         assert!(outcome.had_result);
         let events: Vec<_> = rx.try_iter().collect();
-        assert!(events.iter().any(|e| matches!(e, AssistantEvent::Delta { .. })));
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, AssistantEvent::Delta { .. })));
         assert!(events
             .iter()
             .any(|e| matches!(e, AssistantEvent::Completed { text, .. } if text == "Hello")));

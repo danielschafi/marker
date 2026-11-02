@@ -334,10 +334,7 @@ impl DocumentEngine {
         let pixels = rgba_from_pixmap(&pixmap);
         let png = encode_png(&pixels, width, height)?;
         if png.len() > crate::assistant::CROP_MAX_PNG_BYTES {
-            return Err(format!(
-                "Crop PNG is too large ({} bytes).",
-                png.len()
-            ));
+            return Err(format!("Crop PNG is too large ({} bytes).", png.len()));
         }
         Ok(CropImage {
             page,
@@ -426,9 +423,7 @@ impl DocumentEngine {
             });
         let at = at.min(self.pages.len());
         let size = Size::new(template.width().max(1.0), template.height().max(1.0));
-        self.doc
-            .new_page_at(at as i32, size)
-            .map_err(show)?;
+        self.doc.new_page_at(at as i32, size).map_err(show)?;
         self.lists.clear();
         self.list_order.clear();
         self.refresh_pages()?;
@@ -525,13 +520,12 @@ impl DocumentEngine {
         let Some(path_str) = path.to_str() else {
             return Err("The PDF path is not valid UTF-8.".into());
         };
-        let incremental_ok = self.doc.can_be_saved_incrementally()
-            && {
-                let mut options = PdfWriteOptions::default();
-                options.set_incremental(true);
-                options.set_appearance(false);
-                self.doc.save_with_options(path_str, options).is_ok()
-            };
+        let incremental_ok = self.doc.can_be_saved_incrementally() && {
+            let mut options = PdfWriteOptions::default();
+            options.set_incremental(true);
+            options.set_appearance(false);
+            self.doc.save_with_options(path_str, options).is_ok()
+        };
         if !incremental_ok {
             self.rewrite_all(&path)?;
         }
@@ -559,7 +553,9 @@ impl DocumentEngine {
         if self.opened_len == 0 {
             return Ok(false);
         }
-        let len = std::fs::metadata(&self.path).map(|meta| meta.len()).unwrap_or(0);
+        let len = std::fs::metadata(&self.path)
+            .map(|meta| meta.len())
+            .unwrap_or(0);
         if len <= self.opened_len.saturating_mul(5) / 4 {
             return Ok(false);
         }
@@ -1041,6 +1037,8 @@ fn write_marker(
     write_marker_full(doc, annot, kind, id, None, text_size, text_color, source)
 }
 
+// RF7 packs marker metadata into a struct.
+#[allow(clippy::too_many_arguments)]
 fn write_marker_full(
     doc: &PdfDocument,
     annot: &PdfAnnotation,
@@ -1452,7 +1450,11 @@ fn apply_existing(
             write_marker(doc, annot, "Highlight", source.id, None, Some(*color), None)?;
             annot.update()?;
         }
-        AnnotKind::Markup { style, quads, color } => {
+        AnnotKind::Markup {
+            style,
+            quads,
+            color,
+        } => {
             if annot.r#type()? != pdf_markup_type(*style) {
                 return Err(mupdf::Error::InvalidArgument("type changed".into()));
             }
@@ -1595,6 +1597,8 @@ fn write_markup_quads(
     Ok(())
 }
 
+// RF7 packs shape geometry/style into a struct.
+#[allow(clippy::too_many_arguments)]
 fn apply_shape(
     annot: &mut PdfAnnotation,
     kind: ShapeKind,
@@ -1655,7 +1659,11 @@ fn create_annot(
             .map_err(show)?;
             annot
         }
-        AnnotKind::Markup { style, quads, color } => {
+        AnnotKind::Markup {
+            style,
+            quads,
+            color,
+        } => {
             let pdf_quads: Vec<Quad> = quads.iter().copied().map(rect_quad).collect();
             if pdf_quads.is_empty() {
                 return Err("Markup is empty.".into());
@@ -1807,8 +1815,7 @@ fn delete_inline_math_children(page: &mut PdfPage, parent_id: u64) -> Result<(),
         .annotations()
         .filter_map(|annot| {
             let marker = read_marker(&annot.object());
-            if marker.kind.as_deref() == Some("InlineMath") && marker.parent_id == Some(parent_id)
-            {
+            if marker.kind.as_deref() == Some("InlineMath") && marker.parent_id == Some(parent_id) {
                 annot.xref().ok()
             } else {
                 None
@@ -2088,7 +2095,10 @@ mod tests {
             THUMB_WIDTH_PX
         );
         assert!(thumb.height > 0);
-        assert_eq!(thumb.pixels.len(), (thumb.width * thumb.height * 4) as usize);
+        assert_eq!(
+            thumb.pixels.len(),
+            (thumb.width * thumb.height * 4) as usize
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2154,7 +2164,11 @@ mod tests {
             rich_text_parents: Vec::new(),
         };
         engine.save(&empty).unwrap();
-        assert!(bak.exists(), "expected {}.bak after first save", path.display());
+        assert!(
+            bak.exists(),
+            "expected {}.bak after first save",
+            path.display()
+        );
         assert_eq!(std::fs::read(&bak).unwrap(), original);
 
         // Second save must not rotate or rewrite an existing bak.
@@ -2196,7 +2210,10 @@ mod tests {
         assert_eq!(std::fs::read(&path).unwrap(), original);
         let mtime_after = std::fs::metadata(&path).unwrap().modified().unwrap();
         assert_eq!(mtime_before, mtime_after);
-        assert!(!bak_path(&path).exists(), "Save As must not bak the original");
+        assert!(
+            !bak_path(&path).exists(),
+            "Save As must not bak the original"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2460,13 +2477,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-
-
-
-
     fn count_yellow(pixels: &[u8]) -> usize {
         pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|px| px[0] > 220 && px[1] > 180 && px[2] < 120)
             .count()
     }
@@ -2620,7 +2635,10 @@ mod tests {
             .filter(|annot| matches!(annot.kind, AnnotKind::Image { .. }))
             .collect();
         assert_eq!(images.len(), 1);
-        let AnnotKind::Image { rect, rgba: got, .. } = &images[0].kind else {
+        let AnnotKind::Image {
+            rect, rgba: got, ..
+        } = &images[0].kind
+        else {
             unreachable!();
         };
         assert!((rect.x0 - 120.0).abs() < 0.5, "rect snapped back: {rect:?}");
@@ -2789,7 +2807,12 @@ mod tests {
         let mut found = Vec::new();
         for annot in &again.annotations {
             assert!(!annot.dirty, "imported native markup should be clean");
-            let AnnotKind::Markup { style, quads, color } = &annot.kind else {
+            let AnnotKind::Markup {
+                style,
+                quads,
+                color,
+            } = &annot.kind
+            else {
                 panic!("expected native markup, got {:?}", annot.kind);
             };
             found.push((*style, quads.clone(), *color));
@@ -2861,15 +2884,22 @@ mod tests {
                 other => panic!("markup became {other:?}"),
             })
             .collect();
-        assert!(colors.contains(&edited), "re-saved underline color {colors:?}");
+        assert!(
+            colors.contains(&edited),
+            "re-saved underline color {colors:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn quads_near(got: &[PdfRect], expect: &[PdfRect]) {
         assert_eq!(got.len(), expect.len(), "quads {got:?} vs {expect:?}");
         for (got, expect) in got.iter().zip(expect) {
-            for (a, b) in [(got.x0, expect.x0), (got.y0, expect.y0), (got.x1, expect.x1), (got.y1, expect.y1)]
-            {
+            for (a, b) in [
+                (got.x0, expect.x0),
+                (got.y0, expect.y0),
+                (got.x1, expect.x1),
+                (got.y1, expect.y1),
+            ] {
                 assert!((a - b).abs() < 0.8, "{got:?} vs {expect:?}");
             }
         }
@@ -2877,8 +2907,12 @@ mod tests {
 
     fn count_channel(pixels: &[u8], channel: usize) -> usize {
         pixels
-            .chunks_exact(4)
-            .filter(|px| px[channel] > 180 && px[(channel + 1) % 3] < 80 && px[(channel + 2) % 3] < 80)
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|px| {
+                px[channel] > 180 && px[(channel + 1) % 3] < 80 && px[(channel + 2) % 3] < 80
+            })
             .count()
     }
 
@@ -2944,7 +2978,11 @@ mod tests {
         let out_r = ink_r as f32 * ia + base_r * (1.0 - ia);
         let out_g = ink_g as f32 * ia + base_g * (1.0 - ia);
         let out_b = ink_b as f32 * ia + base_b * (1.0 - ia);
-        (out_r.round() as u8, out_g.round() as u8, out_b.round() as u8)
+        (
+            out_r.round() as u8,
+            out_g.round() as u8,
+            out_b.round() as u8,
+        )
     }
 
     #[test]

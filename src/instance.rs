@@ -327,7 +327,7 @@ fn runtime_uid() -> u32 {
     #[cfg(unix)]
     {
         // SAFETY: getuid is always available on Unix.
-        return unsafe { libc::getuid() };
+        unsafe { libc::getuid() }
     }
     #[cfg(not(unix))]
     {
@@ -351,6 +351,19 @@ fn absolute_fallback(path: &Path) -> PathBuf {
 }
 
 /// Spawn a separate Marker window for `path` (bypasses single-instance).
+pub fn spawn_new_window(path: &Path) -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new(exe)
+        .arg("--new-window")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,9 +396,7 @@ mod tests {
     #[test]
     fn handle_client_open_parses_pdf_paths() {
         let (mut client, server) = std::os::unix::net::UnixStream::pair().unwrap();
-        client
-            .write_all(b"open\n/a.pdf\n/b.txt\n\n")
-            .unwrap();
+        client.write_all(b"open\n/a.pdf\n/b.txt\n\n").unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
         let paths = handle_client(server).expect("valid open request");
@@ -427,17 +438,4 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
-}
-
-pub fn spawn_new_window(path: &Path) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    std::process::Command::new(exe)
-        .arg("--new-window")
-        .arg(path)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| e.to_string())
 }

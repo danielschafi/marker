@@ -33,13 +33,7 @@ pub fn probe_agent() -> Result<AgentCapability, String> {
     let account_hint = status
         .lines()
         .find(|line| line.to_ascii_lowercase().contains("logged in"))
-        .map(|line| {
-            line.split(" as ")
-                .nth(1)
-                .unwrap_or(line)
-                .trim()
-                .to_string()
-        });
+        .map(|line| line.split(" as ").nth(1).unwrap_or(line).trim().to_string());
     Ok(AgentCapability {
         path,
         version,

@@ -160,8 +160,7 @@ pub fn parse_spans(content: &str) -> Vec<Span> {
                 });
                 i = end;
                 prose_start = end;
-                after_inline_dollar_close =
-                    matches!(delim, Delim::DollarInline) && close_len == 1;
+                after_inline_dollar_close = matches!(delim, Delim::DollarInline) && close_len == 1;
             }
             None => {
                 if matches!(delim, Delim::DollarInline) {
@@ -223,9 +222,7 @@ fn dollar_close_len(delim: Delim) -> usize {
 
 fn valid_inline_dollar_open(bytes: &[u8], i: usize) -> bool {
     let after = i + 1;
-    after < bytes.len()
-        && !bytes[after].is_ascii_whitespace()
-        && !bytes[after].is_ascii_digit()
+    after < bytes.len() && !bytes[after].is_ascii_whitespace() && !bytes[after].is_ascii_digit()
 }
 
 fn valid_inline_dollar_close(bytes: &[u8], at: usize) -> bool {
@@ -381,6 +378,7 @@ pub fn caret_inside_math(content: &str, caret: usize) -> Option<MathSpanRef> {
 }
 
 /// Replace the inner source of a math span, preserving delimiters / openness.
+#[allow(dead_code)] // Covered by unit tests; production call sites return in later RF waves.
 pub fn replace_math_inner(content: &str, span: &MathSpanRef, new_inner: &str) -> String {
     let mut out = String::with_capacity(content.len() + new_inner.len());
     out.push_str(&content[..span.inner_start]);
@@ -657,7 +655,10 @@ mod tests {
                 inner_start,
                 inner_end,
                 ..
-            } => assert_eq!(&"hi $x^2$ and $$\\frac{a}{b}$$ done"[*inner_start..*inner_end], "x^2"),
+            } => assert_eq!(
+                &"hi $x^2$ and $$\\frac{a}{b}$$ done"[*inner_start..*inner_end],
+                "x^2"
+            ),
             _ => panic!("expected math"),
         }
         assert!(matches!(
@@ -737,7 +738,7 @@ mod tests {
         assert!(super::caret_inside_math(content, 3).is_some()); // on `b`
         assert!(super::caret_inside_math(content, 4).is_some()); // on closer char
         assert!(super::caret_inside_math(content, 5).is_none()); // after span
-        // Unclosed inline `$` is prose (Pandoc); unclosed `$$` / `\(` stay math to EOF.
+                                                                 // Unclosed inline `$` is prose (Pandoc); unclosed `$$` / `\(` stay math to EOF.
         assert!(super::caret_inside_math(r"$\alpha", 3).is_none());
         let open = r"$$\alpha";
         assert!(super::caret_inside_math(open, open.len()).is_some());

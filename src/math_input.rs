@@ -225,8 +225,7 @@ fn apply_dollar(text: &str, caret: usize, byte: usize) -> Option<(String, CCurso
         let end = char_to_byte(text, caret + 1);
         return Some(splice(text, start, end, "$$$$", 2));
     }
-    if next_char(text, caret) == Some('$') && math_spans::caret_inside_math(text, byte).is_some()
-    {
+    if next_char(text, caret) == Some('$') && math_spans::caret_inside_math(text, byte).is_some() {
         return Some((text.to_string(), cursor(caret + 1)));
     }
     if math_spans::caret_inside_math(text, byte).is_none() {
@@ -790,18 +789,39 @@ mod tests {
             apply("$$", caret(1), &key(Key::Backspace, Modifiers::NONE), false).unwrap();
         assert_eq!((out.as_str(), range.primary.index), ("", 0));
 
-        let (out, range) =
-            apply("$$$$", caret(2), &key(Key::Backspace, Modifiers::NONE), false).unwrap();
+        let (out, range) = apply(
+            "$$$$",
+            caret(2),
+            &key(Key::Backspace, Modifiers::NONE),
+            false,
+        )
+        .unwrap();
         assert_eq!((out.as_str(), range.primary.index), ("", 0));
 
-        assert!(apply("$*$", caret(2), &key(Key::Backspace, Modifiers::NONE), false).is_none());
+        assert!(apply(
+            "$*$",
+            caret(2),
+            &key(Key::Backspace, Modifiers::NONE),
+            false
+        )
+        .is_none());
 
-        let (out, range) =
-            apply("$({})$", caret(3), &key(Key::Backspace, Modifiers::NONE), false).unwrap();
+        let (out, range) = apply(
+            "$({})$",
+            caret(3),
+            &key(Key::Backspace, Modifiers::NONE),
+            false,
+        )
+        .unwrap();
         assert_eq!((out.as_str(), range.primary.index), ("$()$", 2));
 
-        let (out, range) =
-            apply(r"\(\)", caret(2), &key(Key::Backspace, Modifiers::NONE), false).unwrap();
+        let (out, range) = apply(
+            r"\(\)",
+            caret(2),
+            &key(Key::Backspace, Modifiers::NONE),
+            false,
+        )
+        .unwrap();
         assert_eq!((out.as_str(), range.primary.index), ("", 0));
 
         let (out, range) = apply(
@@ -880,13 +900,17 @@ mod tests {
     #[test]
     fn tab_closes_unclosed_span() {
         // Unclosed inline `$` is prose; tab-out closes `$$` / `\(` spans.
-        let (out, range) =
-            apply(r"$$\alpha", caret(4), &key(Key::Tab, Modifiers::NONE), false).unwrap();
+        let (out, range) = apply(
+            r"$$\alpha",
+            caret(4),
+            &key(Key::Tab, Modifiers::NONE),
+            false,
+        )
+        .unwrap();
         assert_eq!(out, r"$$\alpha$$");
         assert_eq!(range.primary.index, 10);
 
-        let (out, range) =
-            apply(r"\(x", caret(3), &key(Key::Tab, Modifiers::NONE), false).unwrap();
+        let (out, range) = apply(r"\(x", caret(3), &key(Key::Tab, Modifiers::NONE), false).unwrap();
         assert_eq!(out, r"\(x\)");
         assert_eq!(range.primary.index, 5);
     }

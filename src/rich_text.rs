@@ -75,7 +75,11 @@ pub fn layout_rich_text(
     let mut x = 0.0_f32;
     let mut y = 0.0_f32;
 
-    let flush = |line: &mut Vec<Piece>, y: &mut f32, x: &mut f32, runs: &mut Vec<LaidRun>, line_height: f32| {
+    let flush = |line: &mut Vec<Piece>,
+                 y: &mut f32,
+                 x: &mut f32,
+                 runs: &mut Vec<LaidRun>,
+                 line_height: f32| {
         if line.is_empty() {
             *y += line_height;
             *x = 0.0;
@@ -263,346 +267,356 @@ fn split_tokens(text: &str) -> Vec<String> {
 /// invisible placeholders whose letter-spacing reserves the equation width.
 mod galley {
     use egui::text::{CCursor, LayoutJob, LayoutSection, TextFormat, TextWrapping};
-    use egui::{Align, Color32, Event, FontId, Galley, Id, ImeEvent, Pos2, Rect, TextBuffer, Ui, Vec2};
+    use egui::{
+        Align, Color32, Event, FontId, Galley, Id, ImeEvent, Pos2, Rect, TextBuffer, Ui, Vec2,
+    };
 
     use crate::math_spans::{self, Span};
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CharSpan {
-    pub start: usize,
-    pub end: usize,
-    pub inner_start: usize,
-    pub inner_end: usize,
-    pub display: bool,
-    pub closed: bool,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum Render {
-    Ready(Vec2),
-    Pending,
-    Error(String),
-}
-
-pub struct Style {
-    pub font: FontId,
-    pub color: Color32,
-    pub source_color: Color32,
-    pub source_bg: Color32,
-    pub error: Color32,
-}
-
-#[derive(Clone, Debug)]
-pub struct Concealed {
-    pub span: CharSpan,
-    pub inner: String,
-    pub size: Vec2,
-}
-
-pub struct Built {
-    pub job: LayoutJob,
-    pub concealed: Vec<Concealed>,
-    pub revealed: Vec<CharSpan>,
-    /// Invalid spans that stayed raw. The editor paints a dotted underline.
-    pub errors: Vec<(CharSpan, String)>,
-}
-
-const TINY: f32 = 0.01;
-
-/// R1–R2. A closed span is revealed when the caret, or either selection
-/// endpoint, is strictly inside it. A boundary caret stays rendered. A span
-/// that sits entirely inside a selection stays rendered.
-pub fn is_revealed(span: &CharSpan, sel: Option<(usize, usize)>) -> bool {
-    if !span.closed {
-        return true;
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct CharSpan {
+        pub start: usize,
+        pub end: usize,
+        pub inner_start: usize,
+        pub inner_end: usize,
+        pub display: bool,
+        pub closed: bool,
     }
-    let Some((a, b)) = sel else {
-        return false;
-    };
-    let inside = |index: usize| index > span.start && index < span.end;
-    inside(a) || inside(b)
-}
 
-fn char_spans(text: &str) -> Vec<CharSpan> {
-    let mut out = Vec::new();
-    for span in math_spans::parse_spans(text) {
-        let Span::Math {
-            start,
-            end,
-            inner_start,
-            inner_end,
-            display,
-            closed,
-        } = span
-        else {
-            continue;
-        };
-        let (start, end) = math_spans::byte_range_char_indices(text, start, end);
-        let (inner_start, inner_end) = math_spans::byte_range_char_indices(text, inner_start, inner_end);
-        out.push(CharSpan {
-            start,
-            end,
-            inner_start,
-            inner_end,
-            display,
-            closed,
-        });
+    #[derive(Clone, Debug, PartialEq)]
+    pub enum Render {
+        Ready(Vec2),
+        Pending,
+        Error(String),
     }
-    out
-}
 
-/// Conceal-aware layout job. `sel` is the caret or selection in characters.
-pub fn build_job(
-    text: &str,
-    sel: Option<(usize, usize)>,
-    wrap_width: f32,
-    style: &Style,
-    render: &dyn Fn(&str, bool) -> Render,
-) -> Built {
-    let chars: Vec<char> = text.chars().collect();
-    let mut job = LayoutJob {
-        wrap: TextWrapping {
-            max_width: wrap_width,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let prose = TextFormat {
-        font_id: style.font.clone(),
-        color: style.color,
-        valign: Align::Center,
-        ..Default::default()
-    };
-    let push = |job: &mut LayoutJob, s: &str, format: TextFormat| {
-        if s.is_empty() {
-            return;
+    pub struct Style {
+        pub font: FontId,
+        pub color: Color32,
+        pub source_color: Color32,
+        pub source_bg: Color32,
+        pub error: Color32,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Concealed {
+        pub span: CharSpan,
+        pub inner: String,
+        pub size: Vec2,
+    }
+
+    pub struct Built {
+        pub job: LayoutJob,
+        pub concealed: Vec<Concealed>,
+        pub revealed: Vec<CharSpan>,
+        /// Invalid spans that stayed raw. The editor paints a dotted underline.
+        pub errors: Vec<(CharSpan, String)>,
+    }
+
+    const TINY: f32 = 0.01;
+
+    /// R1–R2. A closed span is revealed when the caret, or either selection
+    /// endpoint, is strictly inside it. A boundary caret stays rendered. A span
+    /// that sits entirely inside a selection stays rendered.
+    pub fn is_revealed(span: &CharSpan, sel: Option<(usize, usize)>) -> bool {
+        if !span.closed {
+            return true;
         }
-        let start = job.text.len();
-        job.text.push_str(s);
-        job.sections.push(LayoutSection {
-            leading_space: 0.0,
-            byte_range: start..job.text.len(),
-            format,
-        });
-    };
-    let mut concealed = Vec::new();
-    let mut revealed = Vec::new();
-    let mut errors = Vec::new();
-    let mut at = 0usize;
-    for span in char_spans(text) {
-        let before: String = chars[at..span.start].iter().collect();
-        push(&mut job, &before, prose.clone());
-        at = span.end;
-        let raw: String = chars[span.start..span.end].iter().collect();
-        let inner: String = chars[span.inner_start..span.inner_end].iter().collect();
-        let state = if inner.trim().is_empty() {
-            Render::Pending
-        } else {
-            render(&inner, span.display)
+        let Some((a, b)) = sel else {
+            return false;
         };
-        let reveal = is_revealed(&span, sel) || !matches!(state, Render::Ready(_));
-        if reveal {
-            revealed.push(span);
-            if let Render::Error(message) = &state {
-                errors.push((span, message.clone()));
-            }
-            let format = TextFormat {
-                color: style.source_color,
-                background: style.source_bg,
-                ..prose.clone()
+        let inside = |index: usize| index > span.start && index < span.end;
+        inside(a) || inside(b)
+    }
+
+    fn char_spans(text: &str) -> Vec<CharSpan> {
+        let mut out = Vec::new();
+        for span in math_spans::parse_spans(text) {
+            let Span::Math {
+                start,
+                end,
+                inner_start,
+                inner_end,
+                display,
+                closed,
+            } = span
+            else {
+                continue;
             };
-            push(&mut job, &raw, format);
-            continue;
+            let (start, end) = math_spans::byte_range_char_indices(text, start, end);
+            let (inner_start, inner_end) =
+                math_spans::byte_range_char_indices(text, inner_start, inner_end);
+            out.push(CharSpan {
+                start,
+                end,
+                inner_start,
+                inner_end,
+                display,
+                closed,
+            });
         }
-        let Render::Ready(size) = state else {
-            continue;
+        out
+    }
+
+    /// Conceal-aware layout job. `sel` is the caret or selection in characters.
+    pub fn build_job(
+        text: &str,
+        sel: Option<(usize, usize)>,
+        wrap_width: f32,
+        style: &Style,
+        render: &dyn Fn(&str, bool) -> Render,
+    ) -> Built {
+        let chars: Vec<char> = text.chars().collect();
+        let mut job = LayoutJob {
+            wrap: TextWrapping {
+                max_width: wrap_width,
+                ..Default::default()
+            },
+            ..Default::default()
         };
-        let open = span.inner_start - span.start;
-        let body_len = span.end - span.inner_start;
-        if body_len == 0 {
-            continue;
-        }
-        // The row reserves `row_w`. Display math takes the whole row so the
-        // following prose wraps; the image itself stays `draw` and is centered.
-        // An equation wider than the box scales down, keeping its aspect.
-        let max_w = (wrap_width - 1.0).max(1.0);
-        let draw = fitted_math(size, max_w);
-        let row_w = if span.display { max_w } else { draw.x };
-        let hidden = TextFormat {
-            font_id: FontId::new(TINY, style.font.family.clone()),
-            color: Color32::TRANSPARENT,
-            line_height: Some(draw.y),
+        let prose = TextFormat {
+            font_id: style.font.clone(),
+            color: style.color,
             valign: Align::Center,
             ..Default::default()
         };
-        push(&mut job, &" ".repeat(open), hidden.clone());
-        let mut body: String = "x".repeat(body_len.saturating_sub(1));
-        body.push(if span.display { ' ' } else { 'x' });
-        let spacing = if body_len > 1 {
-            row_w / (body_len - 1) as f32
-        } else {
-            0.0
+        let push = |job: &mut LayoutJob, s: &str, format: TextFormat| {
+            if s.is_empty() {
+                return;
+            }
+            let start = job.text.len();
+            job.text.push_str(s);
+            job.sections.push(LayoutSection {
+                leading_space: 0.0,
+                byte_range: start..job.text.len(),
+                format,
+            });
         };
-        push(
-            &mut job,
-            &body,
-            TextFormat {
-                extra_letter_spacing: spacing,
-                ..hidden
-            },
-        );
-        concealed.push(Concealed {
-            span,
-            inner,
-            size: draw,
-        });
-    }
-    let rest: String = chars[at..].iter().collect();
-    push(&mut job, &rest, prose);
-    Built {
-        job,
-        concealed,
-        revealed,
-        errors,
-    }
-}
-
-fn fitted_math(size: Vec2, max_w: f32) -> Vec2 {
-    if size.x <= max_w || size.x <= f32::EPSILON {
-        return Vec2::new(size.x.max(1.0), size.y.max(1.0));
-    }
-    let scale = max_w / size.x;
-    Vec2::new(max_w, (size.y * scale).max(1.0))
-}
-
-/// Galley-space rect of a concealed equation.
-pub fn math_rect(galley: &Galley, concealed: &Concealed) -> Rect {
-    let next_row = |index| CCursor {
-        index,
-        prefer_next_row: true,
-    };
-    let left = galley.pos_from_cursor(next_row(concealed.span.inner_start));
-    let right = galley.pos_from_cursor(next_row(concealed.span.end.saturating_sub(1)));
-    let center_y = left.center().y;
-    let x0 = if concealed.span.display {
-        left.min.x + ((right.min.x - left.min.x) - concealed.size.x).max(0.0) * 0.5
-    } else {
-        left.min.x
-    };
-    Rect::from_min_size(Pos2::new(x0, center_y - concealed.size.y * 0.5), concealed.size)
-}
-
-pub struct EditorOutput {
-    pub response: egui::Response,
-    pub galley: std::sync::Arc<Galley>,
-    pub galley_pos: Pos2,
-    /// Screen rects of concealed equations.
-    pub math: Vec<(Rect, String, bool, CharSpan)>,
-    /// Spans shown as source. The editor applies this before paint; tests read it.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub revealed: Vec<CharSpan>,
-    pub errors: Vec<(CharSpan, String)>,
-    pub caret: Option<(usize, usize)>,
-    /// True when this pass laid out a stale caret and asked for another.
-    #[cfg_attr(not(test), allow(dead_code))]
-    pub discarded: bool,
-}
-
-fn revealed_for(text: &str, sel: Option<(usize, usize)>, render: &dyn Fn(&str, bool) -> Render) -> Vec<CharSpan> {
-    let chars: Vec<char> = text.chars().collect();
-    char_spans(text)
-        .into_iter()
-        .filter(|span| {
+        let mut concealed = Vec::new();
+        let mut revealed = Vec::new();
+        let mut errors = Vec::new();
+        let mut at = 0usize;
+        for span in char_spans(text) {
+            let before: String = chars[at..span.start].iter().collect();
+            push(&mut job, &before, prose.clone());
+            at = span.end;
+            let raw: String = chars[span.start..span.end].iter().collect();
             let inner: String = chars[span.inner_start..span.inner_end].iter().collect();
             let state = if inner.trim().is_empty() {
                 Render::Pending
             } else {
                 render(&inner, span.display)
             };
-            is_revealed(span, sel) || !matches!(state, Render::Ready(_))
-        })
-        .collect()
-}
-
-fn ime_preedit(ui: &Ui) -> bool {
-    ui.input(|input| {
-        input.events.iter().any(|event| {
-            matches!(
-                event,
-                Event::Ime(ImeEvent::Preedit(_)) | Event::Ime(ImeEvent::Enabled)
-            )
-        })
-    })
-}
-
-/// One `TextEdit` over the raw source. The layouter reads the previous caret;
-/// a caret-only move discards the pass so the reveal updates before paint.
-/// A frame that is mid IME preedit is not discarded.
-pub fn conceal_editor(
-    ui: &mut Ui,
-    id: Id,
-    text: &mut String,
-    width: f32,
-    style: &Style,
-    render: &dyn Fn(&str, bool) -> Render,
-) -> EditorOutput {
-    let sel = egui::widgets::text_edit::TextEditState::load(ui.ctx(), id)
-        .and_then(|state| state.cursor.char_range())
-        .map(|range| (range.primary.index, range.secondary.index));
-    let mut last: Option<Built> = None;
-    let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, wrap: f32| {
-        let built = build_job(buf.as_str(), sel, wrap, style, render);
-        let galley = ui.fonts_mut(|fonts| fonts.layout_job(built.job.clone()));
-        last = Some(built);
-        galley
-    };
-    let output = egui::TextEdit::multiline(text)
-        .id(id)
-        .font(style.font.clone())
-        .text_color(style.color)
-        .desired_width(width)
-        .desired_rows(1)
-        .frame(false)
-        .margin(egui::Margin::ZERO)
-        .layouter(&mut layouter)
-        .show(ui);
-    let built = last.unwrap_or(Built {
-        job: LayoutJob::default(),
-        concealed: Vec::new(),
-        revealed: Vec::new(),
-        errors: Vec::new(),
-    });
-    let caret = output
-        .cursor_range
-        .map(|range| (range.primary.index, range.secondary.index));
-    let want = revealed_for(text, caret, render);
-    let discarded = want != built.revealed && !ime_preedit(ui);
-    if discarded {
-        ui.ctx().request_discard("conceal reveal set changed");
+            let reveal = is_revealed(&span, sel) || !matches!(state, Render::Ready(_));
+            if reveal {
+                revealed.push(span);
+                if let Render::Error(message) = &state {
+                    errors.push((span, message.clone()));
+                }
+                let format = TextFormat {
+                    color: style.source_color,
+                    background: style.source_bg,
+                    ..prose.clone()
+                };
+                push(&mut job, &raw, format);
+                continue;
+            }
+            let Render::Ready(size) = state else {
+                continue;
+            };
+            let open = span.inner_start - span.start;
+            let body_len = span.end - span.inner_start;
+            if body_len == 0 {
+                continue;
+            }
+            // The row reserves `row_w`. Display math takes the whole row so the
+            // following prose wraps; the image itself stays `draw` and is centered.
+            // An equation wider than the box scales down, keeping its aspect.
+            let max_w = (wrap_width - 1.0).max(1.0);
+            let draw = fitted_math(size, max_w);
+            let row_w = if span.display { max_w } else { draw.x };
+            let hidden = TextFormat {
+                font_id: FontId::new(TINY, style.font.family.clone()),
+                color: Color32::TRANSPARENT,
+                line_height: Some(draw.y),
+                valign: Align::Center,
+                ..Default::default()
+            };
+            push(&mut job, &" ".repeat(open), hidden.clone());
+            let mut body: String = "x".repeat(body_len.saturating_sub(1));
+            body.push(if span.display { ' ' } else { 'x' });
+            let spacing = if body_len > 1 {
+                row_w / (body_len - 1) as f32
+            } else {
+                0.0
+            };
+            push(
+                &mut job,
+                &body,
+                TextFormat {
+                    extra_letter_spacing: spacing,
+                    ..hidden
+                },
+            );
+            concealed.push(Concealed {
+                span,
+                inner,
+                size: draw,
+            });
+        }
+        let rest: String = chars[at..].iter().collect();
+        push(&mut job, &rest, prose);
+        Built {
+            job,
+            concealed,
+            revealed,
+            errors,
+        }
     }
-    let math = built
-        .concealed
-        .iter()
-        .map(|concealed| {
-            (
-                math_rect(&output.galley, concealed).translate(output.galley_pos.to_vec2()),
-                concealed.inner.clone(),
-                concealed.span.display,
-                concealed.span,
-            )
-        })
-        .collect();
-    EditorOutput {
-        response: output.response,
-        galley: output.galley,
-        galley_pos: output.galley_pos,
-        math,
-        revealed: want,
-        errors: built.errors,
-        caret,
-        discarded,
+
+    fn fitted_math(size: Vec2, max_w: f32) -> Vec2 {
+        if size.x <= max_w || size.x <= f32::EPSILON {
+            return Vec2::new(size.x.max(1.0), size.y.max(1.0));
+        }
+        let scale = max_w / size.x;
+        Vec2::new(max_w, (size.y * scale).max(1.0))
     }
-}
+
+    /// Galley-space rect of a concealed equation.
+    pub fn math_rect(galley: &Galley, concealed: &Concealed) -> Rect {
+        let next_row = |index| CCursor {
+            index,
+            prefer_next_row: true,
+        };
+        let left = galley.pos_from_cursor(next_row(concealed.span.inner_start));
+        let right = galley.pos_from_cursor(next_row(concealed.span.end.saturating_sub(1)));
+        let center_y = left.center().y;
+        let x0 = if concealed.span.display {
+            left.min.x + ((right.min.x - left.min.x) - concealed.size.x).max(0.0) * 0.5
+        } else {
+            left.min.x
+        };
+        Rect::from_min_size(
+            Pos2::new(x0, center_y - concealed.size.y * 0.5),
+            concealed.size,
+        )
+    }
+
+    pub struct EditorOutput {
+        pub response: egui::Response,
+        pub galley: std::sync::Arc<Galley>,
+        pub galley_pos: Pos2,
+        /// Screen rects of concealed equations.
+        pub math: Vec<(Rect, String, bool, CharSpan)>,
+        /// Spans shown as source. The editor applies this before paint; tests read it.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub revealed: Vec<CharSpan>,
+        pub errors: Vec<(CharSpan, String)>,
+        pub caret: Option<(usize, usize)>,
+        /// True when this pass laid out a stale caret and asked for another.
+        #[cfg_attr(not(test), allow(dead_code))]
+        pub discarded: bool,
+    }
+
+    fn revealed_for(
+        text: &str,
+        sel: Option<(usize, usize)>,
+        render: &dyn Fn(&str, bool) -> Render,
+    ) -> Vec<CharSpan> {
+        let chars: Vec<char> = text.chars().collect();
+        char_spans(text)
+            .into_iter()
+            .filter(|span| {
+                let inner: String = chars[span.inner_start..span.inner_end].iter().collect();
+                let state = if inner.trim().is_empty() {
+                    Render::Pending
+                } else {
+                    render(&inner, span.display)
+                };
+                is_revealed(span, sel) || !matches!(state, Render::Ready(_))
+            })
+            .collect()
+    }
+
+    fn ime_preedit(ui: &Ui) -> bool {
+        ui.input(|input| {
+            input.events.iter().any(|event| {
+                matches!(
+                    event,
+                    Event::Ime(ImeEvent::Preedit(_)) | Event::Ime(ImeEvent::Enabled)
+                )
+            })
+        })
+    }
+
+    /// One `TextEdit` over the raw source. The layouter reads the previous caret;
+    /// a caret-only move discards the pass so the reveal updates before paint.
+    /// A frame that is mid IME preedit is not discarded.
+    pub fn conceal_editor(
+        ui: &mut Ui,
+        id: Id,
+        text: &mut String,
+        width: f32,
+        style: &Style,
+        render: &dyn Fn(&str, bool) -> Render,
+    ) -> EditorOutput {
+        let sel = egui::widgets::text_edit::TextEditState::load(ui.ctx(), id)
+            .and_then(|state| state.cursor.char_range())
+            .map(|range| (range.primary.index, range.secondary.index));
+        let mut last: Option<Built> = None;
+        let mut layouter = |ui: &Ui, buf: &dyn TextBuffer, wrap: f32| {
+            let built = build_job(buf.as_str(), sel, wrap, style, render);
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(built.job.clone()));
+            last = Some(built);
+            galley
+        };
+        let output = egui::TextEdit::multiline(text)
+            .id(id)
+            .font(style.font.clone())
+            .text_color(style.color)
+            .desired_width(width)
+            .desired_rows(1)
+            .frame(false)
+            .margin(egui::Margin::ZERO)
+            .layouter(&mut layouter)
+            .show(ui);
+        let built = last.unwrap_or(Built {
+            job: LayoutJob::default(),
+            concealed: Vec::new(),
+            revealed: Vec::new(),
+            errors: Vec::new(),
+        });
+        let caret = output
+            .cursor_range
+            .map(|range| (range.primary.index, range.secondary.index));
+        let want = revealed_for(text, caret, render);
+        let discarded = want != built.revealed && !ime_preedit(ui);
+        if discarded {
+            ui.ctx().request_discard("conceal reveal set changed");
+        }
+        let math = built
+            .concealed
+            .iter()
+            .map(|concealed| {
+                (
+                    math_rect(&output.galley, concealed).translate(output.galley_pos.to_vec2()),
+                    concealed.inner.clone(),
+                    concealed.span.display,
+                    concealed.span,
+                )
+            })
+            .collect();
+        EditorOutput {
+            response: output.response,
+            galley: output.galley,
+            galley_pos: output.galley_pos,
+            math,
+            revealed: want,
+            errors: built.errors,
+            caret,
+            discarded,
+        }
+    }
 }
 
 pub use galley::{conceal_editor, CharSpan, EditorOutput, Render, Style};
@@ -704,7 +718,11 @@ mod tests {
         }
     }
 
-    fn metrics(w: f32, h: f32, baseline: Option<f32>) -> impl Fn(&str, bool) -> Option<MathMetrics> {
+    fn metrics(
+        w: f32,
+        h: f32,
+        baseline: Option<f32>,
+    ) -> impl Fn(&str, bool) -> Option<MathMetrics> {
         move |_, _| {
             Some(MathMetrics {
                 w_pt: w,
@@ -787,14 +805,21 @@ mod tests {
         }
         assert!(ys.len() >= 3, "{ys:?}");
         assert!(ys[0] < ys[1] && ys[1] < ys[2], "{ys:?}");
-        assert!((math_x - (200.0 - 30.0) * 0.5).abs() < 0.5, "centered {math_x}");
+        assert!(
+            (math_x - (200.0 - 30.0) * 0.5).abs() < 0.5,
+            "centered {math_x}"
+        );
     }
 
     #[test]
     fn missing_baseline_centers_math_on_the_line() {
         let measure = Fixed { em: 0.5 };
         let runs = layout_rich_text("a $x$", 10.0, 200.0, &measure, &metrics(20.0, 10.0, None));
-        let LaidRun::Math { y, .. } = runs.iter().find(|run| matches!(run, LaidRun::Math { .. })).unwrap() else {
+        let LaidRun::Math { y, .. } = runs
+            .iter()
+            .find(|run| matches!(run, LaidRun::Math { .. }))
+            .unwrap()
+        else {
             unreachable!();
         };
         // line height 12.5, math height 10, no baseline → (12.5 - 10) / 2
@@ -811,8 +836,10 @@ mod tests {
             &measure,
             &metrics(20.0, 10.0, Some(6.0)),
         );
-        let LaidRun::Math { y, baseline_pt, .. } =
-            runs.iter().find(|run| matches!(run, LaidRun::Math { .. })).unwrap()
+        let LaidRun::Math { y, baseline_pt, .. } = runs
+            .iter()
+            .find(|run| matches!(run, LaidRun::Math { .. }))
+            .unwrap()
         else {
             unreachable!();
         };
@@ -879,7 +906,10 @@ mod tests {
         let gap = x_at(&galley, concealed.span.end).x - x_at(&galley, concealed.span.inner_start).x;
         assert!((gap - 40.0).abs() < 0.5, "reserved {gap}");
         let after = x_at(&galley, concealed.span.end + 1).x;
-        assert!(after > rect.max.x && after < rect.max.x + 8.0, "prose {after}");
+        assert!(
+            after > rect.max.x && after < rect.max.x + 8.0,
+            "prose {after}"
+        );
     }
 
     #[test]
@@ -905,10 +935,7 @@ mod tests {
         let y_b = x_at(&galley, text.chars().count() - 1).y;
         assert!(y_a < y_m && y_m < y_b, "{y_a} {y_m} {y_b}");
         let rect = math_rect(&galley, concealed);
-        assert!(
-            (rect.center().x - 100.0).abs() < 2.0,
-            "centered: {rect:?}"
-        );
+        assert!((rect.center().x - 100.0).abs() < 2.0, "centered: {rect:?}");
     }
 
     #[test]
@@ -918,7 +945,10 @@ mod tests {
         let concealed = &built.concealed[0];
         let rect = math_rect(&galley, concealed);
         let mid = galley.cursor_from_pos(rect.center().to_vec2()).index;
-        assert!(mid > concealed.span.start && mid < concealed.span.end, "mid {mid}");
+        assert!(
+            mid > concealed.span.start && mid < concealed.span.end,
+            "mid {mid}"
+        );
         let left = galley
             .cursor_from_pos(Vec2::new(rect.min.x + 1.0, rect.center().y))
             .index;
@@ -945,7 +975,10 @@ mod tests {
         let (galley, built) = layout_galley("ab $x$ cd", None, 400.0);
         assert!(galley.rows[0].rect().height() >= 30.0);
         let rect = math_rect(&galley, &built.concealed[0]);
-        assert!(galley.rows[0].rect().contains_rect(rect.shrink(0.5)), "{rect:?}");
+        assert!(
+            galley.rows[0].rect().contains_rect(rect.shrink(0.5)),
+            "{rect:?}"
+        );
     }
 
     #[test]
@@ -982,7 +1015,11 @@ mod tests {
         let pending = preview_bubble(&Render::Pending, true, 0.0);
         assert_eq!(pending.image, BubbleImage::LastGoodDimmed);
         assert!(pending.error.is_none());
-        let typing = preview_bubble(&Render::Error("unknown variable: mitexsqrt".into()), true, 0.1);
+        let typing = preview_bubble(
+            &Render::Error("unknown variable: mitexsqrt".into()),
+            true,
+            0.1,
+        );
         assert_eq!(typing.image, BubbleImage::LastGoodDimmed);
         assert!(typing.error.is_none());
         let paused = preview_bubble(

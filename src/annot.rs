@@ -486,7 +486,11 @@ pub fn word_range(glyphs: &[Glyph], index: usize) -> Option<(usize, usize)> {
 }
 
 /// Glyph range for a click: one glyph, or the whole word under the cursor.
-pub fn click_glyph_range(glyphs: &[Glyph], index: usize, whole_word: bool) -> Option<(usize, usize)> {
+pub fn click_glyph_range(
+    glyphs: &[Glyph],
+    index: usize,
+    whole_word: bool,
+) -> Option<(usize, usize)> {
     if whole_word {
         word_range(glyphs, index)
     } else {
@@ -777,7 +781,9 @@ mod tests {
 
         let marquee = PdfRect::new(0.0, 0.0, 60.0, 60.0);
         assert_eq!(session.ids_centered_in(0, marquee), vec![inside, image]);
-        assert!(session.ids_centered_in(0, PdfRect::new(90.0, 90.0, 95.0, 95.0)).is_empty());
+        assert!(session
+            .ids_centered_in(0, PdfRect::new(90.0, 90.0, 95.0, 95.0))
+            .is_empty());
     }
 
     #[test]

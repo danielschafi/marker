@@ -189,9 +189,7 @@ impl Settings {
 
     /// Move `path` to the front of the recent list and persist.
     pub fn remember_open(&mut self, path: &Path) {
-        let path = path
-            .canonicalize()
-            .unwrap_or_else(|_| path.to_path_buf());
+        let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
         self.recent.retain(|entry| entry != &path);
         self.recent.insert(0, path);
         self.recent.truncate(RECENT_LIMIT);
@@ -393,7 +391,10 @@ mod tests {
         settings.save_to(&path);
         let loaded = Settings::load_from(&path);
         assert_eq!(loaded.highlight_presets, presets);
-        assert_eq!(loaded.highlight_name_for(Rgb::new(10, 20, 30)), Some("Extra"));
+        assert_eq!(
+            loaded.highlight_name_for(Rgb::new(10, 20, 30)),
+            Some("Extra")
+        );
 
         let oversized = Settings {
             highlight_presets: (0..12)

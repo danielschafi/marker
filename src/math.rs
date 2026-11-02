@@ -10,6 +10,7 @@ use typst_as_lib::{TypstAsLibError, TypstEngine};
 use typst_layout::PagedDocument;
 
 use crate::geom::{normalize_latex, Rgb};
+use crate::pdf::DocId;
 
 #[path = "rich_text.rs"]
 pub mod rich_text;
@@ -342,7 +343,7 @@ pub struct RgbaImage {
 }
 
 pub struct MathRender {
-    pub gen: u64,
+    pub doc_id: DocId,
     pub id: u64,
     /// When set, this render belongs to an inline `$...$` island inside a Text annot.
     pub span_key: Option<u64>,
@@ -361,7 +362,7 @@ pub struct MathRender {
 }
 
 struct RenderRequest {
-    gen: u64,
+    doc_id: DocId,
     id: u64,
     span_key: Option<u64>,
     req: u64,
@@ -375,7 +376,7 @@ struct RenderRequest {
 
 /// Re-raster an existing SVG at a sharper scale. No Typst, no PDF.
 struct RerasterRequest {
-    gen: u64,
+    doc_id: DocId,
     id: u64,
     span_key: Option<u64>,
     req: u64,
@@ -412,10 +413,10 @@ impl MathWorker {
         }
     }
 
-    pub fn request(&self, gen: u64, id: u64, req: u64, source: String, size: f32, color: Rgb) {
+    pub fn request(&self, doc_id: DocId, id: u64, req: u64, source: String, size: f32, color: Rgb) {
         let display = wants_display_math(&source);
         self.request_span(
-            gen,
+            doc_id,
             id,
             None,
             req,
@@ -433,7 +434,7 @@ impl MathWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn request_span(
         &self,
-        gen: u64,
+        doc_id: DocId,
         id: u64,
         span_key: Option<u64>,
         req: u64,
@@ -445,7 +446,7 @@ impl MathWorker {
         want_pdf: bool,
     ) {
         let _ = self.jobs.send(Job::Render(RenderRequest {
-            gen,
+            doc_id,
             id,
             span_key,
             req,
@@ -463,7 +464,7 @@ impl MathWorker {
     #[allow(clippy::too_many_arguments)]
     pub fn request_reraster(
         &self,
-        gen: u64,
+        doc_id: DocId,
         id: u64,
         span_key: Option<u64>,
         req: u64,
@@ -475,7 +476,7 @@ impl MathWorker {
         baseline_pt: Option<f32>,
     ) {
         let _ = self.jobs.send(Job::Reraster(RerasterRequest {
-            gen,
+            doc_id,
             id,
             span_key,
             req,
@@ -604,7 +605,7 @@ fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: Rera
         ctx,
         replies,
         MathRender {
-            gen: request.gen,
+            doc_id: request.doc_id,
             id: request.id,
             span_key: request.span_key,
             req: request.req,
@@ -630,7 +631,7 @@ fn to_reply(request: RenderRequest, rendered: Rendered) -> MathRender {
         request.color,
     );
     MathRender {
-        gen: request.gen,
+        doc_id: request.doc_id,
         id: request.id,
         span_key: request.span_key,
         req: request.req,

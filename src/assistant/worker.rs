@@ -1,3 +1,4 @@
+use crate::pdf::DocId;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -14,7 +15,7 @@ use super::bundle::{build_bundle, cleanup_bundle, BundleInput, BundlePaths};
 use super::types::AssistantEvent;
 
 struct ActiveChild {
-    gen: u64,
+    doc_id: DocId,
     seq: u64,
     pid: u32,
     cancel: Arc<AtomicBool>,
@@ -22,7 +23,7 @@ struct ActiveChild {
 }
 
 pub struct AssistantRequest {
-    pub gen: u64,
+    pub doc_id: DocId,
     pub seq: u64,
     pub chat_id: Option<String>,
     /// When true, spawn without `--mode ask` so Cursor runs full agent (tools/writes).
@@ -33,7 +34,7 @@ pub struct AssistantRequest {
 
 enum Job {
     Send(AssistantRequest),
-    Cancel { gen: u64, seq: u64 },
+    Cancel { doc_id: DocId, seq: u64 },
     Shutdown,
 }
 
@@ -64,11 +65,11 @@ impl AssistantWorker {
         let _ = self.jobs.send(Job::Send(request));
     }
 
-    pub fn cancel(&self, gen: u64, seq: u64) {
-        let _ = self.jobs.send(Job::Cancel { gen, seq });
+    pub fn cancel(&self, doc_id: DocId, seq: u64) {
+        let _ = self.jobs.send(Job::Cancel { doc_id, seq });
         if let Ok(guard) = self.active.lock() {
             if let Some(active) = guard.as_ref() {
-                if active.gen == gen && active.seq == seq {
+                if active.doc_id == doc_id && active.seq == seq {
                     active.cancel.store(true, Ordering::SeqCst);
                     kill_pgid(active.pid);
                 }
@@ -115,8 +116,8 @@ fn worker_loop(
     while let Ok(job) = jobs.recv() {
         match job {
             Job::Shutdown => break,
-            Job::Cancel { gen, seq } => {
-                clear_active_if(&active, gen, seq);
+            Job::Cancel { doc_id, seq } => {
+                clear_active_if(&active, doc_id, seq);
             }
             Job::Send(request) => {
                 clear_any_active(&active);
@@ -136,11 +137,11 @@ fn clear_any_active(active: &Arc<Mutex<Option<ActiveChild>>>) {
     }
 }
 
-fn clear_active_if(active: &Arc<Mutex<Option<ActiveChild>>>, gen: u64, seq: u64) {
+fn clear_active_if(active: &Arc<Mutex<Option<ActiveChild>>>, doc_id: DocId, seq: u64) {
     if let Ok(mut guard) = active.lock() {
         let matches = guard
             .as_ref()
-            .is_some_and(|cur| cur.gen == gen && cur.seq == seq);
+            .is_some_and(|cur| cur.doc_id == doc_id && cur.seq == seq);
         if matches {
             if let Some(cur) = guard.take() {
                 cur.cancel.store(true, Ordering::SeqCst);
@@ -158,7 +159,7 @@ fn run_turn(
     events: &Sender<AssistantEvent>,
     active: &Arc<Mutex<Option<ActiveChild>>>,
 ) {
-    let gen = request.gen;
+    let doc_id = request.doc_id;
     let seq = request.seq;
 
     let cap = match capability {
@@ -169,7 +170,15 @@ fn run_turn(
                 c
             }
             Err(message) => {
-                emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+                emit(
+                    ctx,
+                    events,
+                    AssistantEvent::Failed {
+                        doc_id,
+                        seq,
+                        message,
+                    },
+                );
                 return;
             }
         },
@@ -179,7 +188,7 @@ fn run_turn(
             ctx,
             events,
             AssistantEvent::AuthRequired {
-                gen,
+                doc_id,
                 seq,
                 message: "Cursor Agent is not signed in. Run `agent login` and try again.".into(),
             },
@@ -194,7 +203,15 @@ fn run_turn(
         None => match create_chat(&cap.path) {
             Ok(id) => id,
             Err(message) => {
-                emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+                emit(
+                    ctx,
+                    events,
+                    AssistantEvent::Failed {
+                        doc_id,
+                        seq,
+                        message,
+                    },
+                );
                 return;
             }
         },
@@ -203,7 +220,15 @@ fn run_turn(
     let bundle = match build_bundle(&request.bundle) {
         Ok(b) => b,
         Err(message) => {
-            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+            emit(
+                ctx,
+                events,
+                AssistantEvent::Failed {
+                    doc_id,
+                    seq,
+                    message,
+                },
+            );
             return;
         }
     };
@@ -212,7 +237,7 @@ fn run_turn(
         ctx,
         events,
         AssistantEvent::Started {
-            gen,
+            doc_id,
             seq,
             chat_id: chat_id.clone(),
         },
@@ -223,14 +248,22 @@ fn run_turn(
         Ok(child) => child,
         Err(message) => {
             cleanup_bundle(&bundle);
-            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+            emit(
+                ctx,
+                events,
+                AssistantEvent::Failed {
+                    doc_id,
+                    seq,
+                    message,
+                },
+            );
             return;
         }
     };
     let pid = child.id();
     if let Ok(mut guard) = active.lock() {
         *guard = Some(ActiveChild {
-            gen,
+            doc_id,
             seq,
             pid,
             cancel: Arc::clone(&cancel),
@@ -245,7 +278,7 @@ fn run_turn(
     let reader = thread::spawn(move || {
         stream_stdout(
             stdout,
-            gen,
+            doc_id,
             seq,
             &ctx_stream,
             &events_stream,
@@ -275,7 +308,7 @@ fn run_turn(
     if let Ok(mut guard) = active.lock() {
         if guard
             .as_ref()
-            .is_some_and(|cur| cur.gen == gen && cur.seq == seq)
+            .is_some_and(|cur| cur.doc_id == doc_id && cur.seq == seq)
         {
             *guard = None;
         }
@@ -283,7 +316,7 @@ fn run_turn(
     cleanup_bundle(&bundle);
 
     if was_cancelled {
-        emit(ctx, events, AssistantEvent::Cancelled { gen, seq });
+        emit(ctx, events, AssistantEvent::Cancelled { doc_id, seq });
         return;
     }
 
@@ -299,7 +332,15 @@ fn run_turn(
             let message = streamed
                 .error
                 .unwrap_or_else(|| format!("Cursor Agent exited with {status}"));
-            emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+            emit(
+                ctx,
+                events,
+                AssistantEvent::Failed {
+                    doc_id,
+                    seq,
+                    message,
+                },
+            );
             return;
         }
     }
@@ -308,7 +349,7 @@ fn run_turn(
         ctx,
         events,
         AssistantEvent::Completed {
-            gen,
+            doc_id,
             seq,
             text: streamed.assistant_text,
         },
@@ -324,7 +365,7 @@ struct StreamOutcome {
 
 fn stream_stdout(
     stdout: Option<std::process::ChildStdout>,
-    gen: u64,
+    doc_id: DocId,
     seq: u64,
     ctx: &egui::Context,
     events: &Sender<AssistantEvent>,
@@ -362,7 +403,7 @@ fn stream_stdout(
                             ctx,
                             events,
                             AssistantEvent::Delta {
-                                gen,
+                                doc_id,
                                 seq,
                                 text: text.clone(),
                             },
@@ -383,7 +424,15 @@ fn stream_stdout(
                         .and_then(|v| v.as_str())
                         .unwrap_or("Cursor Agent reported an error.")
                         .to_string();
-                    emit(ctx, events, AssistantEvent::Failed { gen, seq, message });
+                    emit(
+                        ctx,
+                        events,
+                        AssistantEvent::Failed {
+                            doc_id,
+                            seq,
+                            message,
+                        },
+                    );
                 } else {
                     let text = value
                         .get("result")
@@ -392,7 +441,7 @@ fn stream_stdout(
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| assembled.clone());
                     assembled = text.clone();
-                    emit(ctx, events, AssistantEvent::Completed { gen, seq, text });
+                    emit(ctx, events, AssistantEvent::Completed { doc_id, seq, text });
                 }
             }
             _ => {}
@@ -554,7 +603,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello"}'
         let (tx, rx) = mpsc::channel();
         let cancel = AtomicBool::new(false);
         let ctx = egui::Context::default();
-        let outcome = stream_stdout(stdout, 1, 1, &ctx, &tx, &cancel);
+        let outcome = stream_stdout(stdout, DocId(1), 1, &ctx, &tx, &cancel);
         let _ = child.wait();
         assert!(outcome.had_result);
         let events: Vec<_> = rx.try_iter().collect();

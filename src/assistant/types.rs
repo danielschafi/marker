@@ -1,4 +1,5 @@
 use crate::geom::PdfRect;
+use crate::pdf::DocId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CaptureMode {
@@ -137,10 +138,33 @@ impl TabAssistant {
 /// Events from the assistant worker to the UI thread.
 #[derive(Debug)]
 pub enum AssistantEvent {
-    Started { gen: u64, seq: u64, chat_id: String },
-    Delta { gen: u64, seq: u64, text: String },
-    Completed { gen: u64, seq: u64, text: String },
-    Cancelled { gen: u64, seq: u64 },
-    Failed { gen: u64, seq: u64, message: String },
-    AuthRequired { gen: u64, seq: u64, message: String },
+    Started {
+        doc_id: DocId,
+        seq: u64,
+        chat_id: String,
+    },
+    Delta {
+        doc_id: DocId,
+        seq: u64,
+        text: String,
+    },
+    Completed {
+        doc_id: DocId,
+        seq: u64,
+        text: String,
+    },
+    Cancelled {
+        doc_id: DocId,
+        seq: u64,
+    },
+    Failed {
+        doc_id: DocId,
+        seq: u64,
+        message: String,
+    },
+    AuthRequired {
+        doc_id: DocId,
+        seq: u64,
+        message: String,
+    },
 }

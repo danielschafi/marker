@@ -22,7 +22,7 @@ use crate::math::{
     MathKey, MathLane, MathRender, MathWorker, PdfPlan, RgbaImage,
 };
 use crate::math_spans;
-use crate::pdf::{InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
+use crate::pdf::{DocId, InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
 use crate::ui::{self, color_dot, highlight_color_name, ink_color_name, palette_for};
 use crate::view::{self, viewport};
@@ -46,7 +46,7 @@ pub(crate) struct MarkerApp {
     pub(crate) tab_drag_over: Option<usize>,
     /// Ephemeral or pinned open-tabs overlay (top-right).
     pub(crate) tab_list: Option<TabListState>,
-    pub(crate) opening: HashSet<u64>,
+    pub(crate) opening: HashSet<DocId>,
     pub(crate) error: Option<String>,
     pub(crate) page_focus: bool,
     /// Fullscreen reading; chrome auto-hides until the pointer reaches the top edge.
@@ -69,17 +69,17 @@ pub(crate) struct MarkerApp {
     math: MathWorker,
     assistant: AssistantWorker,
     math_seq: u64,
-    /// Per-key debounce. `(gen, annot id, span key)`; `None` is a standalone math annot.
+    /// Per-key debounce. `(doc_id, annot id, span key)`; `None` is a standalone math annot.
     /// A key already waiting is not postponed, so one frame cannot drop the others.
-    math_deadlines: HashMap<(u64, u64, Option<u64>), Instant>,
+    math_deadlines: HashMap<(DocId, u64, Option<u64>), Instant>,
     /// Shared equation renders. Keyed by source, display, size, and color.
     pub(crate) math_cache: MathCache<InlineReady>,
-    /// Last successful key for `(gen, annot id, span ordinal)`, so a later error
+    /// Last successful key for `(doc_id, annot id, span ordinal)`, so a later error
     /// can still find the previous good render.
-    math_last_good: HashMap<(u64, u64, usize), MathKey>,
-    /// Last prepare_visible_math scan: gen → (epoch, cache rev, first, last, zoom×ppp bits).
-    math_scan: HashMap<u64, (u64, u64, usize, usize, u32)>,
-    next_gen: u64,
+    math_last_good: HashMap<(DocId, u64, usize), MathKey>,
+    /// Last prepare_visible_math scan: doc_id → (epoch, cache rev, first, last, zoom×ppp bits).
+    math_scan: HashMap<DocId, (u64, u64, usize, usize, u32)>,
+    next_doc_id: DocId,
     dialog_tx: Sender<DialogReply>,
     dialog_rx: Receiver<DialogReply>,
     dialog_busy: bool,
@@ -94,7 +94,7 @@ pub(crate) struct MarkerApp {
     /// Cached `session.is_dirty()` for the active tab's title suffix.
     title_dirty_epoch: u64,
     title_dirty: bool,
-    title_tab_gen: u64,
+    title_tab_doc_id: DocId,
     exit_flush_done: bool,
     /// Tile replies waiting for a capped UI-thread upload batch.
     pending_pdf_tiles: VecDeque<PdfReply>,
@@ -102,12 +102,12 @@ pub(crate) struct MarkerApp {
     pub(crate) tile_frame: u64,
     /// Keyboard-focused tab; unfocused tabs are trimmed to a smaller tile share.
     tile_focus_tab: usize,
-    /// Latest wanted tile keys per document generation (read by the pdf worker).
-    tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
-    /// Latest wanted thumbnail pages per document generation (read by the pdf worker).
-    thumb_wanted: Arc<Mutex<HashMap<u64, HashSet<usize>>>>,
+    /// Latest wanted tile keys per document id (read by the pdf worker).
+    tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
+    /// Latest wanted thumbnail pages per document id (read by the pdf worker).
+    thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
     /// Generated Anki CSV waiting for the cards save dialog (ST3).
-    pending_generated_csv: Option<(u64, String)>,
+    pending_generated_csv: Option<(DocId, String)>,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -297,7 +297,7 @@ pub(crate) struct StyleBar {
 
 pub(crate) struct DocState {
     pub(crate) path: PathBuf,
-    pub(crate) gen: u64,
+    pub(crate) doc_id: DocId,
     pub(crate) pages: Vec<PageInfo>,
     pub(crate) tops: Vec<f32>,
     pub(crate) outline: Vec<OutlineNode>,
@@ -923,9 +923,18 @@ pub(crate) enum PendingExport {
 /// Result of an `rfd` file dialog spawned off the UI thread.
 enum DialogReply {
     Open(Option<PathBuf>),
-    SaveAs { gen: u64, path: Option<PathBuf> },
-    ExportMarkdown { gen: u64, path: Option<PathBuf> },
-    ExportCards { gen: u64, path: Option<PathBuf> },
+    SaveAs {
+        doc_id: DocId,
+        path: Option<PathBuf>,
+    },
+    ExportMarkdown {
+        doc_id: DocId,
+        path: Option<PathBuf>,
+    },
+    ExportCards {
+        doc_id: DocId,
+        path: Option<PathBuf>,
+    },
 }
 
 impl MarkerApp {
@@ -978,7 +987,7 @@ impl MarkerApp {
             math_cache: MathCache::new(),
             math_last_good: HashMap::new(),
             math_scan: HashMap::new(),
-            next_gen: 1,
+            next_doc_id: DocId(1),
             dialog_tx,
             dialog_rx,
             dialog_busy: false,
@@ -988,7 +997,7 @@ impl MarkerApp {
             last_frame: Instant::now(),
             title_dirty_epoch: 0,
             title_dirty: false,
-            title_tab_gen: 0,
+            title_tab_doc_id: DocId(0),
             exit_flush_done: false,
             pending_pdf_tiles: VecDeque::new(),
             tile_frame: 0,
@@ -1031,33 +1040,33 @@ impl MarkerApp {
         self.tab_mut().map(|tab| &mut tab.doc)
     }
 
-    fn tab_by_gen(&self, gen: u64) -> Option<&Tab> {
-        self.tabs.iter().find(|tab| tab.doc.gen == gen)
+    fn tab_by_doc_id(&self, doc_id: DocId) -> Option<&Tab> {
+        self.tabs.iter().find(|tab| tab.doc.doc_id == doc_id)
     }
 
-    fn tab_by_gen_mut(&mut self, gen: u64) -> Option<&mut Tab> {
-        self.tabs.iter_mut().find(|tab| tab.doc.gen == gen)
+    fn tab_by_doc_id_mut(&mut self, doc_id: DocId) -> Option<&mut Tab> {
+        self.tabs.iter_mut().find(|tab| tab.doc.doc_id == doc_id)
     }
 
     pub(crate) fn queue_math(&mut self, id: u64) {
-        let Some(gen) = self.tab().map(|tab| tab.doc.gen) else {
+        let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) else {
             return;
         };
-        self.arm_math_deadline(gen, id, None);
+        self.arm_math_deadline(doc_id, id, None);
     }
 
     pub(crate) fn queue_inline_math(&mut self, id: u64, span_key: u64) {
-        let Some(gen) = self.tab().map(|tab| tab.doc.gen) else {
+        let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) else {
             return;
         };
-        self.arm_math_deadline(gen, id, Some(span_key));
+        self.arm_math_deadline(doc_id, id, Some(span_key));
     }
 
     /// First request for a key starts the timer. Later calls in the same burst
     /// do not push it back, and they do not erase a different key's timer.
-    fn arm_math_deadline(&mut self, gen: u64, id: u64, span_key: Option<u64>) {
+    fn arm_math_deadline(&mut self, doc_id: DocId, id: u64, span_key: Option<u64>) {
         self.math_deadlines
-            .entry((gen, id, span_key))
+            .entry((doc_id, id, span_key))
             .or_insert_with(|| Instant::now() + Duration::from_millis(40));
     }
 
@@ -1070,15 +1079,15 @@ impl MarkerApp {
     /// Ask the worker for visible (+ lookahead) thumbnail pages. Updates the
     /// cancel set so scrolled-away pages become `ThumbMiss` instead of work.
     pub(crate) fn request_thumbs(&mut self, pages: &[usize]) {
-        let (gen, page_count, open) = match self.tab() {
-            Some(tab) => (tab.doc.gen, tab.doc.pages.len(), tab.thumbs_open),
+        let (doc_id, page_count, open) = match self.tab() {
+            Some(tab) => (tab.doc.doc_id, tab.doc.pages.len(), tab.thumbs_open),
             None => return,
         };
         if !open {
             self.thumb_wanted
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
-                .remove(&gen);
+                .remove(&doc_id);
             return;
         }
         let mut wanted: HashSet<usize> = HashSet::new();
@@ -1092,7 +1101,7 @@ impl MarkerApp {
                 .thumb_wanted
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            guard.insert(gen, wanted.clone());
+            guard.insert(doc_id, wanted.clone());
         }
         let mut to_queue = Vec::new();
         if let Some(tab) = self.tab_mut() {
@@ -1112,7 +1121,7 @@ impl MarkerApp {
             if let Some(tab) = self.tab_mut() {
                 tab.thumbs_inflight.insert(page);
             }
-            self.worker.thumb(gen, page);
+            self.worker.thumb(doc_id, page);
         }
     }
 
@@ -1143,7 +1152,7 @@ impl MarkerApp {
         if matches!(tab.save, SaveState::Saving) {
             return;
         }
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         let suggested = tab
             .doc
             .path
@@ -1159,7 +1168,7 @@ impl MarkerApp {
                 .add_filter("PDF", &["pdf"])
                 .set_file_name(&suggested)
                 .save_file();
-            let _ = tx.send(DialogReply::SaveAs { gen, path });
+            let _ = tx.send(DialogReply::SaveAs { doc_id, path });
             ctx.request_repaint();
         });
     }
@@ -1184,16 +1193,16 @@ impl MarkerApp {
     }
 
     fn begin_highlight_export(&mut self, kind: PendingExport) {
-        let (gen, missing) = {
+        let (doc_id, missing) = {
             let Some(tab) = self.tab_mut() else {
                 return;
             };
             tab.pending_export = None;
             let missing = export_missing_glyph_pages(tab);
-            (tab.doc.gen, missing)
+            (tab.doc.doc_id, missing)
         };
         if missing.is_empty() {
-            self.open_export_dialog_for(gen, kind);
+            self.open_export_dialog_for(doc_id, kind);
             return;
         }
         let mut to_request = Vec::new();
@@ -1206,25 +1215,25 @@ impl MarkerApp {
             }
         }
         for page in to_request {
-            self.worker.glyphs(gen, page);
+            self.worker.glyphs(doc_id, page);
         }
         self.egui_ctx.request_repaint();
     }
 
     fn check_pending_export(&mut self) {
-        let pending: Vec<(u64, PendingExport)> = self
+        let pending: Vec<(DocId, PendingExport)> = self
             .tabs
             .iter()
-            .filter_map(|tab| tab.pending_export.map(|kind| (tab.doc.gen, kind)))
+            .filter_map(|tab| tab.pending_export.map(|kind| (tab.doc.doc_id, kind)))
             .collect();
-        for (gen, _) in pending {
-            self.try_finish_pending_export(gen);
+        for (doc_id, _) in pending {
+            self.try_finish_pending_export(doc_id);
         }
     }
 
-    fn try_finish_pending_export(&mut self, gen: u64) {
+    fn try_finish_pending_export(&mut self, doc_id: DocId) {
         let kind = {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             let Some(kind) = tab.pending_export else {
@@ -1236,14 +1245,14 @@ impl MarkerApp {
             tab.pending_export = None;
             kind
         };
-        self.open_export_dialog_for(gen, kind);
+        self.open_export_dialog_for(doc_id, kind);
     }
 
-    fn open_export_dialog_for(&mut self, gen: u64, kind: PendingExport) {
+    fn open_export_dialog_for(&mut self, doc_id: DocId, kind: PendingExport) {
         if self.dialog_busy {
             return;
         }
-        let Some(tab) = self.tab_by_gen(gen) else {
+        let Some(tab) = self.tab_by_doc_id(doc_id) else {
             return;
         };
         let (suggested, filter_name, filter_ext, reply_kind) = match kind {
@@ -1273,16 +1282,16 @@ impl MarkerApp {
             }
             let path = dialog.save_file();
             let reply = match reply_kind {
-                PendingExport::Markdown => DialogReply::ExportMarkdown { gen, path },
-                PendingExport::Cards => DialogReply::ExportCards { gen, path },
+                PendingExport::Markdown => DialogReply::ExportMarkdown { doc_id, path },
+                PendingExport::Cards => DialogReply::ExportCards { doc_id, path },
             };
             let _ = tx.send(reply);
             ctx.request_repaint();
         });
     }
 
-    fn write_export_markdown(&mut self, gen: u64, path: PathBuf) {
-        let Some(tab) = self.tab_by_gen(gen) else {
+    fn write_export_markdown(&mut self, doc_id: DocId, path: PathBuf) {
+        let Some(tab) = self.tab_by_doc_id(doc_id) else {
             return;
         };
         let doc_name = tab
@@ -1307,19 +1316,19 @@ impl MarkerApp {
         }
     }
 
-    fn write_export_cards(&mut self, gen: u64, path: PathBuf) {
-        let csv = if let Some((pending_gen, body)) = self.pending_generated_csv.take() {
-            if pending_gen == gen {
+    fn write_export_cards(&mut self, doc_id: DocId, path: PathBuf) {
+        let csv = if let Some((pending_doc_id, body)) = self.pending_generated_csv.take() {
+            if pending_doc_id == doc_id {
                 body
             } else {
-                self.pending_generated_csv = Some((pending_gen, body));
-                match self.cards_csv_for_tab(gen) {
+                self.pending_generated_csv = Some((pending_doc_id, body));
+                match self.cards_csv_for_tab(doc_id) {
                     Some(csv) => csv,
                     None => return,
                 }
             }
         } else {
-            match self.cards_csv_for_tab(gen) {
+            match self.cards_csv_for_tab(doc_id) {
                 Some(csv) => csv,
                 None => return,
             }
@@ -1332,8 +1341,8 @@ impl MarkerApp {
         }
     }
 
-    fn cards_csv_for_tab(&self, gen: u64) -> Option<String> {
-        let tab = self.tab_by_gen(gen)?;
+    fn cards_csv_for_tab(&self, doc_id: DocId) -> Option<String> {
+        let tab = self.tab_by_doc_id(doc_id)?;
         let doc_name = tab
             .doc
             .path
@@ -1409,12 +1418,12 @@ impl MarkerApp {
         }
     }
 
-    fn finish_generated_cards(&mut self, gen: u64, page: usize, reply: &str) {
+    fn finish_generated_cards(&mut self, doc_id: DocId, page: usize, reply: &str) {
         match crate::export::parse_cards_tsv_fence(reply) {
             Ok(cards) => {
                 let n = cards.len();
                 let doc_name = {
-                    let Some(tab) = self.tab_by_gen(gen) else {
+                    let Some(tab) = self.tab_by_doc_id(doc_id) else {
                         return;
                     };
                     tab.doc
@@ -1426,16 +1435,16 @@ impl MarkerApp {
                 };
                 let source = format!("{doc_name}#page={}", page + 1);
                 let csv = crate::export::generated_cards_to_csv(&cards, "generated", &source);
-                self.pending_generated_csv = Some((gen, csv));
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                self.pending_generated_csv = Some((doc_id, csv));
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.assistant.status_line =
                         Some(format!("Parsed {n} card(s) — choose a save location."));
                     tab.assistant.error = None;
                 }
-                self.open_export_dialog_for(gen, PendingExport::Cards);
+                self.open_export_dialog_for(doc_id, PendingExport::Cards);
             }
             Err(err) => {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.assistant.error = Some(format!(
                         "Could not parse card TSV ({err}). Raw reply is above; no file written."
                     ));
@@ -1454,11 +1463,11 @@ impl MarkerApp {
             self.settings.remember_open(&path);
             return;
         }
-        self.next_gen += 1;
-        let gen = self.next_gen;
-        self.opening.insert(gen);
+        self.next_doc_id = DocId(self.next_doc_id.0 + 1);
+        let doc_id = self.next_doc_id;
+        self.opening.insert(doc_id);
         self.error = None;
-        self.worker.open(gen, path);
+        self.worker.open(doc_id, path);
     }
 
     /// Move a tab into its own Marker process/window, then close it here.
@@ -1592,23 +1601,23 @@ impl MarkerApp {
             return;
         }
         let tab = self.tabs.remove(index);
-        let gen = tab.doc.gen;
-        self.math_scan.remove(&gen);
-        self.math_deadlines.retain(|(g, _, _), _| *g != gen);
-        self.math_last_good.retain(|(g, _, _), _| *g != gen);
+        let doc_id = tab.doc.doc_id;
+        self.math_scan.remove(&doc_id);
+        self.math_deadlines.retain(|(g, _, _), _| *g != doc_id);
+        self.math_last_good.retain(|(g, _, _), _| *g != doc_id);
         if tab.assistant.streaming {
             self.assistant
-                .cancel(tab.doc.gen, tab.assistant.request_seq);
+                .cancel(tab.doc.doc_id, tab.assistant.request_seq);
         }
-        self.worker.close(tab.doc.gen);
+        self.worker.close(tab.doc.doc_id);
         self.tile_wanted
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .remove(&tab.doc.gen);
+            .remove(&tab.doc.doc_id);
         self.thumb_wanted
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
-            .remove(&tab.doc.gen);
+            .remove(&tab.doc.doc_id);
         if let Some(drag) = self.tab_drag {
             if drag == index {
                 self.tab_drag = None;
@@ -1987,7 +1996,7 @@ impl MarkerApp {
                 tab.save.touch();
             }
             UndoEntry::InsertPage { index } => {
-                let gen = self.tab().map(|tab| tab.doc.gen);
+                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
                 let Some(tab) = self.tab_mut() else {
                     return;
                 };
@@ -1997,12 +2006,12 @@ impl MarkerApp {
                     record_undo: false,
                     revert: Some(PageOpFailRevert::FromRedo),
                 });
-                if let Some(gen) = gen {
-                    self.worker.delete_page(gen, index);
+                if let Some(doc_id) = doc_id {
+                    self.worker.delete_page(doc_id, index);
                 }
             }
             UndoEntry::DeletePage { index } => {
-                let gen = self.tab().map(|tab| tab.doc.gen);
+                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
                 let Some(tab) = self.tab_mut() else {
                     return;
                 };
@@ -2012,8 +2021,8 @@ impl MarkerApp {
                     record_undo: false,
                     revert: Some(PageOpFailRevert::FromRedo),
                 });
-                if let Some(gen) = gen {
-                    self.worker.insert_page_at(gen, index);
+                if let Some(doc_id) = doc_id {
+                    self.worker.insert_page_at(doc_id, index);
                 }
             }
         }
@@ -2046,7 +2055,7 @@ impl MarkerApp {
                 tab.save.touch();
             }
             UndoEntry::InsertPage { index } => {
-                let gen = self.tab().map(|tab| tab.doc.gen);
+                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
                 let Some(tab) = self.tab_mut() else {
                     return;
                 };
@@ -2056,12 +2065,12 @@ impl MarkerApp {
                     record_undo: false,
                     revert: Some(PageOpFailRevert::FromUndo),
                 });
-                if let Some(gen) = gen {
-                    self.worker.insert_page_at(gen, index);
+                if let Some(doc_id) = doc_id {
+                    self.worker.insert_page_at(doc_id, index);
                 }
             }
             UndoEntry::DeletePage { index } => {
-                let gen = self.tab().map(|tab| tab.doc.gen);
+                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
                 let Some(tab) = self.tab_mut() else {
                     return;
                 };
@@ -2071,8 +2080,8 @@ impl MarkerApp {
                     record_undo: false,
                     revert: Some(PageOpFailRevert::FromUndo),
                 });
-                if let Some(gen) = gen {
-                    self.worker.delete_page(gen, index);
+                if let Some(doc_id) = doc_id {
+                    self.worker.delete_page(doc_id, index);
                 }
             }
         }
@@ -2156,12 +2165,12 @@ impl MarkerApp {
             tab.style_bar = None;
             tab.editing = None;
         }
-        if let Some(gen) = self.tab().map(|tab| tab.doc.gen) {
+        if let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) {
             for id in &ids {
                 self.math_last_good
-                    .retain(|&(g, annot, _), _| g != gen || annot != *id);
+                    .retain(|&(g, annot, _), _| g != doc_id || annot != *id);
                 self.math_deadlines
-                    .retain(|&(g, annot, _), _| g != gen || annot != *id);
+                    .retain(|&(g, annot, _), _| g != doc_id || annot != *id);
             }
         }
         self.seal_undo();
@@ -2883,29 +2892,29 @@ impl MarkerApp {
             }
             Ok(DialogReply::Open(None)) => self.dialog_busy = false,
             Ok(DialogReply::SaveAs {
-                gen,
+                doc_id,
                 path: Some(path),
             }) => {
                 self.dialog_busy = false;
-                self.start_save_as(gen, path);
+                self.start_save_as(doc_id, path);
             }
             Ok(DialogReply::SaveAs { path: None, .. }) => self.dialog_busy = false,
             Ok(DialogReply::ExportMarkdown {
-                gen,
+                doc_id,
                 path: Some(path),
             }) => {
                 self.dialog_busy = false;
-                self.write_export_markdown(gen, path);
+                self.write_export_markdown(doc_id, path);
             }
             Ok(DialogReply::ExportMarkdown { path: None, .. }) => {
                 self.dialog_busy = false;
             }
             Ok(DialogReply::ExportCards {
-                gen,
+                doc_id,
                 path: Some(path),
             }) => {
                 self.dialog_busy = false;
-                self.write_export_cards(gen, path);
+                self.write_export_cards(doc_id, path);
             }
             Ok(DialogReply::ExportCards { path: None, .. }) => {
                 self.dialog_busy = false;
@@ -2962,9 +2971,9 @@ impl MarkerApp {
     fn on_pdf(&mut self, ctx: &egui::Context, reply: PdfReply) {
         match reply {
             PdfReply::Opened(opened) => {
-                self.opening.remove(&opened.gen);
+                self.opening.remove(&opened.doc_id);
                 if self.tabs.iter().any(|tab| tab.doc.path == opened.path) {
-                    self.worker.close(opened.gen);
+                    self.worker.close(opened.doc_id);
                     if let Some(index) =
                         self.tabs.iter().position(|tab| tab.doc.path == opened.path)
                     {
@@ -2982,7 +2991,7 @@ impl MarkerApp {
                 self.tabs.push(Tab {
                     doc: DocState {
                         path: opened.path,
-                        gen: opened.gen,
+                        doc_id: opened.doc_id,
                         pages: opened.pages,
                         tops,
                         outline: opened.outline,
@@ -3051,11 +3060,11 @@ impl MarkerApp {
                     self.pulse_tab_list();
                 }
             }
-            PdfReply::Tile { gen, tile } => {
+            PdfReply::Tile { doc_id, tile } => {
                 let key = tile_key(&tile);
                 let frame = self.tile_frame;
                 let pixels_per_point = ctx.pixels_per_point();
-                let Some(tab) = self.tab_by_gen_mut(gen) else {
+                let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                     return;
                 };
                 tab.inflight.remove(&key);
@@ -3066,7 +3075,7 @@ impl MarkerApp {
                 let texture = ctx.load_texture(
                     format!(
                         "tile-{}-{}-{}-{}-{}",
-                        gen, key.page, key.scale_bits, key.col, key.row
+                        doc_id, key.page, key.scale_bits, key.col, key.row
                     ),
                     image,
                     // Linear at ~1:1 (HiDPI) keeps glyph AA smooth; nearest looked crunchy.
@@ -3087,13 +3096,13 @@ impl MarkerApp {
                 trim_process_tiles(self, pixels_per_point);
             }
             PdfReply::TileMiss {
-                gen,
+                doc_id,
                 page,
                 scale,
                 col,
                 row,
             } => {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.inflight.remove(&TileKey {
                         page,
                         scale_bits: scale.to_bits(),
@@ -3102,8 +3111,8 @@ impl MarkerApp {
                     });
                 }
             }
-            PdfReply::Thumb { gen, thumb } => {
-                let Some(tab) = self.tab_by_gen_mut(gen) else {
+            PdfReply::Thumb { doc_id, thumb } => {
+                let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                     return;
                 };
                 tab.thumbs_inflight.remove(&thumb.page);
@@ -3115,35 +3124,39 @@ impl MarkerApp {
                     &thumb.pixels,
                 );
                 let texture = ctx.load_texture(
-                    format!("thumb-{}-{}", gen, thumb.page),
+                    format!("thumb-{}-{}", doc_id, thumb.page),
                     image,
                     egui::TextureOptions::LINEAR,
                 );
                 tab.thumbs.insert(thumb.page, CachedThumb { texture });
                 tab.touch_thumb(thumb.page);
             }
-            PdfReply::ThumbMiss { gen, page } => {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+            PdfReply::ThumbMiss { doc_id, page } => {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.thumbs_inflight.remove(&page);
                 }
             }
-            PdfReply::Glyphs { gen, page, glyphs } => {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+            PdfReply::Glyphs {
+                doc_id,
+                page,
+                glyphs,
+            } => {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.glyphs_waiting.remove(&page);
                     tab.doc.insert_glyphs(page, glyphs);
                     let pinned = pinned_glyph_pages(tab);
                     tab.doc.trim_glyph_cache(&pinned);
                 }
-                self.finish_pending_study(gen, page);
-                self.try_finish_pending_export(gen);
+                self.finish_pending_study(doc_id, page);
+                self.try_finish_pending_export(doc_id);
             }
             PdfReply::Search {
-                gen,
+                doc_id,
                 seq,
                 hits,
                 done,
             } => {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     if tab.search.seq == seq {
                         let first = tab.search.hits.is_empty() && !hits.is_empty();
                         tab.search.hits.extend(hits);
@@ -3157,19 +3170,35 @@ impl MarkerApp {
                     }
                 }
             }
-            PdfReply::Saved { gen, result } => self.on_saved(gen, result),
-            PdfReply::SavedAs { gen, path, result } => self.on_saved_as(gen, path, result),
-            PdfReply::Crop { gen, seq, result } => self.on_crop(ctx, gen, seq, result),
-            PdfReply::PageInserted { gen, index, pages } => {
-                self.on_page_inserted(gen, index, pages);
+            PdfReply::Saved { doc_id, result } => self.on_saved(doc_id, result),
+            PdfReply::SavedAs {
+                doc_id,
+                path,
+                result,
+            } => self.on_saved_as(doc_id, path, result),
+            PdfReply::Crop {
+                doc_id,
+                seq,
+                result,
+            } => self.on_crop(ctx, doc_id, seq, result),
+            PdfReply::PageInserted {
+                doc_id,
+                index,
+                pages,
+            } => {
+                self.on_page_inserted(doc_id, index, pages);
             }
-            PdfReply::PageDeleted { gen, index, pages } => {
-                self.on_page_deleted(gen, index, pages);
+            PdfReply::PageDeleted {
+                doc_id,
+                index,
+                pages,
+            } => {
+                self.on_page_deleted(doc_id, index, pages);
             }
-            PdfReply::Failed { gen, message } => {
-                if let Some(gen) = gen {
-                    self.opening.remove(&gen);
-                    if let Some(tab) = self.tab_by_gen_mut(gen) {
+            PdfReply::Failed { doc_id, message } => {
+                if let Some(doc_id) = doc_id {
+                    self.opening.remove(&doc_id);
+                    if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                         tab.inflight.clear();
                         tab.thumbs_inflight.clear();
                         tab.search.pending = false;
@@ -3199,9 +3228,9 @@ impl MarkerApp {
         }
     }
 
-    fn on_page_inserted(&mut self, gen: u64, index: usize, pages: Vec<crate::pdf::PageInfo>) {
+    fn on_page_inserted(&mut self, doc_id: DocId, index: usize, pages: Vec<crate::pdf::PageInfo>) {
         let record_undo = {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             let op = tab.page_op.take();
@@ -3218,7 +3247,7 @@ impl MarkerApp {
                 }
             }
         };
-        let Some(tab) = self.tab_by_gen_mut(gen) else {
+        let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
             return;
         };
         tab.doc.session.shift_pages_from(index);
@@ -3262,9 +3291,9 @@ impl MarkerApp {
         self.error = None;
     }
 
-    fn on_page_deleted(&mut self, gen: u64, index: usize, pages: Vec<crate::pdf::PageInfo>) {
+    fn on_page_deleted(&mut self, doc_id: DocId, index: usize, pages: Vec<crate::pdf::PageInfo>) {
         let record_undo = {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             match tab.page_op.take() {
@@ -3279,7 +3308,7 @@ impl MarkerApp {
                 }
             }
         };
-        let Some(tab) = self.tab_by_gen_mut(gen) else {
+        let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
             return;
         };
         tab.doc.session.unshift_pages_from(index);
@@ -3342,7 +3371,7 @@ impl MarkerApp {
         if matches!(tab.save, SaveState::Saving) || tab.page_op.is_some() {
             return;
         }
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         let after = tab.doc.current_page(self.view_rect.height().max(1.0));
         let at = if tab.doc.pages.is_empty() {
             0
@@ -3357,7 +3386,7 @@ impl MarkerApp {
                 revert: None,
             });
         }
-        self.worker.insert_page(gen, after);
+        self.worker.insert_page(doc_id, after);
     }
 
     /// Delete the page under the viewport focus.
@@ -3389,7 +3418,7 @@ impl MarkerApp {
             self.error = Some("Page index out of range.".into());
             return;
         }
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         self.seal_undo();
         if let Some(tab) = self.tab_mut() {
             tab.menu = None;
@@ -3399,11 +3428,11 @@ impl MarkerApp {
                 revert: None,
             });
         }
-        self.worker.delete_page(gen, index);
+        self.worker.delete_page(doc_id, index);
     }
 
-    fn on_saved(&mut self, gen: u64, result: Result<Vec<crate::pdf::SavedXref>, String>) {
-        let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) else {
+    fn on_saved(&mut self, doc_id: DocId, result: Result<Vec<crate::pdf::SavedXref>, String>) {
+        let Some(index) = self.tabs.iter().position(|tab| tab.doc.doc_id == doc_id) else {
             return;
         };
         match result {
@@ -3454,11 +3483,11 @@ impl MarkerApp {
 
     fn on_saved_as(
         &mut self,
-        gen: u64,
+        doc_id: DocId,
         path: PathBuf,
         result: Result<Vec<crate::pdf::SavedXref>, String>,
     ) {
-        let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) else {
+        let Some(index) = self.tabs.iter().position(|tab| tab.doc.doc_id == doc_id) else {
             return;
         };
         match result {
@@ -3505,7 +3534,7 @@ impl MarkerApp {
             return;
         }
         if render.want_pdf {
-            if let Some(tab) = self.tab_by_gen_mut(render.gen) {
+            if let Some(tab) = self.tab_by_doc_id_mut(render.doc_id) {
                 if let Some(preview) = tab.previews.get_mut(&render.id) {
                     if preview.pdf_req == Some(render.req) {
                         preview.pdf = render.pdf;
@@ -3513,13 +3542,13 @@ impl MarkerApp {
                     }
                 }
             }
-            self.finish_math_save(render.gen);
+            self.finish_math_save(render.doc_id);
             return;
         }
         let snapshot = self
             .tabs
             .iter()
-            .find(|tab| tab.doc.gen == render.gen)
+            .find(|tab| tab.doc.doc_id == render.doc_id)
             .and_then(|tab| {
                 let annot = tab.doc.session.get(render.id)?;
                 let AnnotKind::Math {
@@ -3535,13 +3564,13 @@ impl MarkerApp {
                 Some((source.clone(), *size, *color, *auto_size, *rect))
             });
         let Some((source, size, color, auto_size, rect)) = snapshot else {
-            if let Some(tab) = self.tab_by_gen_mut(render.gen) {
+            if let Some(tab) = self.tab_by_doc_id_mut(render.doc_id) {
                 tab.previews.remove(&render.id);
             }
             return;
         };
         {
-            let Some(tab) = self.tab_by_gen_mut(render.gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(render.doc_id) else {
                 return;
             };
             if tab
@@ -3554,7 +3583,7 @@ impl MarkerApp {
             let texture = render
                 .preview
                 .as_ref()
-                .map(|image| upload_preview(ctx, render.gen, render.id, render.req, image));
+                .map(|image| upload_preview(ctx, render.doc_id, render.id, render.req, image));
             let previous = tab
                 .previews
                 .get(&render.id)
@@ -3591,7 +3620,7 @@ impl MarkerApp {
                 }
             }
         }
-        self.finish_math_save(render.gen);
+        self.finish_math_save(render.doc_id);
     }
 
     fn on_inline_math(&mut self, ctx: &egui::Context, render: MathRender) {
@@ -3602,7 +3631,7 @@ impl MarkerApp {
                     ready.pdf_pending = false;
                 }
             }
-            self.finish_math_save(render.gen);
+            self.finish_math_save(render.doc_id);
             return;
         }
         // Sharper zoom raster: reuse the texture id and keep drawing until this lands.
@@ -3627,7 +3656,7 @@ impl MarkerApp {
                         let stamp = render.span_key.unwrap_or(0);
                         ready.texture = Some(upload_preview(
                             ctx,
-                            render.gen,
+                            render.doc_id,
                             render.id ^ stamp,
                             render.req,
                             image,
@@ -3640,7 +3669,7 @@ impl MarkerApp {
                         let stamp = render.span_key.unwrap_or(0);
                         ready.white_texture = Some(upload_white_preview(
                             ctx,
-                            render.gen,
+                            render.doc_id,
                             render.id ^ stamp,
                             render.req,
                             image,
@@ -3667,7 +3696,7 @@ impl MarkerApp {
             if render.preview.is_none() {
                 self.math_cache
                     .insert_error(render.key, map_typst_error(&message));
-                self.finish_math_save(render.gen);
+                self.finish_math_save(render.doc_id);
                 return;
             }
         }
@@ -3678,11 +3707,11 @@ impl MarkerApp {
             .unwrap_or(0);
         let texture = render.preview.as_ref().map(|image| {
             let stamp = render.span_key.unwrap_or(0);
-            upload_preview(ctx, render.gen, render.id ^ stamp, render.req, image)
+            upload_preview(ctx, render.doc_id, render.id ^ stamp, render.req, image)
         });
         let white_texture = render.preview.as_ref().map(|image| {
             let stamp = render.span_key.unwrap_or(0);
-            upload_white_preview(ctx, render.gen, render.id ^ stamp, render.req, image)
+            upload_white_preview(ctx, render.doc_id, render.id ^ stamp, render.req, image)
         });
         self.remember_good(&render);
         self.math_cache.insert_ready(
@@ -3702,7 +3731,7 @@ impl MarkerApp {
             },
             bytes,
         );
-        self.finish_math_save(render.gen);
+        self.finish_math_save(render.doc_id);
     }
 
     fn remember_good(&mut self, render: &MathRender) {
@@ -3715,7 +3744,7 @@ impl MarkerApp {
         let ordinal = self
             .tabs
             .iter()
-            .find(|tab| tab.doc.gen == render.gen)
+            .find(|tab| tab.doc.doc_id == render.doc_id)
             .and_then(|tab| {
                 let annot = tab.doc.session.get(render.id)?;
                 let AnnotKind::Text { content, .. } = &annot.kind else {
@@ -3731,42 +3760,42 @@ impl MarkerApp {
             });
         if let Some(ordinal) = ordinal {
             self.math_last_good
-                .insert((render.gen, render.id, ordinal), render.key.clone());
+                .insert((render.doc_id, render.id, ordinal), render.key.clone());
         }
     }
 
-    fn finish_math_save(&mut self, gen: u64) {
+    fn finish_math_save(&mut self, doc_id: DocId) {
         let waiting = self
             .tabs
             .iter()
-            .find(|tab| tab.doc.gen == gen)
+            .find(|tab| tab.doc.doc_id == doc_id)
             .is_some_and(|tab| tab.save_when_math_ready);
         if waiting {
-            self.start_save_gen(gen, false);
+            self.start_save_doc_id(doc_id, false);
         }
     }
 
     fn flush_math(&mut self) {
         let now = Instant::now();
-        let due: Vec<(u64, u64, Option<u64>)> = self
+        let due: Vec<(DocId, u64, Option<u64>)> = self
             .math_deadlines
             .iter()
             .filter(|(_, when)| **when <= now)
             .map(|(key, _)| *key)
             .collect();
-        for (gen, id, span_key) in due {
-            self.math_deadlines.remove(&(gen, id, span_key));
+        for (doc_id, id, span_key) in due {
+            self.math_deadlines.remove(&(doc_id, id, span_key));
             if let Some(span_key) = span_key {
-                let live = self.span_is_live(gen, id, span_key);
-                self.request_inline_math(gen, id, span_key, live);
+                let live = self.span_is_live(doc_id, id, span_key);
+                self.request_inline_math(doc_id, id, span_key, live);
             } else {
-                self.request_math(gen, id);
+                self.request_math(doc_id, id);
             }
         }
     }
 
-    fn span_is_live(&self, gen: u64, id: u64, span_key: u64) -> bool {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
+    fn span_is_live(&self, doc_id: DocId, id: u64, span_key: u64) -> bool {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.doc_id == doc_id) else {
             return false;
         };
         let Some((edit_id, start)) = tab.live_math else {
@@ -3800,20 +3829,20 @@ impl MarkerApp {
             }
         }
         let revision = self.math_cache.revision();
-        let mut queued: Vec<(u64, u64, u64, String, f32, Rgb, bool)> = Vec::new();
-        let mut reraster: Vec<(u64, u64, u64, MathKey, f32)> = Vec::new();
-        let mut block: Vec<(u64, u64)> = Vec::new();
-        let mut scanned: Vec<(u64, u64, usize, usize, u32)> = Vec::new();
+        let mut queued: Vec<(DocId, u64, u64, String, f32, Rgb, bool)> = Vec::new();
+        let mut reraster: Vec<(DocId, u64, u64, MathKey, f32)> = Vec::new();
+        let mut block: Vec<(DocId, u64)> = Vec::new();
+        let mut scanned: Vec<(DocId, u64, usize, usize, u32)> = Vec::new();
         for (index, view) in panes {
             let tab = &self.tabs[index];
             let (first, last) = view::visible_pages(&tab.doc, view);
             let needed = tab.doc.scale * pixels_per_point.max(0.5);
             let needed_bits = needed.to_bits();
             let stamp = (tab.doc.session.epoch, revision, first, last, needed_bits);
-            if self.math_scan.get(&tab.doc.gen) == Some(&stamp) {
+            if self.math_scan.get(&tab.doc.doc_id) == Some(&stamp) {
                 continue;
             }
-            let gen = tab.doc.gen;
+            let doc_id = tab.doc.doc_id;
             for annot in &tab.doc.session.annotations {
                 if annot.page < first || annot.page > last {
                     continue;
@@ -3821,7 +3850,7 @@ impl MarkerApp {
                 match &annot.kind {
                     AnnotKind::Math { source, .. } if !source.trim().is_empty() => {
                         if needs_math(tab, annot.id) {
-                            block.push((gen, annot.id));
+                            block.push((doc_id, annot.id));
                         }
                     }
                     AnnotKind::Text {
@@ -3846,7 +3875,7 @@ impl MarkerApp {
                                         let scale = raster_scale_for(needed);
                                         if scale > value.raster_scale + f32::EPSILON {
                                             reraster.push((
-                                                gen,
+                                                doc_id,
                                                 annot.id,
                                                 math_spans::span_key(inner, span.display),
                                                 cache_key,
@@ -3856,7 +3885,7 @@ impl MarkerApp {
                                     }
                                 }
                                 None => queued.push((
-                                    gen,
+                                    doc_id,
                                     annot.id,
                                     math_spans::span_key(inner, span.display),
                                     math_spans::source_for_render(inner, span.display),
@@ -3876,14 +3905,14 @@ impl MarkerApp {
                     | AnnotKind::Foreign { .. } => {}
                 }
             }
-            scanned.push((gen, tab.doc.session.epoch, first, last, needed_bits));
+            scanned.push((doc_id, tab.doc.session.epoch, first, last, needed_bits));
         }
-        for (gen, id) in block {
-            self.request_math(gen, id);
+        for (doc_id, id) in block {
+            self.request_math(doc_id, id);
         }
-        for (gen, id, span_key, source, size, color, display) in queued {
+        for (doc_id, id, span_key, source, size, color, display) in queued {
             self.request_inline_math_with(
-                gen,
+                doc_id,
                 id,
                 span_key,
                 source,
@@ -3894,19 +3923,19 @@ impl MarkerApp {
                 false,
             );
         }
-        for (gen, id, span_key, key, scale) in reraster {
-            self.request_inline_reraster(gen, id, span_key, key, scale);
+        for (doc_id, id, span_key, key, scale) in reraster {
+            self.request_inline_reraster(doc_id, id, span_key, key, scale);
         }
         let revision = self.math_cache.revision();
-        for (gen, epoch, first, last, needed_bits) in scanned {
+        for (doc_id, epoch, first, last, needed_bits) in scanned {
             self.math_scan
-                .insert(gen, (epoch, revision, first, last, needed_bits));
+                .insert(doc_id, (epoch, revision, first, last, needed_bits));
         }
     }
 
-    fn request_math(&mut self, gen: u64, id: u64) {
+    fn request_math(&mut self, doc_id: DocId, id: u64) {
         let payload = {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             let Some(annot) = tab.doc.session.get(id) else {
@@ -3952,7 +3981,7 @@ impl MarkerApp {
         let (source, size, color, texture, width_pt, height_pt) = payload;
         self.math_seq += 1;
         let req = self.math_seq;
-        if let Some(tab) = self.tab_by_gen_mut(gen) {
+        if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
             tab.previews.insert(
                 id,
                 MathPreview {
@@ -3971,11 +4000,11 @@ impl MarkerApp {
                 },
             );
         }
-        self.math.request(gen, id, req, source, size, color);
+        self.math.request(doc_id, id, req, source, size, color);
     }
 
-    fn request_inline_math(&mut self, gen: u64, id: u64, span_key: u64, live: bool) {
-        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
+    fn request_inline_math(&mut self, doc_id: DocId, id: u64, span_key: u64, live: bool) {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.doc_id == doc_id) else {
             return;
         };
         let Some(annot) = tab.doc.session.get(id) else {
@@ -4012,13 +4041,15 @@ impl MarkerApp {
         } else {
             MathLane::Background
         };
-        self.request_inline_math_with(gen, id, span_key, source, size, color, display, lane, false);
+        self.request_inline_math_with(
+            doc_id, id, span_key, source, size, color, display, lane, false,
+        );
     }
 
     #[allow(clippy::too_many_arguments)]
     fn request_inline_math_with(
         &mut self,
-        gen: u64,
+        doc_id: DocId,
         id: u64,
         span_key: u64,
         source: String,
@@ -4054,7 +4085,7 @@ impl MarkerApp {
                 let req = self.math_seq;
                 self.math_cache.insert_pending(key, req);
                 self.math.request_span(
-                    gen,
+                    doc_id,
                     id,
                     Some(span_key),
                     req,
@@ -4074,7 +4105,7 @@ impl MarkerApp {
                     ready.pdf_req = Some(req);
                 }
                 self.math.request_span(
-                    gen,
+                    doc_id,
                     id,
                     Some(span_key),
                     req,
@@ -4097,7 +4128,7 @@ impl MarkerApp {
     /// Keys the LT0 cache with no annotation id (`id = 0`) and never asks for
     /// PDF bytes — these textures are UI-only and must not land in the document.
     pub(crate) fn request_answer_math(&mut self, source: String, display: bool, color: Rgb) {
-        let Some(gen) = self.tab().map(|tab| tab.doc.gen) else {
+        let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) else {
             return;
         };
         if source.trim().is_empty() {
@@ -4113,7 +4144,7 @@ impl MarkerApp {
         let span_key = math_spans::span_key(&key.source, display);
         self.math_cache.insert_pending(key, req);
         self.math.request_span(
-            gen,
+            doc_id,
             0,
             Some(span_key),
             req,
@@ -4128,7 +4159,7 @@ impl MarkerApp {
 
     fn request_inline_reraster(
         &mut self,
-        gen: u64,
+        doc_id: DocId,
         id: u64,
         span_key: u64,
         key: MathKey,
@@ -4151,7 +4182,7 @@ impl MarkerApp {
         let baseline_pt = ready.baseline_pt;
         ready.reraster_req = Some(req);
         self.math.request_reraster(
-            gen,
+            doc_id,
             id,
             Some(span_key),
             req,
@@ -4164,9 +4195,9 @@ impl MarkerApp {
         );
     }
 
-    fn request_block_pdf(&mut self, gen: u64, id: u64) {
+    fn request_block_pdf(&mut self, doc_id: DocId, id: u64) {
         let payload = {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             let Some(annot) = tab.doc.session.get(id) else {
@@ -4197,14 +4228,14 @@ impl MarkerApp {
         let (source, size, color, display) = payload;
         self.math_seq += 1;
         let req = self.math_seq;
-        if let Some(tab) = self.tab_by_gen_mut(gen) {
+        if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
             if let Some(preview) = tab.previews.get_mut(&id) {
                 preview.pdf_pending = true;
                 preview.pdf_req = Some(req);
             }
         }
         self.math.request_span(
-            gen,
+            doc_id,
             id,
             None,
             req,
@@ -4219,7 +4250,7 @@ impl MarkerApp {
 
     /// Request any preview or PDF a dirty annotation still needs, and report
     /// whether the save snapshot can be built now.
-    fn ensure_math_for_save(&mut self, gen: u64) -> bool {
+    fn ensure_math_for_save(&mut self, doc_id: DocId) -> bool {
         enum Job {
             BlockPreview(u64),
             BlockPdf(u64),
@@ -4235,7 +4266,7 @@ impl MarkerApp {
         }
         let mut jobs = Vec::new();
         let mut waiting = false;
-        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.gen == gen) else {
+        let Some(tab) = self.tabs.iter().find(|tab| tab.doc.doc_id == doc_id) else {
             return true;
         };
         for annot in &tab.doc.session.annotations {
@@ -4316,8 +4347,8 @@ impl MarkerApp {
         }
         for job in jobs {
             match job {
-                Job::BlockPreview(id) => self.request_math(gen, id),
-                Job::BlockPdf(id) => self.request_block_pdf(gen, id),
+                Job::BlockPreview(id) => self.request_math(doc_id, id),
+                Job::BlockPdf(id) => self.request_block_pdf(doc_id, id),
                 Job::Inline {
                     id,
                     span_key,
@@ -4327,7 +4358,7 @@ impl MarkerApp {
                     display,
                     want_pdf,
                 } => self.request_inline_math_with(
-                    gen,
+                    doc_id,
                     id,
                     span_key,
                     source,
@@ -4366,8 +4397,8 @@ impl MarkerApp {
 
     /// Last successful render of this span, kept while the current source is invalid.
     pub(crate) fn last_good_inline(&self, annot_id: u64, ordinal: usize) -> Option<InlinePreview> {
-        let gen = self.tab()?.doc.gen;
-        let key = self.math_last_good.get(&(gen, annot_id, ordinal))?;
+        let doc_id = self.tab()?.doc.doc_id;
+        let key = self.math_last_good.get(&(doc_id, annot_id, ordinal))?;
         match self.math_cache.get(key)? {
             EntryKind::Ready { value, .. } => Some(InlinePreview {
                 pending: false,
@@ -4432,7 +4463,7 @@ impl MarkerApp {
         if index >= self.tabs.len() {
             return;
         }
-        let (gen, wanted) = {
+        let (doc_id, wanted) = {
             let tab = &mut self.tabs[index];
             let wanted = view::wanted_tiles(
                 &mut tab.doc,
@@ -4441,14 +4472,14 @@ impl MarkerApp {
                 view,
                 pixels_per_point,
             );
-            (tab.doc.gen, wanted)
+            (tab.doc.doc_id, wanted)
         };
         {
             let mut guard = self
                 .tile_wanted
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            guard.insert(gen, wanted.tiles.iter().map(|req| req.key).collect());
+            guard.insert(doc_id, wanted.tiles.iter().map(|req| req.key).collect());
         }
         let mut glyph_pages = Vec::new();
         let mut tiles = Vec::new();
@@ -4467,7 +4498,7 @@ impl MarkerApp {
         }
         for req in tiles {
             self.worker.tile(
-                gen,
+                doc_id,
                 req.key.page,
                 req.scale,
                 req.key.col,
@@ -4477,7 +4508,7 @@ impl MarkerApp {
             );
         }
         for page in glyph_pages {
-            self.worker.glyphs(gen, page);
+            self.worker.glyphs(doc_id, page);
         }
     }
 
@@ -4502,10 +4533,10 @@ impl MarkerApp {
         tab.search.pending = true;
         tab.search.hits.clear();
         tab.search.current = 0;
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         let seq = tab.search.seq;
         let query = tab.search.query.clone();
-        self.worker.search(gen, seq, query);
+        self.worker.search(doc_id, seq, query);
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
@@ -4796,10 +4827,10 @@ impl MarkerApp {
     }
 
     fn autosave(&mut self, ctx: &egui::Context) {
-        let gens: Vec<u64> = self.tabs.iter().map(|tab| tab.doc.gen).collect();
-        for gen in gens {
+        let doc_ids: Vec<DocId> = self.tabs.iter().map(|tab| tab.doc.doc_id).collect();
+        for doc_id in doc_ids {
             let due = {
-                let Some(tab) = self.tab_by_gen_mut(gen) else {
+                let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                     continue;
                 };
                 let dirty = if tab.doc.session.epoch == tab.autosave_dirty_epoch {
@@ -4827,13 +4858,13 @@ impl MarkerApp {
             if !due {
                 continue;
             }
-            let ready = self.ensure_math_for_save(gen);
+            let ready = self.ensure_math_for_save(doc_id);
             if ready {
-                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                     tab.force_save = false;
                 }
-                self.start_save_gen(gen, false);
-            } else if let Some(tab) = self.tab_by_gen_mut(gen) {
+                self.start_save_doc_id(doc_id, false);
+            } else if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                 tab.save_when_math_ready = true;
             }
         }
@@ -4852,7 +4883,7 @@ impl MarkerApp {
         self.math_deadlines.clear();
         self.flush_math();
         let ctx = self.egui_ctx.clone();
-        let gens: Vec<u64> = self
+        let doc_ids: Vec<DocId> = self
             .tabs
             .iter()
             .filter(|tab| {
@@ -4860,17 +4891,17 @@ impl MarkerApp {
                     || tab.save_when_math_ready
                     || matches!(tab.save, SaveState::Saving)
             })
-            .map(|tab| tab.doc.gen)
+            .map(|tab| tab.doc.doc_id)
             .collect();
-        for gen in gens {
+        for doc_id in doc_ids {
             let dirty = self
                 .tabs
                 .iter()
-                .find(|tab| tab.doc.gen == gen)
+                .find(|tab| tab.doc.doc_id == doc_id)
                 .is_some_and(|tab| tab.doc.session.is_dirty());
             if dirty {
                 let deadline = Instant::now() + WAIT;
-                while Instant::now() < deadline && !self.ensure_math_for_save(gen) {
+                while Instant::now() < deadline && !self.ensure_math_for_save(doc_id) {
                     self.poll(&ctx);
                     thread::sleep(Duration::from_millis(5));
                 }
@@ -4878,17 +4909,17 @@ impl MarkerApp {
             let already_saving = self
                 .tabs
                 .iter()
-                .find(|tab| tab.doc.gen == gen)
+                .find(|tab| tab.doc.doc_id == doc_id)
                 .is_some_and(|tab| matches!(tab.save, SaveState::Saving));
             if !already_saving {
-                self.start_save_gen(gen, true);
+                self.start_save_doc_id(doc_id, true);
             }
             let deadline = Instant::now() + WAIT;
             while Instant::now() < deadline {
                 let saving = self
                     .tabs
                     .iter()
-                    .find(|tab| tab.doc.gen == gen)
+                    .find(|tab| tab.doc.doc_id == doc_id)
                     .is_some_and(|tab| matches!(tab.save, SaveState::Saving));
                 if !saving {
                     break;
@@ -4899,20 +4930,20 @@ impl MarkerApp {
         }
     }
 
-    fn start_save_gen(&mut self, gen: u64, quit: bool) {
+    fn start_save_doc_id(&mut self, doc_id: DocId, quit: bool) {
         let dirty = self
             .tabs
             .iter()
-            .find(|tab| tab.doc.gen == gen)
+            .find(|tab| tab.doc.doc_id == doc_id)
             .is_some_and(|tab| tab.doc.session.is_dirty());
-        if dirty && !quit && !self.ensure_math_for_save(gen) {
-            if let Some(tab) = self.tab_by_gen_mut(gen) {
+        if dirty && !quit && !self.ensure_math_for_save(doc_id) {
+            if let Some(tab) = self.tab_by_doc_id_mut(doc_id) {
                 tab.save_when_math_ready = true;
             }
             return;
         }
         let (snapshot, close, detach) = {
-            let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.gen == gen) else {
+            let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.doc_id == doc_id) else {
                 return;
             };
             if !tab.doc.session.is_dirty() {
@@ -4966,12 +4997,12 @@ impl MarkerApp {
             }
         };
         if let Some(snapshot) = snapshot {
-            self.worker.save(gen, snapshot);
+            self.worker.save(doc_id, snapshot);
         }
         if quit {
             return;
         }
-        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.gen == gen) {
+        if let Some(index) = self.tabs.iter().position(|tab| tab.doc.doc_id == doc_id) {
             if detach {
                 self.finish_detach_tab(index);
             } else if close {
@@ -4981,8 +5012,8 @@ impl MarkerApp {
     }
 
     /// Write a full copy to `path` and switch the tab onto it (FT9).
-    fn start_save_as(&mut self, gen: u64, mut path: PathBuf) {
-        if !self.tabs.iter().any(|tab| tab.doc.gen == gen) {
+    fn start_save_as(&mut self, doc_id: DocId, mut path: PathBuf) {
+        if !self.tabs.iter().any(|tab| tab.doc.doc_id == doc_id) {
             return;
         }
         if path.extension().is_none() {
@@ -4991,18 +5022,18 @@ impl MarkerApp {
         let dirty = self
             .tabs
             .iter()
-            .find(|tab| tab.doc.gen == gen)
+            .find(|tab| tab.doc.doc_id == doc_id)
             .is_some_and(|tab| tab.doc.session.is_dirty());
-        if dirty && !self.ensure_math_for_save(gen) {
+        if dirty && !self.ensure_math_for_save(doc_id) {
             // Dialog path is already chosen; wait briefly like quit flush.
             let ctx = self.egui_ctx.clone();
             let deadline = Instant::now() + Duration::from_secs(2);
-            while Instant::now() < deadline && !self.ensure_math_for_save(gen) {
+            while Instant::now() < deadline && !self.ensure_math_for_save(doc_id) {
                 self.poll(&ctx);
                 thread::sleep(Duration::from_millis(5));
             }
         }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.gen == gen) else {
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.doc.doc_id == doc_id) else {
             return;
         };
         if matches!(tab.save, SaveState::Saving) {
@@ -5044,7 +5075,7 @@ impl MarkerApp {
             inline_math,
             rich_text_parents,
         };
-        self.worker.save_as(gen, path, snapshot);
+        self.worker.save_as(doc_id, path, snapshot);
     }
 
     pub(crate) fn color_controls(&mut self, ui: &mut egui::Ui) {
@@ -5147,9 +5178,9 @@ impl MarkerApp {
             return;
         };
         if tab.assistant.streaming {
-            let gen = tab.doc.gen;
+            let doc_id = tab.doc.doc_id;
             let seq = tab.assistant.request_seq;
-            self.assistant.cancel(gen, seq);
+            self.assistant.cancel(doc_id, seq);
         }
         if let Some(tab) = self.tab_mut() {
             tab.pending_study = None;
@@ -5164,9 +5195,9 @@ impl MarkerApp {
         if !tab.assistant.streaming {
             return;
         }
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         let seq = tab.assistant.request_seq;
-        self.assistant.cancel(gen, seq);
+        self.assistant.cancel(doc_id, seq);
     }
 
     /// Insert a finished assistant turn as a Text or Note annotation (ST6).
@@ -5320,7 +5351,7 @@ impl MarkerApp {
             return;
         }
         let view_h = self.view_rect.height().max(1.0);
-        let (gen, page, loaded) = {
+        let (doc_id, page, loaded) = {
             let Some(tab) = self.tab() else {
                 return;
             };
@@ -5332,7 +5363,7 @@ impl MarkerApp {
                     crate::assistant::reconstruct_text(glyphs, 0, glyphs.len() - 1)
                 }
             });
-            (tab.doc.gen, page, loaded)
+            (tab.doc.doc_id, page, loaded)
         };
         if let Some(raw) = loaded {
             self.apply_study_prompt(prompt, page, &raw);
@@ -5346,7 +5377,7 @@ impl MarkerApp {
         tab.assistant.status_line = Some("Reading this page…".into());
         tab.assistant.error = None;
         if need_request {
-            self.worker.glyphs(gen, page);
+            self.worker.glyphs(doc_id, page);
         }
     }
 
@@ -5394,8 +5425,8 @@ impl MarkerApp {
         tab.assistant.status_line = None;
     }
 
-    fn finish_pending_study(&mut self, gen: u64, page: usize) {
-        let Some(tab) = self.tab_by_gen_mut(gen) else {
+    fn finish_pending_study(&mut self, doc_id: DocId, page: usize) {
+        let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
             return;
         };
         let Some((pending_page, prompt)) = tab.pending_study.take() else {
@@ -5443,10 +5474,10 @@ impl MarkerApp {
             return;
         }
         let seq = tab.assistant.bump_crop_seq();
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         tab.assistant.pending_crop = Some(PendingCrop { seq });
         tab.assistant.status_line = Some("Rendering screenshot…".into());
-        self.worker.crop(gen, seq, page, rect, CROP_DPI);
+        self.worker.crop(doc_id, seq, page, rect, CROP_DPI);
     }
 
     pub(crate) fn assistant_send(&mut self) {
@@ -5513,7 +5544,7 @@ impl MarkerApp {
                 }
             }
         }
-        let gen = tab.doc.gen;
+        let doc_id = tab.doc.doc_id;
         let seq = tab.assistant.bump_seq();
         // Reuse create-chat id across panel hide / tab background / between turns.
         let chat_id = tab.assistant.resume_chat_id();
@@ -5538,7 +5569,7 @@ impl MarkerApp {
         tab.assistant.attachments.clear();
 
         self.assistant.send(AssistantRequest {
-            gen,
+            doc_id,
             seq,
             chat_id,
             agent_mode,
@@ -5583,11 +5614,11 @@ impl MarkerApp {
     fn on_crop(
         &mut self,
         ctx: &egui::Context,
-        gen: u64,
+        doc_id: DocId,
         seq: u64,
         result: Result<crate::pdf::CropImage, String>,
     ) {
-        let Some(tab) = self.tab_by_gen_mut(gen) else {
+        let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
             return;
         };
         let pending = tab.assistant.pending_crop.take();
@@ -5597,7 +5628,8 @@ impl MarkerApp {
         tab.assistant.status_line = None;
         match result {
             Ok(crop) => {
-                let texture = upload_png_texture(ctx, gen, seq, &crop.png, crop.width, crop.height);
+                let texture =
+                    upload_png_texture(ctx, doc_id, seq, &crop.png, crop.width, crop.height);
                 tab.assistant.attachments.push(AssistantAttachment::Image {
                     page: crop.page,
                     rect: crop.rect,
@@ -5615,17 +5647,17 @@ impl MarkerApp {
     }
 
     fn on_assistant(&mut self, _ctx: &egui::Context, event: AssistantEvent) {
-        let (gen, seq) = match &event {
-            AssistantEvent::Started { gen, seq, .. }
-            | AssistantEvent::Delta { gen, seq, .. }
-            | AssistantEvent::Completed { gen, seq, .. }
-            | AssistantEvent::Cancelled { gen, seq }
-            | AssistantEvent::Failed { gen, seq, .. }
-            | AssistantEvent::AuthRequired { gen, seq, .. } => (*gen, *seq),
+        let (doc_id, seq) = match &event {
+            AssistantEvent::Started { doc_id, seq, .. }
+            | AssistantEvent::Delta { doc_id, seq, .. }
+            | AssistantEvent::Completed { doc_id, seq, .. }
+            | AssistantEvent::Cancelled { doc_id, seq }
+            | AssistantEvent::Failed { doc_id, seq, .. }
+            | AssistantEvent::AuthRequired { doc_id, seq, .. } => (*doc_id, *seq),
         };
         let mut parse_cards_reply: Option<(usize, String)> = None;
         {
-            let Some(tab) = self.tab_by_gen_mut(gen) else {
+            let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
             if tab.assistant.request_seq != seq {
@@ -5719,7 +5751,7 @@ impl MarkerApp {
             }
         }
         if let Some((page, reply)) = parse_cards_reply {
-            self.finish_generated_cards(gen, page, &reply);
+            self.finish_generated_cards(doc_id, page, &reply);
         }
     }
 
@@ -6317,8 +6349,9 @@ impl MarkerApp {
                 .and_then(|name| name.to_str())
                 .unwrap_or("document.pdf");
             let epoch = tab.doc.session.epoch;
-            let gen = tab.doc.gen;
-            let dirty_suffix = if gen == self.title_tab_gen && epoch == self.title_dirty_epoch {
+            let doc_id = tab.doc.doc_id;
+            let dirty_suffix = if doc_id == self.title_tab_doc_id && epoch == self.title_dirty_epoch
+            {
                 if self.title_dirty {
                     " •"
                 } else {
@@ -6326,7 +6359,7 @@ impl MarkerApp {
                 }
             } else {
                 let dirty = tab.doc.session.is_dirty();
-                self.title_tab_gen = gen;
+                self.title_tab_doc_id = doc_id;
                 self.title_dirty_epoch = epoch;
                 self.title_dirty = dirty;
                 if dirty {
@@ -6561,7 +6594,7 @@ fn trim_tab_tiles(app: &mut MarkerApp, tab_idx: usize, max_bytes: usize, pixels_
 
 fn upload_preview(
     ctx: &egui::Context,
-    gen: u64,
+    doc_id: DocId,
     id: u64,
     req: u64,
     image: &RgbaImage,
@@ -6571,7 +6604,7 @@ fn upload_preview(
         &image.pixels,
     );
     ctx.load_texture(
-        format!("math-{gen}-{id}-{req}"),
+        format!("math-{doc_id}-{id}-{req}"),
         pixels,
         egui::TextureOptions::LINEAR,
     )
@@ -6593,13 +6626,13 @@ fn white_preview_image(image: &RgbaImage) -> egui::ColorImage {
 
 fn upload_white_preview(
     ctx: &egui::Context,
-    gen: u64,
+    doc_id: DocId,
     id: u64,
     req: u64,
     image: &RgbaImage,
 ) -> egui::TextureHandle {
     ctx.load_texture(
-        format!("math-white-{gen}-{id}-{req}"),
+        format!("math-white-{doc_id}-{id}-{req}"),
         white_preview_image(image),
         egui::TextureOptions::LINEAR,
     )
@@ -6607,7 +6640,7 @@ fn upload_white_preview(
 
 fn upload_png_texture(
     ctx: &egui::Context,
-    gen: u64,
+    doc_id: DocId,
     seq: u64,
     png: &[u8],
     width: u32,
@@ -6619,7 +6652,7 @@ fn upload_png_texture(
         decoded.as_raw(),
     );
     Some(ctx.load_texture(
-        format!("assistant-crop-{gen}-{seq}"),
+        format!("assistant-crop-{doc_id}-{seq}"),
         pixels,
         egui::TextureOptions::LINEAR,
     ))

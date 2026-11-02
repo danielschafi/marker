@@ -26,7 +26,7 @@ use crate::math::rich_text::{
 };
 use crate::math::{EntryKind, MathKey};
 use crate::math_spans;
-use crate::pdf::{PageInfo, TILE_PX};
+use crate::pdf::{DocId, PageInfo, TILE_PX};
 use crate::theme;
 
 const GAP: f32 = 16.0;
@@ -2852,7 +2852,7 @@ fn edit_text_annot(
     view: Rect,
     id: u64,
     page: usize,
-    gen: u64,
+    doc_id: DocId,
     scale: f32,
     focus: bool,
     rect: PdfRect,
@@ -2865,8 +2865,8 @@ fn edit_text_annot(
         };
         pdf_rect_screen(&tab.doc, page, rect, view)
     };
-    let area_id = Id::new(("marker-text-area", gen, id));
-    let text_edit_id = Id::new(("marker-text", gen, id));
+    let area_id = Id::new(("marker-text-area", doc_id, id));
+    let text_edit_id = Id::new(("marker-text", doc_id, id));
     let mut changed = false;
     let mut height = screen.height();
 
@@ -2946,7 +2946,7 @@ fn edit_text_annot(
                 plan
             };
             if let Some(plan) = bubble {
-                paint_math_bubble(app, ctx, view, gen, id, &plan, scale);
+                paint_math_bubble(app, ctx, view, doc_id, id, &plan, scale);
             }
         });
 
@@ -3641,7 +3641,7 @@ fn paint_math_bubble(
     app: &MarkerApp,
     ctx: &egui::Context,
     view: Rect,
-    gen: u64,
+    doc_id: DocId,
     id: u64,
     plan: &BubblePlan,
     scale: f32,
@@ -3687,7 +3687,7 @@ fn paint_math_bubble(
     } else {
         Pos2::new(plan.anchor.min.x, plan.anchor.max.y + 4.0)
     };
-    egui::Area::new(Id::new(("marker-math-bubble", gen, id)))
+    egui::Area::new(Id::new(("marker-math-bubble", doc_id, id)))
         .order(egui::Order::Tooltip)
         .fixed_pos(pos)
         .constrain(false)
@@ -3732,7 +3732,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
         (
             id,
             annot.page,
-            tab.doc.gen,
+            tab.doc.doc_id,
             tab.doc.scale,
             tab.focus_edit,
             tab.previews
@@ -3741,13 +3741,13 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
             annot.kind.clone(),
         )
     };
-    let (id, page, gen, scale, focus, error, kind) = snapshot;
+    let (id, page, doc_id, scale, focus, error, kind) = snapshot;
     match kind {
         AnnotKind::Text {
             rect, size, color, ..
         } => {
             edit_text_annot(
-                app, ctx, view, id, page, gen, scale, focus, rect, size, color,
+                app, ctx, view, id, page, doc_id, scale, focus, rect, size, color,
             );
         }
         AnnotKind::Math { rect, .. } => {
@@ -3758,7 +3758,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 pdf_rect_screen(&tab.doc, page, rect, view)
             };
             let mut changed = false;
-            egui::Area::new(Id::new(("marker-math", gen, id)))
+            egui::Area::new(Id::new(("marker-math", doc_id, id)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(Pos2::new(screen.min.x, screen.max.y + 4.0))
                 .constrain(false)
@@ -3812,7 +3812,7 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
                 pdf_rect_screen(&tab.doc, page, rect, view)
             };
             let mut changed = false;
-            egui::Area::new(Id::new(("marker-note", gen, id)))
+            egui::Area::new(Id::new(("marker-note", doc_id, id)))
                 .order(egui::Order::Foreground)
                 .fixed_pos(Pos2::new(screen.max.x + 8.0, screen.min.y))
                 .constrain(false)

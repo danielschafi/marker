@@ -6,12 +6,7 @@ use std::time::Duration;
 #[derive(Clone, Debug)]
 pub struct AgentCapability {
     pub path: PathBuf,
-    /// Populated by `probe_agent`; kept for diagnostics / tests.
-    #[allow(dead_code)]
-    pub version: String,
     pub logged_in: bool,
-    #[allow(dead_code)]
-    pub account_hint: Option<String>,
 }
 
 /// Probe the standalone `agent` executable. Does not fall back to `cursor agent`
@@ -22,24 +17,15 @@ pub fn probe_agent() -> Result<AgentCapability, String> {
             "Cursor Agent CLI (`agent`) not found on PATH. Install Cursor Agent and try again.",
         )
     })?;
-    let version = run_capture(&path, &["--version"], Duration::from_secs(3))?
+    if run_capture(&path, &["--version"], Duration::from_secs(3))?
         .trim()
-        .to_string();
-    if version.is_empty() {
+        .is_empty()
+    {
         return Err("Cursor Agent CLI returned an empty version.".into());
     }
     let status = run_capture(&path, &["status"], Duration::from_secs(8)).unwrap_or_default();
     let logged_in = status.to_ascii_lowercase().contains("logged in");
-    let account_hint = status
-        .lines()
-        .find(|line| line.to_ascii_lowercase().contains("logged in"))
-        .map(|line| line.split(" as ").nth(1).unwrap_or(line).trim().to_string());
-    Ok(AgentCapability {
-        path,
-        version,
-        logged_in,
-        account_hint,
-    })
+    Ok(AgentCapability { path, logged_in })
 }
 
 pub fn create_chat(agent: &Path) -> Result<String, String> {
@@ -147,7 +133,6 @@ mod tests {
         std::env::set_var("MARKER_AGENT", &script);
         let cap = probe_agent().expect("probe");
         assert!(cap.logged_in);
-        assert_eq!(cap.version, "test-agent-1");
         let id = create_chat(&cap.path).unwrap();
         assert_eq!(id, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
         std::env::remove_var("MARKER_AGENT");

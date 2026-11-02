@@ -1708,7 +1708,11 @@ fn review_row_data(
             (annot_kind_label(&annot.kind), Some(*color), quote)
         }
         AnnotKind::Note { content, color, .. } => ("Note", Some(*color), content.clone()),
-        _ => return None,
+        AnnotKind::Text { .. }
+        | AnnotKind::Shape { .. }
+        | AnnotKind::Math { .. }
+        | AnnotKind::Image { .. }
+        | AnnotKind::Foreign { .. } => return None,
     };
     let preset = color
         .map(|c| highlight_color_name(presets, c).to_owned())
@@ -1993,7 +1997,7 @@ fn annot_display_color(kind: &AnnotKind) -> Option<Rgb> {
         | AnnotKind::Math { color, .. }
         | AnnotKind::Foreign { color, .. } => Some(*color),
         AnnotKind::Shape { stroke, .. } => Some(*stroke),
-        AnnotKind::Image { .. } | AnnotKind::Future(_) => None,
+        AnnotKind::Image { .. } => None,
     }
 }
 
@@ -2021,7 +2025,6 @@ fn annot_kind_label(kind: &AnnotKind) -> &'static str {
             ..
         } => "Line",
         AnnotKind::Image { .. } => "Image",
-        AnnotKind::Future(_) => "Annotation",
         AnnotKind::Foreign { kind, .. } => match kind {
             ForeignKind::Underline => "Underline",
             ForeignKind::StrikeOut => "Strikeout",
@@ -2052,7 +2055,7 @@ fn annot_snippet(tab: &Tab, annot: &Annotation) -> String {
                 String::new()
             }
         }
-        AnnotKind::Shape { .. } | AnnotKind::Image { .. } | AnnotKind::Future(_) => String::new(),
+        AnnotKind::Shape { .. } | AnnotKind::Image { .. } => String::new(),
     };
     one_line_snippet(&raw, 72)
 }

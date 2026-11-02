@@ -1394,9 +1394,7 @@ fn commit_drag(app: &mut MarkerApp, drag: Drag, _view: Rect) {
                         tab.doc.session.get(id).is_some_and(|annot| {
                             !matches!(
                                 annot.kind,
-                                AnnotKind::Image { .. }
-                                    | AnnotKind::Future(_)
-                                    | AnnotKind::Foreign { .. }
+                                AnnotKind::Image { .. } | AnnotKind::Foreign { .. }
                             )
                         })
                     })
@@ -1674,7 +1672,12 @@ fn selection_bounds(tab: &Tab) -> Option<(usize, PdfRect)> {
         AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
             union_pdf_rects(quads).map(|bounds| (annot.page, bounds))
         }
-        _ => annot.bounds().map(|bounds| (annot.page, bounds)),
+        AnnotKind::Text { .. }
+        | AnnotKind::Note { .. }
+        | AnnotKind::Shape { .. }
+        | AnnotKind::Math { .. }
+        | AnnotKind::Image { .. }
+        | AnnotKind::Foreign { .. } => annot.bounds().map(|bounds| (annot.page, bounds)),
     }
 }
 
@@ -2358,7 +2361,6 @@ fn paint_annotations(
                     &painter, &tab.doc, page, view, *kind, *rect, quads, strokes, *color,
                 );
             }
-            AnnotKind::Future(_) => {}
         }
         if selected {
             if let Some(bounds) = annot.bounds() {
@@ -4103,17 +4105,14 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 tab.doc.session.get(*id).is_some_and(|annot| {
                     !matches!(
                         annot.kind,
-                        AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. }
+                        AnnotKind::Image { .. } | AnnotKind::Foreign { .. }
                     )
                 })
             })
         })
     } else {
         hit_kind.as_ref().is_some_and(|kind| {
-            !matches!(
-                kind,
-                AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. }
-            )
+            !matches!(kind, AnnotKind::Image { .. } | AnnotKind::Foreign { .. })
         })
     };
     let can_edit = !multi
@@ -4559,7 +4558,6 @@ fn annot_menu_label(kind: &AnnotKind) -> &'static str {
             ..
         } => "Line",
         AnnotKind::Image { .. } => "Image",
-        AnnotKind::Future(_) => "Annotation",
         AnnotKind::Foreign { kind, .. } => match kind {
             crate::annot::ForeignKind::Underline => "Underline",
             crate::annot::ForeignKind::StrikeOut => "Strikeout",

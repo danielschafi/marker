@@ -68,12 +68,8 @@ pub struct AssistantTurn {
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct PendingCrop {
-    pub gen: u64,
     pub seq: u64,
-    pub page: usize,
-    pub rect: PdfRect,
 }
 
 /// Per-tab Cursor assistant state.

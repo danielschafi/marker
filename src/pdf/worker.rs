@@ -101,7 +101,7 @@ enum ReadJob {
 }
 
 pub enum PdfReply {
-    Opened(Result<OpenedDoc, String>),
+    Opened(OpenedDoc),
     /// `tile.pixels` are premultiplied RGBA8 (see [`TileImage::pixels`]).
     Tile {
         gen: u64,
@@ -399,7 +399,7 @@ fn handle_open(ctx: &mut WorkerCtx<'_>, gen: u64, path: PathBuf) {
             };
             ctx.engines.insert(gen, loaded.engine);
             let _ = ctx.reads.send(ReadJob::Open { gen, path });
-            ctx.send(PdfReply::Opened(Ok(opened)));
+            ctx.send(PdfReply::Opened(opened));
         }
         Err(err) => ctx.send(PdfReply::failed(gen, err)),
     }
@@ -1073,12 +1073,12 @@ mod tests {
         let opened = wait_until(&worker, |replies| {
             replies
                 .iter()
-                .any(|reply| matches!(reply, PdfReply::Opened(Ok(_))))
+                .any(|reply| matches!(reply, PdfReply::Opened(_)))
         });
         assert!(
             opened
                 .iter()
-                .any(|reply| matches!(reply, PdfReply::Opened(Ok(doc)) if doc.pages.len() == 4)),
+                .any(|reply| matches!(reply, PdfReply::Opened(doc) if doc.pages.len() == 4)),
             "document did not open"
         );
         #[cfg(target_os = "linux")]
@@ -1184,10 +1184,10 @@ mod tests {
         let opened = wait_until(&worker, |replies| {
             replies
                 .iter()
-                .any(|reply| matches!(reply, PdfReply::Opened(Ok(_))))
+                .any(|reply| matches!(reply, PdfReply::Opened(_)))
         });
         let pages = opened.iter().find_map(|reply| match reply {
-            PdfReply::Opened(Ok(doc)) => Some(doc.pages.len()),
+            PdfReply::Opened(doc) => Some(doc.pages.len()),
             _ => None,
         });
         let page_count = pages.expect("opened");

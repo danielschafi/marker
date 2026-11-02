@@ -67,10 +67,10 @@ pub(super) fn settings_window(app: &mut MarkerApp, ctx: &egui::Context) {
                     if ui
                         .checkbox(
                             &mut app.settings.translucent_chrome,
-                            "Translucent chrome background",
+                            "Translucent window background",
                         )
                         .on_hover_text(
-                            "Softens panels and the area around pages. Does not tint the PDF.",
+                            "Shows the desktop through the empty area around pages (and softens chrome). PDF pages stay opaque. Needs compositor alpha support (Wayland/X11).",
                         )
                         .changed()
                     {

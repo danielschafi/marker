@@ -113,7 +113,9 @@ pub struct Settings {
     /// UI chrome theme. Page rasterization is unchanged.
     #[serde(default)]
     pub ui_theme: UiTheme,
-    /// Soft translucent panels / backdrop around pages (not the PDF ink).
+    /// OS window transparency for the empty letterbox/side area around pages
+    /// (kitty-style desktop see-through). Softens chrome panels too; PDF ink
+    /// stays opaque. Requires a compositor that honors alpha (Wayland/X11).
     #[serde(default)]
     pub translucent_chrome: bool,
     /// Tool settings ids hidden from the toolbar strip (`select` cannot hide).

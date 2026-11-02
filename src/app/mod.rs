@@ -315,7 +315,8 @@ pub(crate) struct InlinePreview {
 
 /// Result of an `rfd` file dialog spawned off the UI thread.
 enum DialogReply {
-    Open(Option<PathBuf>),
+    /// One or more PDFs chosen in the open dialog (`pick_files`); `None` if cancelled.
+    Open(Option<Vec<PathBuf>>),
     SaveAs {
         doc_id: DocId,
         path: Option<PathBuf>,
@@ -554,10 +555,10 @@ impl MarkerApp {
         let tx = self.dialog_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
-            let path = rfd::FileDialog::new()
+            let paths = rfd::FileDialog::new()
                 .add_filter("PDF", &["pdf"])
-                .pick_file();
-            let _ = tx.send(DialogReply::Open(path));
+                .pick_files();
+            let _ = tx.send(DialogReply::Open(paths));
             ctx.request_repaint();
         });
     }

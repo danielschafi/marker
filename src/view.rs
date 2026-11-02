@@ -15,7 +15,8 @@ use crate::annot::{
     ShapeKind, HIGHLIGHT_OPACITY,
 };
 use crate::app::{
-    clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TextSel, Tool,
+    clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TabId, TextSel,
+    Tool,
 };
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
 use crate::cite;
@@ -202,12 +203,7 @@ pub(crate) fn viewport(app: &mut MarkerApp, ui: &mut egui::Ui, focused: bool) {
     viewport_tab(app, ui, app.active, focused);
 }
 
-pub(crate) fn viewport_tab(
-    app: &mut MarkerApp,
-    ui: &mut egui::Ui,
-    tab_index: usize,
-    focused: bool,
-) {
+pub(crate) fn viewport_tab(app: &mut MarkerApp, ui: &mut egui::Ui, tab_id: TabId, focused: bool) {
     let available = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(available, Sense::click_and_drag());
     if focused {
@@ -217,7 +213,7 @@ pub(crate) fn viewport_tab(
     }
 
     let prev = app.active;
-    app.active = tab_index;
+    app.active = tab_id;
 
     let Some(tab) = app.tab_mut() else {
         app.active = prev;
@@ -252,7 +248,7 @@ pub(crate) fn viewport_tab(
     let steal_focus = !focused && (response.clicked() || response.drag_started());
     app.active = prev;
     if steal_focus {
-        app.active = tab_index;
+        app.active = tab_id;
         app.view_rect = response.rect;
     }
 }
@@ -1830,12 +1826,10 @@ fn resize_target(
 }
 
 fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixels_per_point: f32) {
-    let tab_idx = app.active;
-    if app
-        .tabs
-        .get(tab_idx)
-        .is_none_or(|tab| tab.doc.pages.is_empty())
-    {
+    let Some(tab_idx) = app.tab_index(app.active) else {
+        return;
+    };
+    if app.tabs[tab_idx].doc.pages.is_empty() {
         return;
     }
     if let Some(tab) = app.tabs.get_mut(tab_idx) {

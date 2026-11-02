@@ -1,9 +1,10 @@
 use crate::pdf::DocId;
+use crate::worker::{self, Channel, ShutdownJob};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -38,35 +39,33 @@ enum Job {
     Shutdown,
 }
 
+impl ShutdownJob for Job {
+    fn shutdown() -> Self {
+        Self::Shutdown
+    }
+}
+
 pub struct AssistantWorker {
-    jobs: Sender<Job>,
-    events: Receiver<AssistantEvent>,
+    channel: Channel<Job, AssistantEvent>,
     active: Arc<Mutex<Option<ActiveChild>>>,
 }
 
 impl AssistantWorker {
     pub fn spawn(ctx: egui::Context) -> Self {
-        let (job_tx, job_rx) = mpsc::channel();
-        let (event_tx, event_rx) = mpsc::channel();
         let active = Arc::new(Mutex::new(None));
         let active_loop = Arc::clone(&active);
-        thread::Builder::new()
-            .name("marker-assistant".into())
-            .spawn(move || worker_loop(ctx, job_rx, event_tx, active_loop))
-            .expect("assistant thread");
-        Self {
-            jobs: job_tx,
-            events: event_rx,
-            active,
-        }
+        let channel = Channel::spawn("marker-assistant", ctx, move |ctx, jobs, events| {
+            worker_loop(ctx, jobs, events, active_loop);
+        });
+        Self { channel, active }
     }
 
     pub fn send(&self, request: AssistantRequest) {
-        let _ = self.jobs.send(Job::Send(request));
+        self.channel.send(Job::Send(request));
     }
 
     pub fn cancel(&self, doc_id: DocId, seq: u64) {
-        let _ = self.jobs.send(Job::Cancel { doc_id, seq });
+        self.channel.send(Job::Cancel { doc_id, seq });
         if let Ok(guard) = self.active.lock() {
             if let Some(active) = guard.as_ref() {
                 if active.doc_id == doc_id && active.seq == seq {
@@ -78,17 +77,14 @@ impl AssistantWorker {
     }
 
     pub fn poll(&self) -> Vec<AssistantEvent> {
-        let mut out = Vec::new();
-        while let Ok(event) = self.events.try_recv() {
-            out.push(event);
-        }
-        out
+        self.channel.poll()
     }
 }
 
 impl Drop for AssistantWorker {
     fn drop(&mut self) {
-        let _ = self.jobs.send(Job::Shutdown);
+        // Channel's Drop sends Job::Shutdown. Child-process teardown (CL1) stays
+        // here so the generic helper does not know about agent PIDs or bundles.
         if let Ok(mut guard) = self.active.lock() {
             if let Some(active) = guard.take() {
                 active.cancel.store(true, Ordering::SeqCst);
@@ -102,8 +98,7 @@ impl Drop for AssistantWorker {
 }
 
 fn emit(ctx: &egui::Context, events: &Sender<AssistantEvent>, event: AssistantEvent) {
-    let _ = events.send(event);
-    ctx.request_repaint();
+    worker::reply(ctx, events, event);
 }
 
 fn worker_loop(
@@ -600,7 +595,7 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello"}'
             .spawn()
             .unwrap();
         let stdout = child.stdout.take();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
         let ctx = egui::Context::default();
         let outcome = stream_stdout(stdout, DocId(1), 1, &ctx, &tx, &cancel);

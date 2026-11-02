@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
-use std::thread;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use typst::foundations::{Dict, IntoValue};
@@ -11,6 +10,7 @@ use typst_layout::PagedDocument;
 
 use crate::geom::{normalize_latex, Rgb};
 use crate::pdf::DocId;
+use crate::worker::{self, Channel, ShutdownJob};
 
 pub use crate::rich_text;
 
@@ -398,22 +398,20 @@ enum Job {
     Shutdown,
 }
 
+impl ShutdownJob for Job {
+    fn shutdown() -> Self {
+        Self::Shutdown
+    }
+}
+
 pub struct MathWorker {
-    jobs: Sender<Job>,
-    replies: Receiver<MathRender>,
+    channel: Channel<Job, MathRender>,
 }
 
 impl MathWorker {
     pub fn spawn(ctx: egui::Context) -> Self {
-        let (job_tx, job_rx) = mpsc::channel();
-        let (reply_tx, reply_rx) = mpsc::channel();
-        thread::Builder::new()
-            .name("marker-math".into())
-            .spawn(move || math_loop(ctx, job_rx, reply_tx))
-            .expect("math thread");
         Self {
-            jobs: job_tx,
-            replies: reply_rx,
+            channel: Channel::spawn("marker-math", ctx, math_loop),
         }
     }
 
@@ -449,7 +447,7 @@ impl MathWorker {
         lane: MathLane,
         want_pdf: bool,
     ) {
-        let _ = self.jobs.send(Job::Render(RenderRequest {
+        self.channel.send(Job::Render(RenderRequest {
             doc_id,
             id,
             span_key,
@@ -479,7 +477,7 @@ impl MathWorker {
         height_pt: f32,
         baseline_pt: Option<f32>,
     ) {
-        let _ = self.jobs.send(Job::Reraster(RerasterRequest {
+        self.channel.send(Job::Reraster(RerasterRequest {
             doc_id,
             id,
             span_key,
@@ -494,23 +492,8 @@ impl MathWorker {
     }
 
     pub fn poll(&self) -> Vec<MathRender> {
-        let mut out = Vec::new();
-        while let Ok(reply) = self.replies.try_recv() {
-            out.push(reply);
-        }
-        out
+        self.channel.poll()
     }
-}
-
-impl Drop for MathWorker {
-    fn drop(&mut self) {
-        let _ = self.jobs.send(Job::Shutdown);
-    }
-}
-
-fn reply(ctx: &egui::Context, replies: &Sender<MathRender>, msg: MathRender) {
-    let _ = replies.send(msg);
-    ctx.request_repaint();
 }
 
 fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender>) {
@@ -589,7 +572,7 @@ fn run_job(
         request.want_pdf,
         RASTER_SCALE,
     );
-    reply(ctx, replies, to_reply(request, rendered));
+    worker::reply(ctx, replies, to_reply(request, rendered));
 }
 
 fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: RerasterRequest) {
@@ -605,7 +588,7 @@ fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: Rera
     } else {
         height_pt
     };
-    reply(
+    worker::reply(
         ctx,
         replies,
         MathRender {

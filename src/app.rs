@@ -166,6 +166,8 @@ pub(crate) struct Tab {
     pub(crate) pending_jump: Option<(usize, Option<f32>)>,
     pub(crate) inflight: HashSet<TileKey>,
     pub(crate) glyphs_waiting: HashSet<usize>,
+    /// Study prompt waiting on a one-shot glyph load for `page` (ST5).
+    pub(crate) pending_study: Option<(usize, String)>,
     pub(crate) previews: HashMap<u64, MathPreview>,
     pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
     /// After Tab exits a math island, place the TextEdit caret here (bytes).
@@ -2463,6 +2465,7 @@ impl MarkerApp {
                         pending_jump: None,
                         inflight: HashSet::new(),
                         glyphs_waiting: HashSet::new(),
+                        pending_study: None,
                         previews: HashMap::new(),
                         image_textures: HashMap::new(),
                         pending_text_caret: None,
@@ -2563,6 +2566,7 @@ impl MarkerApp {
                     let pinned = pinned_glyph_pages(tab);
                     tab.doc.trim_glyph_cache(&pinned);
                 }
+                self.finish_pending_study(gen, page);
             }
             PdfReply::Search {
                 gen,
@@ -2653,6 +2657,7 @@ impl MarkerApp {
         tab.doc.tiles.clear();
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
+        tab.pending_study = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
@@ -2709,6 +2714,7 @@ impl MarkerApp {
         tab.doc.tiles.clear();
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
+        tab.pending_study = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
@@ -4568,6 +4574,7 @@ impl MarkerApp {
             self.assistant.cancel(gen, seq);
         }
         if let Some(tab) = self.tab_mut() {
+            tab.pending_study = None;
             tab.assistant.new_chat();
         }
     }
@@ -4678,6 +4685,148 @@ impl MarkerApp {
                 tab.assistant.draft = "Explain this selection clearly for a learner.".into();
             }
         }
+    }
+
+    /// Fixed study prompts shown above the assistant composer (ST5).
+    pub(crate) const STUDY_PROMPTS: &[(&str, &str)] = &[
+        (
+            "Summarize this page",
+            "Summarize this page clearly for a learner.",
+        ),
+        (
+            "Explain simply",
+            "Explain this simply for a learner.",
+        ),
+        (
+            "Define terms",
+            "Define the key terms in this text for a learner.",
+        ),
+        ("Quiz me", "Quiz me on this material."),
+    ];
+
+    /// Pre-fill a study prompt and attach the selection, or the current page text.
+    ///
+    /// Does not enable agent mode and does not auto-send. If page glyphs are not
+    /// loaded yet, requests them once and shows "Reading this page…" until they
+    /// arrive. An empty text layer updates the status line only.
+    pub(crate) fn study_prompt(&mut self, prompt: &str) {
+        self.set_assistant_open(true);
+        if let Some(tab) = self.tab_mut() {
+            tab.pending_study = None;
+        }
+        if let Some((page, raw)) = self.study_selection_text() {
+            self.apply_study_prompt(prompt, page, &raw);
+            return;
+        }
+        let view_h = self.view_rect.height().max(1.0);
+        let (gen, page, loaded) = {
+            let Some(tab) = self.tab() else {
+                return;
+            };
+            let page = tab.doc.current_page(view_h);
+            let loaded = tab.doc.glyphs.get(&page).map(|glyphs| {
+                if glyphs.is_empty() {
+                    String::new()
+                } else {
+                    crate::assistant::reconstruct_text(glyphs, 0, glyphs.len() - 1)
+                }
+            });
+            (tab.doc.gen, page, loaded)
+        };
+        if let Some(raw) = loaded {
+            self.apply_study_prompt(prompt, page, &raw);
+            return;
+        }
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        let need_request = tab.glyphs_waiting.insert(page);
+        tab.pending_study = Some((page, prompt.to_string()));
+        tab.assistant.status_line = Some("Reading this page…".into());
+        tab.assistant.error = None;
+        if need_request {
+            self.worker.glyphs(gen, page);
+        }
+    }
+
+    /// Selection text for study prompts: learning attach first, then Select-tool range.
+    fn study_selection_text(&self) -> Option<(usize, String)> {
+        let tab = self.tab()?;
+        if let Some(sel) = &tab.assistant.learning {
+            let glyphs = tab.doc.glyphs.get(&sel.page)?;
+            let text = crate::assistant::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi);
+            if !text.trim().is_empty() {
+                return Some((sel.page, text));
+            }
+        }
+        if let Some(sel) = &tab.text_sel {
+            let glyphs = tab.doc.glyphs.get(&sel.page)?;
+            let text = crate::assistant::reconstruct_text(glyphs, sel.glyph_lo, sel.glyph_hi);
+            if !text.trim().is_empty() {
+                return Some((sel.page, text));
+            }
+        }
+        None
+    }
+
+    fn apply_study_prompt(&mut self, prompt: &str, page: usize, raw: &str) {
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        tab.pending_study = None;
+        if raw.trim().is_empty() {
+            tab.assistant.status_line = Some("This page has no text layer.".into());
+            tab.assistant.error = None;
+            return;
+        }
+        let (text, truncated) = crate::assistant::truncate_text(raw, MAX_TEXT_CHARS);
+        tab.assistant
+            .attachments
+            .retain(|a| !matches!(a, AssistantAttachment::Text { .. }));
+        tab.assistant.attachments.push(AssistantAttachment::Text {
+            page,
+            text,
+            truncated,
+        });
+        tab.assistant.draft = prompt.to_string();
+        tab.assistant.error = None;
+        tab.assistant.status_line = None;
+    }
+
+    fn finish_pending_study(&mut self, gen: u64, page: usize) {
+        let Some(tab) = self.tab_by_gen_mut(gen) else {
+            return;
+        };
+        let Some((pending_page, prompt)) = tab.pending_study.take() else {
+            return;
+        };
+        if pending_page != page {
+            tab.pending_study = Some((pending_page, prompt));
+            return;
+        }
+        let raw = match tab.doc.glyphs.get(&page) {
+            Some(glyphs) if !glyphs.is_empty() => {
+                crate::assistant::reconstruct_text(glyphs, 0, glyphs.len() - 1)
+            }
+            _ => String::new(),
+        };
+        if raw.trim().is_empty() {
+            tab.assistant.status_line = Some("This page has no text layer.".into());
+            tab.assistant.error = None;
+            return;
+        }
+        let (text, truncated) = crate::assistant::truncate_text(&raw, MAX_TEXT_CHARS);
+        tab.assistant
+            .attachments
+            .retain(|a| !matches!(a, AssistantAttachment::Text { .. }));
+        tab.assistant.attachments.push(AssistantAttachment::Text {
+            page,
+            text,
+            truncated,
+        });
+        tab.assistant.draft = prompt;
+        tab.assistant.error = None;
+        tab.assistant.status_line = None;
     }
 
     pub(crate) fn request_crop(&mut self, page: usize, rect: PdfRect) {

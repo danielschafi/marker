@@ -1623,6 +1623,7 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     let mut remove_attach = None;
     let mut begin_text = false;
     let mut begin_region = false;
+    let mut study: Option<&'static str> = None;
 
     egui::SidePanel::right("assistant")
         .resizable(true)
@@ -1758,6 +1759,22 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                             .color(Color32::from_rgb(180, 120, 40)),
                     );
                 }
+            }
+
+            // Study presets sit above the composer; agent mode stays on its own row.
+            ui.horizontal_wrapped(|ui| {
+                for &(label, prompt) in MarkerApp::STUDY_PROMPTS {
+                    if ui
+                        .small_button(label)
+                        .on_hover_text(prompt)
+                        .clicked()
+                    {
+                        study = Some(prompt);
+                    }
+                }
+            });
+
+            if let Some(tab) = app.tab_mut() {
                 let response = ui.add(
                     TextEdit::multiline(&mut tab.assistant.draft)
                         .id_salt("assistant-draft")
@@ -1803,6 +1820,9 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
     }
     if begin_region {
         app.begin_region_capture();
+    }
+    if let Some(prompt) = study {
+        app.study_prompt(prompt);
     }
     if let Some(i) = remove_attach {
         if let Some(tab) = app.tab_mut() {

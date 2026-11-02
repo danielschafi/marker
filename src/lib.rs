@@ -15,3 +15,4 @@ pub mod pdf;
 pub mod rich_text;
 pub mod settings;
 pub mod undo;
+pub mod worker;

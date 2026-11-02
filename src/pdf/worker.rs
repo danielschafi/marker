@@ -8,6 +8,7 @@ use std::time::Duration;
 use super::{DocId, Error, TileKey};
 use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
+use crate::worker::{self, Channel, ShutdownJob};
 
 use super::engine::{
     CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, ThumbImage,
@@ -65,6 +66,12 @@ pub enum PdfJob {
         index: usize,
     },
     Shutdown,
+}
+
+impl ShutdownJob for PdfJob {
+    fn shutdown() -> Self {
+        Self::Shutdown
+    }
 }
 
 /// Search and glyph jobs for `marker-pdf-read`. Kept off `PdfJob` so the tile
@@ -181,9 +188,8 @@ pub struct OpenedDoc {
 }
 
 pub struct PdfWorker {
-    jobs: Sender<PdfJob>,
+    channel: Channel<PdfJob, PdfReply>,
     reads: Sender<ReadJob>,
-    replies: Receiver<PdfReply>,
 }
 
 impl PdfWorker {
@@ -192,50 +198,44 @@ impl PdfWorker {
         tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
         thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
     ) -> Self {
-        let (job_tx, job_rx) = mpsc::channel();
         let (read_tx, read_rx) = mpsc::channel();
-        let (reply_tx, reply_rx) = mpsc::channel();
         let reads_for_tiles = read_tx.clone();
         let reads_for_reader = read_tx.clone();
-        let replies_for_reader = reply_tx.clone();
-        let ctx_for_reader = ctx.clone();
-        thread::Builder::new()
-            .name("marker-pdf".into())
-            .spawn(move || {
-                worker_loop(
-                    ctx,
-                    job_rx,
-                    reply_tx,
-                    reads_for_tiles,
-                    tile_wanted,
-                    thumb_wanted,
-                )
-            })
-            .expect("pdf thread");
-        thread::Builder::new()
-            .name("marker-pdf-read".into())
-            .spawn(move || {
-                reader_loop(
-                    ctx_for_reader,
-                    read_rx,
-                    reads_for_reader,
-                    replies_for_reader,
-                )
-            })
-            .expect("pdf read thread");
+        let channel = Channel::spawn("marker-pdf", ctx, move |ctx, job_rx, reply_tx| {
+            let replies_for_reader = reply_tx.clone();
+            let ctx_for_reader = ctx.clone();
+            thread::Builder::new()
+                .name("marker-pdf-read".into())
+                .spawn(move || {
+                    reader_loop(
+                        ctx_for_reader,
+                        read_rx,
+                        reads_for_reader,
+                        replies_for_reader,
+                    )
+                })
+                .expect("pdf read thread");
+            worker_loop(
+                ctx,
+                job_rx,
+                reply_tx,
+                reads_for_tiles,
+                tile_wanted,
+                thumb_wanted,
+            );
+        });
         Self {
-            jobs: job_tx,
+            channel,
             reads: read_tx,
-            replies: reply_rx,
         }
     }
 
     pub fn open(&self, doc_id: DocId, path: PathBuf) {
-        let _ = self.jobs.send(PdfJob::Open { doc_id, path });
+        self.channel.send(PdfJob::Open { doc_id, path });
     }
 
     pub fn close(&self, doc_id: DocId) {
-        let _ = self.jobs.send(PdfJob::Close { doc_id });
+        self.channel.send(PdfJob::Close { doc_id });
     }
 
     // RF7 packs tile coords into a request struct.
@@ -250,7 +250,7 @@ impl PdfWorker {
         prefetch: bool,
         distance: u32,
     ) {
-        let _ = self.jobs.send(PdfJob::Tile {
+        self.channel.send(PdfJob::Tile {
             doc_id,
             page,
             scale,
@@ -262,7 +262,7 @@ impl PdfWorker {
     }
 
     pub fn thumb(&self, doc_id: DocId, page: usize) {
-        let _ = self.jobs.send(PdfJob::Thumb { doc_id, page });
+        self.channel.send(PdfJob::Thumb { doc_id, page });
     }
 
     pub fn glyphs(&self, doc_id: DocId, page: usize) {
@@ -270,7 +270,7 @@ impl PdfWorker {
     }
 
     pub fn crop(&self, doc_id: DocId, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
-        let _ = self.jobs.send(PdfJob::Crop {
+        self.channel.send(PdfJob::Crop {
             doc_id,
             seq,
             page,
@@ -292,11 +292,11 @@ impl PdfWorker {
     }
 
     pub fn save(&self, doc_id: DocId, snapshot: SaveSnapshot) {
-        let _ = self.jobs.send(PdfJob::Save { doc_id, snapshot });
+        self.channel.send(PdfJob::Save { doc_id, snapshot });
     }
 
     pub fn save_as(&self, doc_id: DocId, path: PathBuf, snapshot: SaveSnapshot) {
-        let _ = self.jobs.send(PdfJob::SaveAs {
+        self.channel.send(PdfJob::SaveAs {
             doc_id,
             path,
             snapshot,
@@ -304,29 +304,27 @@ impl PdfWorker {
     }
 
     pub fn insert_page(&self, doc_id: DocId, after: usize) {
-        let _ = self.jobs.send(PdfJob::InsertPage { doc_id, after });
+        self.channel.send(PdfJob::InsertPage { doc_id, after });
     }
 
     pub fn insert_page_at(&self, doc_id: DocId, at: usize) {
-        let _ = self.jobs.send(PdfJob::InsertPageAt { doc_id, at });
+        self.channel.send(PdfJob::InsertPageAt { doc_id, at });
     }
 
     pub fn delete_page(&self, doc_id: DocId, index: usize) {
-        let _ = self.jobs.send(PdfJob::DeletePage { doc_id, index });
+        self.channel.send(PdfJob::DeletePage { doc_id, index });
     }
 
     pub fn poll(&self) -> Vec<PdfReply> {
-        let mut replies = Vec::new();
-        while let Ok(reply) = self.replies.try_recv() {
-            replies.push(reply);
-        }
-        replies
+        self.channel.poll()
     }
 }
 
 impl Drop for PdfWorker {
     fn drop(&mut self) {
-        let _ = self.jobs.send(PdfJob::Shutdown);
+        // Channel's Drop sends PdfJob::Shutdown. The reader keeps its own
+        // Senders alive inside the tile/reader threads, so it needs an
+        // explicit shutdown (dropping `reads` alone would not disconnect).
         let _ = self.reads.send(ReadJob::Shutdown);
     }
 }
@@ -356,11 +354,6 @@ fn job_sort_key(job: &PdfJob) -> (u8, u32) {
         PdfJob::Crop { .. } => (3, 0),
         PdfJob::Thumb { page, .. } => (4, *page as u32),
     }
-}
-
-fn reply(ctx: &egui::Context, replies: &Sender<PdfReply>, msg: PdfReply) {
-    let _ = replies.send(msg);
-    ctx.request_repaint();
 }
 
 impl PdfReply {
@@ -395,7 +388,7 @@ struct WorkerCtx<'a> {
 
 impl WorkerCtx<'_> {
     fn send(&self, msg: PdfReply) {
-        reply(self.ctx, self.replies, msg);
+        worker::reply(self.ctx, self.replies, msg);
     }
 }
 
@@ -965,7 +958,7 @@ fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, doc_id: DocId, page: usiz
         return;
     };
     match engine.glyphs(page) {
-        Ok(glyphs) => reply(
+        Ok(glyphs) => worker::reply(
             io.ctx,
             io.replies,
             PdfReply::Glyphs {
@@ -974,7 +967,7 @@ fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, doc_id: DocId, page: usiz
                 glyphs,
             },
         ),
-        Err(err) => reply(io.ctx, io.replies, PdfReply::failed(doc_id, err)),
+        Err(err) => worker::reply(io.ctx, io.replies, PdfReply::failed(doc_id, err)),
     }
 }
 
@@ -1011,11 +1004,11 @@ fn handle_search(
         }
     }
     if let Some(message) = failed {
-        reply(io.ctx, io.replies, PdfReply::failed(doc_id, message));
+        worker::reply(io.ctx, io.replies, PdfReply::failed(doc_id, message));
         return;
     }
     let done = end >= page_count;
-    reply(
+    worker::reply(
         io.ctx,
         io.replies,
         PdfReply::Search {
@@ -1104,6 +1097,48 @@ mod tests {
             names.push(name.trim().to_string());
         }
         names
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn drop_shuts_down_marker_pdf_threads() {
+        let ctx = egui::Context::default();
+        let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let worker = PdfWorker::spawn(ctx, tile_wanted, thumb_wanted);
+        // Reader is spawned from inside the tile thread; wait until both exist.
+        let appear = Instant::now() + Duration::from_secs(2);
+        loop {
+            let names = thread_names();
+            let tile = names.iter().any(|name| name == "marker-pdf");
+            let reader = names.iter().any(|name| name == "marker-pdf-read");
+            if tile && reader {
+                break;
+            }
+            assert!(
+                Instant::now() < appear,
+                "pdf threads did not start: {names:?}"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        drop(worker);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            let names = thread_names();
+            let leftover: Vec<_> = names
+                .iter()
+                .filter(|name| name.as_str() == "marker-pdf" || name.as_str() == "marker-pdf-read")
+                .cloned()
+                .collect();
+            if leftover.is_empty() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "marker-pdf threads still alive after drop: {leftover:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

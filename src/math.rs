@@ -12,8 +12,7 @@ use typst_layout::PagedDocument;
 use crate::geom::{normalize_latex, Rgb};
 use crate::pdf::DocId;
 
-#[path = "rich_text.rs"]
-pub mod rich_text;
+pub use crate::rich_text;
 
 /// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
 const LIVE_DEBOUNCE: Duration = Duration::from_millis(40);
@@ -193,6 +192,11 @@ impl<T> MathCache<T> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
     pub fn revision(&self) -> u64 {

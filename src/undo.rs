@@ -7,16 +7,16 @@ use std::collections::VecDeque;
 use crate::annot::{restore_session, Session};
 
 /// Max retained undo entries (oldest dropped from the front).
-pub(crate) const UNDO_CAP: usize = 80;
+pub const UNDO_CAP: usize = 80;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Direction {
+pub enum Direction {
     Undo,
     Redo,
 }
 
 #[derive(Clone, PartialEq)]
-pub(crate) enum UndoEntry {
+pub enum UndoEntry {
     Annots(Session),
     /// A blank page was inserted at this index.
     InsertPage {
@@ -30,7 +30,7 @@ pub(crate) enum UndoEntry {
 
 /// How to restore undo/redo stacks when a page op fails after they were pre-mutated.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PageOpFailRevert {
+pub enum PageOpFailRevert {
     /// Entry was moved undo→redo; on failure pop redo and push undo.
     FromRedo,
     /// Entry was moved redo→undo; on failure pop undo and push redo.
@@ -38,7 +38,7 @@ pub(crate) enum PageOpFailRevert {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PendingPageOp {
+pub enum PendingPageOp {
     /// Insert blank page at `index`. `record_undo` is set for user-driven inserts.
     Insert {
         index: usize,
@@ -55,14 +55,14 @@ pub(crate) enum PendingPageOp {
 
 /// Worker action the app must send after a page-op step.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PageOpKind {
+pub enum PageOpKind {
     Insert,
     Delete,
 }
 
 /// Result of [`UndoStack::step`].
 #[derive(Clone, Debug)]
-pub(crate) enum StepOutcome {
+pub enum StepOutcome {
     /// Restored annotation session; caller replaces the live session and clears edit UI.
     Annots { session: Session },
     /// Page op staged on the stack; caller sends the matching worker job.
@@ -70,27 +70,27 @@ pub(crate) enum StepOutcome {
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct UndoStack {
+pub struct UndoStack {
     pending: Option<Session>,
     edit_id: Option<u64>,
     undo: VecDeque<UndoEntry>,
     redo: VecDeque<UndoEntry>,
-    pub(crate) page_op: Option<PendingPageOp>,
+    pub page_op: Option<PendingPageOp>,
 }
 
 impl UndoStack {
     #[cfg(test)]
-    pub(crate) fn undo_len(&self) -> usize {
+    pub fn undo_len(&self) -> usize {
         self.undo.len()
     }
 
     #[cfg(test)]
-    pub(crate) fn redo_len(&self) -> usize {
+    pub fn redo_len(&self) -> usize {
         self.redo.len()
     }
 
     /// Snapshot the live session if no pending edit is already armed.
-    pub(crate) fn arm(&mut self, session: &Session) {
+    pub fn arm(&mut self, session: &Session) {
         if self.pending.is_none() {
             self.pending = Some(session.clone());
         }
@@ -99,7 +99,7 @@ impl UndoStack {
     /// Commit the pending snapshot if the live session changed.
     ///
     /// Returns `true` when an undo entry was pushed (caller should mark dirty).
-    pub(crate) fn seal(&mut self, session: &Session) -> bool {
+    pub fn seal(&mut self, session: &Session) -> bool {
         let Some(before) = self.pending.take() else {
             return false;
         };
@@ -115,7 +115,7 @@ impl UndoStack {
     /// Begin (or continue) a multi-keystroke edit of one annotation.
     ///
     /// Returns `true` when sealing the previous pending edit pushed an undo entry.
-    pub(crate) fn begin_edit(&mut self, session: &Session, id: u64) -> bool {
+    pub fn begin_edit(&mut self, session: &Session, id: u64) -> bool {
         if self.edit_id == Some(id) && self.pending.is_some() {
             return false;
         }
@@ -125,12 +125,12 @@ impl UndoStack {
         sealed
     }
 
-    pub(crate) fn tag_edit(&mut self, id: u64) {
+    pub fn tag_edit(&mut self, id: u64) {
         self.edit_id = Some(id);
     }
 
     /// Seal if an annotated edit session is open.
-    pub(crate) fn end_edit(&mut self, session: &Session) -> bool {
+    pub fn end_edit(&mut self, session: &Session) -> bool {
         if self.edit_id.is_some() {
             self.seal(session)
         } else {
@@ -139,13 +139,13 @@ impl UndoStack {
     }
 
     /// Push a page-op undo entry after a successful user-driven insert/delete.
-    pub(crate) fn record_page_op(&mut self, entry: UndoEntry) {
+    pub fn record_page_op(&mut self, entry: UndoEntry) {
         self.push(entry);
         self.redo.clear();
     }
 
     /// Roll stacks back when a page op that already moved an entry fails.
-    pub(crate) fn revert_failed_page_op(&mut self, revert: PageOpFailRevert) {
+    pub fn revert_failed_page_op(&mut self, revert: PageOpFailRevert) {
         match revert {
             PageOpFailRevert::FromRedo => {
                 if let Some(entry) = self.redo.pop_back() {
@@ -164,7 +164,7 @@ impl UndoStack {
     ///
     /// Annotation steps return a restored [`Session`]. Page steps stage
     /// [`Self::page_op`] with the inverse (undo) or same (redo) worker action.
-    pub(crate) fn step(&mut self, dir: Direction, current: &Session) -> Option<StepOutcome> {
+    pub fn step(&mut self, dir: Direction, current: &Session) -> Option<StepOutcome> {
         let entry = match dir {
             Direction::Undo => self.undo.pop_back()?,
             Direction::Redo => self.redo.pop_back()?,

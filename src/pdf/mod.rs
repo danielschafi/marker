@@ -12,6 +12,15 @@ mod worker;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct DocId(pub u64);
 
+/// Cache / wanted-set key for one page tile at a render scale.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TileKey {
+    pub page: usize,
+    pub scale_bits: u32,
+    pub col: i32,
+    pub row: i32,
+}
+
 impl std::fmt::Display for DocId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)

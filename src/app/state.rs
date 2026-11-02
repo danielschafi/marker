@@ -316,13 +316,7 @@ pub(crate) struct CachedThumb {
     pub(crate) texture: egui::TextureHandle,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct TileKey {
-    pub(crate) page: usize,
-    pub(crate) scale_bits: u32,
-    pub(crate) col: i32,
-    pub(crate) row: i32,
-}
+pub(crate) use crate::pdf::TileKey;
 
 pub(crate) struct MathPreview {
     pub(super) source: String,

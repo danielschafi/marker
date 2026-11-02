@@ -214,7 +214,7 @@ pub(crate) fn pdf_rect_screen(doc: &DocState, page: usize, rect: PdfRect, view: 
 }
 
 pub(crate) struct TileRequest {
-    pub key: crate::app::TileKey,
+    pub key: crate::pdf::TileKey,
     pub scale: f32,
     pub prefetch: bool,
     pub distance: u32,
@@ -249,13 +249,13 @@ fn tile_distance_sq(
 #[allow(clippy::too_many_arguments)]
 fn collect_tiles_in_band(
     doc: &DocState,
-    inflight: &std::collections::HashSet<crate::app::TileKey>,
+    inflight: &std::collections::HashSet<crate::pdf::TileKey>,
     view: Rect,
     band: Rect,
     render_scale: f32,
     bits: u32,
     prefetch: bool,
-    seen: &mut std::collections::HashSet<crate::app::TileKey>,
+    seen: &mut std::collections::HashSet<crate::pdf::TileKey>,
     out: &mut Vec<TileRequest>,
 ) {
     if band.width() < 1.0 || band.height() < 1.0 {
@@ -285,7 +285,7 @@ fn collect_tiles_in_band(
         let row1 = (bottom - y0 - 1).div_euclid(TILE_PX);
         for col in col0..=col1 {
             for row in row0..=row1 {
-                let key = crate::app::TileKey {
+                let key = crate::pdf::TileKey {
                     page,
                     scale_bits: bits,
                     col,
@@ -307,7 +307,7 @@ fn collect_tiles_in_band(
 
 pub(crate) fn wanted_tiles(
     doc: &mut DocState,
-    inflight: &std::collections::HashSet<crate::app::TileKey>,
+    inflight: &std::collections::HashSet<crate::pdf::TileKey>,
     _tool: Tool,
     view: Rect,
     pixels_per_point: f32,

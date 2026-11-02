@@ -22,13 +22,13 @@ use super::geometry::pdf_rect_screen;
 use crate::annot::AnnotKind;
 use crate::app::MarkerApp;
 use crate::geom::PdfRect;
-use crate::math::rich_text::{
-    self, conceal_editor, preview_bubble, BubbleImage, CharSpan, EditorOutput, Render, Style,
-    MATH_ERROR_IDLE_SECS,
-};
+use crate::math::rich_text::{self, MATH_ERROR_IDLE_SECS};
 use crate::math::{EntryKind, MathKey};
 use crate::math_spans;
 use crate::pdf::DocId;
+use crate::rich_text_edit::{
+    conceal_editor, preview_bubble, BubbleImage, CharSpan, EditorOutput, Render, Style,
+};
 
 /// Geometry and style of the text annotation currently being edited.
 #[derive(Clone, Copy, Debug)]

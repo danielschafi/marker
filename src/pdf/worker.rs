@@ -5,10 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use crate::app::TileKey;
-
-use super::DocId;
-use super::Error;
+use super::{DocId, Error, TileKey};
 use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
 
@@ -1047,9 +1044,7 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
 
-    use crate::app::TileKey;
-
-    use super::{DocId, PdfReply, PdfWorker};
+    use super::{DocId, PdfReply, PdfWorker, TileKey};
     use crate::pdf::engine::SaveSnapshot;
 
     fn wanted_for(page: usize, scale: f32, col: i32, row: i32) -> TileKey {

@@ -8,13 +8,13 @@ use crate::geom::{Rgb, HIGHLIGHT_COLORS, INK_COLORS};
 
 /// Which static annotation swatch row to show when presets are unavailable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PaletteKind {
+pub enum PaletteKind {
     Highlights,
     Ink,
 }
 
 /// Static palette fallback (ink always; built-in highlights when presets are unavailable).
-pub(crate) fn palette_for(kind: PaletteKind) -> &'static [Rgb] {
+pub fn palette_for(kind: PaletteKind) -> &'static [Rgb] {
     match kind {
         PaletteKind::Highlights => &HIGHLIGHT_COLORS,
         PaletteKind::Ink => &INK_COLORS,

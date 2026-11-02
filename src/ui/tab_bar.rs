@@ -80,6 +80,12 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     {
         app.open_dialog();
     }
+    if chrome_button(ui, "Settings", app.settings_open)
+        .on_hover_text("Themes, tool defaults, and toolbar (Ctrl+,)")
+        .clicked()
+    {
+        app.toggle_settings();
+    }
     if app.tab().is_some()
         && chrome_button(ui, "Save As", false)
             .on_hover_text("Save a copy and switch to it (Ctrl+Shift+S)")

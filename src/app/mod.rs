@@ -62,6 +62,8 @@ pub(crate) struct MarkerApp {
     pub(crate) cheatsheet_open: bool,
     /// Named highlight preset editor (Colors chrome button).
     pub(crate) preset_editor_open: bool,
+    /// Appearance / defaults settings window (#86).
+    pub(crate) settings_open: bool,
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
@@ -301,8 +303,15 @@ impl MarkerApp {
         }
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
+        let settings = Settings::load();
+        crate::theme::apply_user_theme(
+            &cc.egui_ctx,
+            settings.ui_theme,
+            settings.translucent_chrome,
+            true,
+        );
         let mut app = Self {
-            settings: Settings::load(),
+            settings,
             tool: Tool::Select,
             tabs: Vec::new(),
             active: TabId(0),
@@ -320,6 +329,7 @@ impl MarkerApp {
             zen_chrome_until: None,
             cheatsheet_open: false,
             preset_editor_open: false,
+            settings_open: false,
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(
@@ -1036,6 +1046,10 @@ impl MarkerApp {
         self.preset_editor_open = !self.preset_editor_open;
     }
 
+    pub(crate) fn toggle_settings(&mut self) {
+        self.settings_open = !self.settings_open;
+    }
+
     /// Re-selecting a markup or shape tool restores that family's factory color (#85).
     /// Text / note / math ink stays sticky on purpose.
     pub(crate) fn restore_default_tool_color(&mut self, tool: Tool) {
@@ -1084,7 +1098,11 @@ impl eframe::App for MarkerApp {
         self.dispatch_search();
         self.handle_keys(ctx);
         self.autosave(ctx);
-        crate::theme::sync_os_theme(ctx);
+        crate::theme::sync_os_theme(
+            ctx,
+            self.settings.ui_theme,
+            self.settings.translucent_chrome,
+        );
         ui::chrome(self, ctx);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(crate::theme::palette(ctx).backdrop))

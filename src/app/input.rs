@@ -139,6 +139,7 @@ pub(crate) enum Action {
     Undo,
     Redo,
     ToggleCheatsheet,
+    ToggleSettings,
     OpenSearchSlash,
     SetTool(Tool),
     NextSearchHit,
@@ -921,6 +922,17 @@ pub(crate) const KEYMAP: &[KeymapRow] = &[
         label: "Zen mode",
     },
     KeymapRow {
+        chord: Some(KeyChord::cmd(Key::Comma)),
+        action: Some(Action::ToggleSettings),
+        global: true,
+        when_not_editing: false,
+        cheatsheet: true,
+        gate: KeyGate::Always,
+        section: ShortcutSection::View,
+        keys: "Ctrl+,",
+        label: "Settings",
+    },
+    KeymapRow {
         chord: Some(KeyChord::key(Key::Questionmark)),
         action: Some(Action::ToggleCheatsheet),
         global: false,
@@ -1146,6 +1158,10 @@ impl MarkerApp {
     pub(crate) fn leave_typing(&mut self) {
         let mut exit_zen = false;
         let mut seal = false;
+        if self.settings_open {
+            self.settings_open = false;
+            return;
+        }
         if self.preset_editor_open {
             self.preset_editor_open = false;
             return;
@@ -1372,6 +1388,8 @@ impl MarkerApp {
             Action::Undo => self.undo(),
             Action::Redo => self.redo(),
             Action::ToggleCheatsheet => self.toggle_cheatsheet(),
+            Action::ToggleSettings => self.toggle_settings(),
+            // Shortcuts still select tools hidden from the toolbar strip.
             Action::SetTool(tool) => {
                 // Pressing H / U / X / W / R / E / I again restores the factory swatch (#85).
                 if self.tool == tool {

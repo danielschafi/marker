@@ -17,6 +17,7 @@ use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
 
 mod empty_state;
+mod settings_window;
 mod split_drop;
 mod style_bar;
 mod tab_bar;
@@ -26,6 +27,7 @@ pub(crate) use empty_state::empty_state;
 pub(crate) use split_drop::{split_viewports, tab_drag_overlay};
 
 use empty_state::outline_node;
+use settings_window::settings_window;
 use tab_bar::{paint_tab_list, paint_tab_menu, tab_bar};
 use toolbar::tool_bar;
 
@@ -59,6 +61,7 @@ pub(crate) fn chrome(app: &mut MarkerApp, ctx: &egui::Context) {
     paint_tab_menu(app, ctx);
     cheatsheet_window(app, ctx);
     preset_editor_window(app, ctx);
+    settings_window(app, ctx);
 }
 
 fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {

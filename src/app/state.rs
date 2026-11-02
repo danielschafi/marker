@@ -497,6 +497,44 @@ impl Tool {
         }
     }
 
+    /// Short label for settings / accessibility copy.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Tool::Select => "Select",
+            Tool::Highlight => "Highlight",
+            Tool::Underline => "Underline",
+            Tool::StrikeOut => "Strikeout",
+            Tool::Squiggly => "Squiggly",
+            Tool::Text => "Text",
+            Tool::Note => "Note",
+            Tool::Rect => "Rectangle",
+            Tool::Ellipse => "Ellipse",
+            Tool::Line => "Line",
+            Tool::Arrow => "Arrow",
+            Tool::Draw => "Draw",
+            Tool::Math => "Equation",
+        }
+    }
+
+    /// Stable id stored in `Settings::hidden_tools`.
+    pub(crate) fn settings_id(self) -> &'static str {
+        match self {
+            Tool::Select => "select",
+            Tool::Highlight => "highlight",
+            Tool::Underline => "underline",
+            Tool::StrikeOut => "strikeout",
+            Tool::Squiggly => "squiggly",
+            Tool::Text => "text",
+            Tool::Note => "note",
+            Tool::Rect => "rect",
+            Tool::Ellipse => "ellipse",
+            Tool::Line => "line",
+            Tool::Arrow => "arrow",
+            Tool::Draw => "draw",
+            Tool::Math => "math",
+        }
+    }
+
     /// `None` is the highlight fill. The three stroke tools share its gesture.
     pub(crate) fn markup_style(self) -> Option<MarkupStyle> {
         match self {

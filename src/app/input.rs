@@ -320,6 +320,17 @@ pub(crate) const KEYMAP: &[KeymapRow] = &[
         label: "Line",
     },
     KeymapRow {
+        chord: Some(KeyChord::key(Key::A)),
+        action: Some(Action::SetTool(Tool::Arrow)),
+        global: false,
+        when_not_editing: false,
+        cheatsheet: true,
+        gate: KeyGate::Always,
+        section: ShortcutSection::Tools,
+        keys: "A",
+        label: "Arrow",
+    },
+    KeymapRow {
         chord: Some(KeyChord::key(Key::D)),
         action: Some(Action::SetTool(Tool::Draw)),
         global: false,

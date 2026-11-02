@@ -322,6 +322,28 @@ fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
     }
 }
 
+/// Shaft plus a filled triangular head at `end`, sized from stroke width.
+fn paint_arrow_segment(painter: &egui::Painter, start: Pos2, end: Pos2, stroke: Stroke) {
+    let delta = end - start;
+    let len = delta.length();
+    if len < 0.5 {
+        painter.circle_filled(end, stroke.width.max(1.0) * 0.5, stroke.color);
+        return;
+    }
+    let dir = delta / len;
+    let head = (stroke.width.max(1.0) * 4.0).clamp(6.0, 28.0).min(len);
+    // Stop the shaft short of the tip so the head does not sit on a thick bar.
+    let shaft_end = end - dir * (head * 0.55);
+    painter.line_segment([start, shaft_end], stroke);
+    let ortho = Vec2::new(-dir.y, dir.x);
+    let base = end - dir * head;
+    painter.add(egui::Shape::convex_polygon(
+        vec![end, base + ortho * (head * 0.45), base - ortho * (head * 0.45)],
+        stroke.color,
+        Stroke::NONE,
+    ));
+}
+
 fn paint_annotations(
     tab: &Tab,
     cache: &crate::math::MathCache<crate::math::InlineReady>,
@@ -438,6 +460,11 @@ fn paint_annotations(
                         let a = tab.doc.page_to_screen(page, *start, view);
                         let b = tab.doc.page_to_screen(page, *end, view);
                         painter.line_segment([a, b], stroke);
+                    }
+                    ShapeKind::Arrow => {
+                        let a = tab.doc.page_to_screen(page, *start, view);
+                        let b = tab.doc.page_to_screen(page, *end, view);
+                        paint_arrow_segment(&painter, a, b, stroke);
                     }
                 }
             }
@@ -773,6 +800,11 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                     let a = tab.doc.page_to_screen(*page, *origin, view);
                     let b = tab.doc.page_to_screen(*page, *current, view);
                     painter.line_segment([a, b], stroke);
+                }
+                ShapeKind::Arrow => {
+                    let a = tab.doc.page_to_screen(*page, *origin, view);
+                    let b = tab.doc.page_to_screen(*page, *current, view);
+                    paint_arrow_segment(painter, a, b, stroke);
                 }
                 ShapeKind::Rect => {
                     let rect = pdf_rect_screen(

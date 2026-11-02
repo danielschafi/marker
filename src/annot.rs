@@ -67,6 +67,15 @@ pub enum ShapeKind {
     Rect,
     Ellipse,
     Line,
+    /// Line with a closed arrowhead at `end`. Saved as a PDF Line with `/LE`.
+    Arrow,
+}
+
+impl ShapeKind {
+    /// Line and arrow share endpoints, hit testing, and resize handles.
+    pub fn is_line_like(self) -> bool {
+        matches!(self, Self::Line | Self::Arrow)
+    }
 }
 
 /// Stroke along glyph quads. Editable and saved as a PDF text-markup annotation.
@@ -211,11 +220,15 @@ impl AnnotKind {
             | Self::Image { rect, .. }
             | Self::Foreign { rect, .. } => Some(*rect),
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => Some(PdfRect::from_points(*start, *end).inflate(2.0)),
+            } if kind.is_line_like() => {
+                // Arrowheads need a little extra pad beyond the shaft.
+                let pad = if *kind == ShapeKind::Arrow { 6.0 } else { 2.0 };
+                Some(PdfRect::from_points(*start, *end).inflate(pad))
+            }
             Self::Shape { rect, .. } => Some(*rect),
             Self::Ink {
                 strokes, width, ..
@@ -237,12 +250,12 @@ impl AnnotKind {
                 *rect = rect.translate(dx, dy);
             }
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 rect,
                 ..
-            } => {
+            } if kind.is_line_like() => {
                 *start = PdfPoint::new(start.x + dx, start.y + dy);
                 *end = PdfPoint::new(end.x + dx, end.y + dy);
                 *rect = rect.translate(dx, dy);
@@ -274,11 +287,11 @@ impl AnnotKind {
             }
             Self::Foreign { .. } => false,
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => dist_to_segment(p, *start, *end) <= slop.max(3.0),
+            } if kind.is_line_like() => dist_to_segment(p, *start, *end) <= slop.max(3.0),
             Self::Ink {
                 strokes, width, ..
             } => ink_hit(strokes, *width, p, slop),
@@ -624,11 +637,13 @@ impl AnnotKind {
     pub fn handles(&self) -> Vec<(Handle, PdfPoint)> {
         match self {
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 ..
-            } => vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)],
+            } if kind.is_line_like() => {
+                vec![(Handle::LineStart, *start), (Handle::LineEnd, *end)]
+            }
             Self::Text { rect, .. }
             | Self::Math { rect, .. }
             | Self::Image { rect, .. }
@@ -652,12 +667,12 @@ impl AnnotKind {
         let min = 8.0;
         match self {
             Self::Shape {
-                kind: ShapeKind::Line,
+                kind,
                 start,
                 end,
                 rect,
                 ..
-            } => {
+            } if kind.is_line_like() => {
                 match handle {
                     Handle::LineStart => *start = to,
                     Handle::LineEnd => *end = to,
@@ -914,6 +929,48 @@ mod tests {
         match &session.annotations[1].kind {
             AnnotKind::Text { content, .. } => assert_eq!(content, "b"),
             other => panic!("expected text annot, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn arrow_hit_handles_and_translate() {
+        let mut kind = AnnotKind::Shape {
+            kind: ShapeKind::Arrow,
+            rect: PdfRect::from_points(PdfPoint::new(0.0, 0.0), PdfPoint::new(40.0, 0.0)),
+            start: PdfPoint::new(0.0, 0.0),
+            end: PdfPoint::new(40.0, 0.0),
+            stroke: Rgb::new(0, 0, 0),
+            fill: None,
+            width: 2.0,
+        };
+        assert!(kind.hit(PdfPoint::new(20.0, 0.0), 2.0));
+        assert!(!kind.hit(PdfPoint::new(20.0, 20.0), 2.0));
+        let handles = kind.handles();
+        assert_eq!(handles.len(), 2);
+        assert_eq!(handles[0].0, Handle::LineStart);
+        assert_eq!(handles[1].0, Handle::LineEnd);
+        kind.translate(5.0, -3.0);
+        match &kind {
+            AnnotKind::Shape {
+                kind: ShapeKind::Arrow,
+                start,
+                end,
+                ..
+            } => {
+                assert!((start.x - 5.0).abs() < f32::EPSILON);
+                assert!((start.y + 3.0).abs() < f32::EPSILON);
+                assert!((end.x - 45.0).abs() < f32::EPSILON);
+                assert!((end.y + 3.0).abs() < f32::EPSILON);
+            }
+            other => panic!("expected arrow, got {other:?}"),
+        }
+        kind.resize(Handle::LineEnd, PdfPoint::new(60.0, 10.0));
+        match &kind {
+            AnnotKind::Shape { end, .. } => {
+                assert!((end.x - 60.0).abs() < f32::EPSILON);
+                assert!((end.y - 10.0).abs() < f32::EPSILON);
+            }
+            other => panic!("expected shape, got {other:?}"),
         }
     }
 

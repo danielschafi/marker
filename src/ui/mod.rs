@@ -1313,6 +1313,10 @@ fn annot_kind_label(kind: &AnnotKind) -> &'static str {
             kind: ShapeKind::Line,
             ..
         } => "Line",
+        AnnotKind::Shape {
+            kind: ShapeKind::Arrow,
+            ..
+        } => "Arrow",
         AnnotKind::Ink { .. } => "Drawing",
         AnnotKind::Image { .. } => "Image",
         AnnotKind::Foreign { kind, .. } => match kind {

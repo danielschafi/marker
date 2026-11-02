@@ -443,12 +443,13 @@ pub(crate) enum Tool {
     Rect,
     Ellipse,
     Line,
+    Arrow,
     Draw,
     Math,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 12] = [
+    pub(crate) const ALL: [Tool; 13] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
@@ -459,12 +460,13 @@ impl Tool {
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
+        Tool::Arrow,
         Tool::Draw,
         Tool::Math,
     ];
 
     /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
-    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`. Draw is `D`.
+    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`. Arrow is `A`. Draw is `D`.
     pub(crate) fn shortcut(self) -> Key {
         match self {
             Tool::Select => Key::S,
@@ -477,6 +479,7 @@ impl Tool {
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
             Tool::Line => Key::I,
+            Tool::Arrow => Key::A,
             Tool::Draw => Key::D,
             Tool::Math => Key::M,
         }
@@ -494,6 +497,7 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Arrow => "Arrow",
             Tool::Draw => "Freeform drawing",
             Tool::Math => "Equation",
         }
@@ -512,6 +516,7 @@ impl Tool {
             | Tool::Rect
             | Tool::Ellipse
             | Tool::Line
+            | Tool::Arrow
             | Tool::Draw
             | Tool::Math => None,
         }
@@ -525,7 +530,10 @@ impl Tool {
     }
 
     pub(crate) fn is_shape(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw)
+        matches!(
+            self,
+            Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Arrow | Tool::Draw
+        )
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]

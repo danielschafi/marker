@@ -25,6 +25,7 @@ use crate::math_spans;
 use crate::pdf::{DocId, InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
 use crate::ui::{self, color_dot, highlight_color_name, ink_color_name, palette_for};
+use crate::undo::{Direction, PageOpKind, PendingPageOp, StepOutcome, UndoEntry, UndoStack};
 use crate::view::{self, viewport};
 use egui_commonmark::CommonMarkCache;
 
@@ -205,12 +206,8 @@ pub(crate) struct Tab {
     pub(crate) menu: Option<ContextMenu>,
     /// Compact color/size strip next to an annotation (e.g. just after create).
     pub(crate) style_bar: Option<StyleBar>,
-    pending_undo: Option<Session>,
-    undo_edit: Option<u64>,
-    undo: Vec<UndoEntry>,
-    redo: Vec<UndoEntry>,
-    /// In-flight page insert/delete that participates in undo/redo.
-    page_op: Option<PendingPageOp>,
+    /// Annotation and page-op undo/redo history.
+    undo: UndoStack,
     /// Annotation indices per page; rebuilt when `session.epoch` changes.
     pub(crate) annot_by_page: Vec<Vec<usize>>,
     annot_index_epoch: u64,
@@ -766,44 +763,6 @@ pub(crate) enum CreateKind {
     Text,
     Note,
     Math,
-}
-
-#[derive(Clone, PartialEq)]
-enum UndoEntry {
-    Annots(Session),
-    /// A blank page was inserted at this index.
-    InsertPage {
-        index: usize,
-    },
-    /// A page was deleted at this index (undo re-inserts a blank page).
-    DeletePage {
-        index: usize,
-    },
-}
-
-/// How to restore undo/redo stacks when a page op fails after they were pre-mutated.
-#[derive(Clone, Copy)]
-enum PageOpFailRevert {
-    /// Entry was moved undo→redo; on failure pop redo and push undo.
-    FromRedo,
-    /// Entry was moved redo→undo; on failure pop undo and push redo.
-    FromUndo,
-}
-
-#[derive(Clone, Copy)]
-enum PendingPageOp {
-    /// Insert blank page at `index`. `record_undo` is set for user-driven inserts.
-    Insert {
-        index: usize,
-        record_undo: bool,
-        revert: Option<PageOpFailRevert>,
-    },
-    /// Delete page at `index`. `record_undo` is set for user-driven deletes.
-    Delete {
-        index: usize,
-        record_undo: bool,
-        revert: Option<PageOpFailRevert>,
-    },
 }
 
 #[derive(Clone)]
@@ -1913,177 +1872,91 @@ impl MarkerApp {
         let Some(tab) = self.tab_mut() else {
             return;
         };
-        if tab.pending_undo.is_none() {
-            tab.pending_undo = Some(tab.doc.session.clone());
-        }
+        let session = tab.doc.session.clone();
+        tab.undo.arm(&session);
     }
 
     pub(crate) fn seal_undo(&mut self) {
         let Some(tab) = self.tab_mut() else {
             return;
         };
-        let Some(before) = tab.pending_undo.take() else {
-            return;
-        };
-        tab.undo_edit = None;
-        if before == tab.doc.session {
-            return;
+        if tab.undo.seal(&tab.doc.session) {
+            tab.save.touch();
         }
-        tab.undo.push(UndoEntry::Annots(before));
-        if tab.undo.len() > 80 {
-            tab.undo.remove(0);
-        }
-        tab.redo.clear();
-        tab.save.touch();
     }
 
     pub(crate) fn seal_then_arm(&mut self) {
-        self.seal_undo();
-        self.arm_undo();
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        let sealed = tab.undo.seal(&tab.doc.session);
+        tab.undo.arm(&tab.doc.session);
+        if sealed {
+            tab.save.touch();
+        }
     }
 
     pub(crate) fn begin_edit_undo(&mut self, id: u64) {
-        let same = self
-            .tab()
-            .is_some_and(|tab| tab.undo_edit == Some(id) && tab.pending_undo.is_some());
-        if same {
+        let Some(tab) = self.tab_mut() else {
             return;
-        }
-        self.seal_undo();
-        self.arm_undo();
-        if let Some(tab) = self.tab_mut() {
-            tab.undo_edit = Some(id);
+        };
+        if tab.undo.begin_edit(&tab.doc.session, id) {
+            tab.save.touch();
         }
     }
 
     pub(crate) fn tag_undo_edit(&mut self, id: u64) {
         if let Some(tab) = self.tab_mut() {
-            tab.undo_edit = Some(id);
+            tab.undo.tag_edit(id);
         }
     }
 
     pub(crate) fn end_edit_undo(&mut self) {
-        let editing = self.tab().and_then(|tab| tab.undo_edit);
-        if editing.is_some() {
-            self.seal_undo();
+        let Some(tab) = self.tab_mut() else {
+            return;
+        };
+        if tab.undo.end_edit(&tab.doc.session) {
+            tab.save.touch();
         }
     }
 
     fn undo(&mut self) {
-        self.seal_undo();
-        let Some(tab) = self.tab() else {
-            return;
-        };
-        if tab.page_op.is_some() || matches!(tab.save, SaveState::Saving) {
-            return;
-        }
-        let Some(entry) = self.tab_mut().and_then(|tab| tab.undo.pop()) else {
-            return;
-        };
-        match entry {
-            UndoEntry::Annots(prev) => {
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                let current = tab.doc.session.clone();
-                tab.redo.push(UndoEntry::Annots(current.clone()));
-                tab.doc.session = crate::annot::restore_session(&current, prev);
-                tab.editing = None;
-                tab.undo_edit = None;
-                tab.menu = None;
-                tab.style_bar = None;
-                tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
-                tab.save.touch();
-            }
-            UndoEntry::InsertPage { index } => {
-                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                tab.redo.push(UndoEntry::InsertPage { index });
-                tab.page_op = Some(PendingPageOp::Delete {
-                    index,
-                    record_undo: false,
-                    revert: Some(PageOpFailRevert::FromRedo),
-                });
-                if let Some(doc_id) = doc_id {
-                    self.worker.delete_page(doc_id, index);
-                }
-            }
-            UndoEntry::DeletePage { index } => {
-                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                tab.redo.push(UndoEntry::DeletePage { index });
-                tab.page_op = Some(PendingPageOp::Insert {
-                    index,
-                    record_undo: false,
-                    revert: Some(PageOpFailRevert::FromRedo),
-                });
-                if let Some(doc_id) = doc_id {
-                    self.worker.insert_page_at(doc_id, index);
-                }
-            }
-        }
+        self.step_undo(Direction::Undo);
     }
 
     fn redo(&mut self) {
+        self.step_undo(Direction::Redo);
+    }
+
+    fn step_undo(&mut self, dir: Direction) {
         self.seal_undo();
         let Some(tab) = self.tab() else {
             return;
         };
-        if tab.page_op.is_some() || matches!(tab.save, SaveState::Saving) {
+        if tab.undo.page_op.is_some() || matches!(tab.save, SaveState::Saving) {
             return;
         }
-        let Some(entry) = self.tab_mut().and_then(|tab| tab.redo.pop()) else {
+        let doc_id = tab.doc.doc_id;
+        let current = tab.doc.session.clone();
+        let Some(tab) = self.tab_mut() else {
             return;
         };
-        match entry {
-            UndoEntry::Annots(next) => {
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                let current = tab.doc.session.clone();
-                tab.undo.push(UndoEntry::Annots(current.clone()));
-                tab.doc.session = crate::annot::restore_session(&current, next);
+        let Some(outcome) = tab.undo.step(dir, &current) else {
+            return;
+        };
+        match outcome {
+            StepOutcome::Annots { session } => {
+                tab.doc.session = session;
                 tab.editing = None;
-                tab.undo_edit = None;
                 tab.menu = None;
                 tab.style_bar = None;
                 tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
                 tab.save.touch();
             }
-            UndoEntry::InsertPage { index } => {
-                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                tab.undo.push(UndoEntry::InsertPage { index });
-                tab.page_op = Some(PendingPageOp::Insert {
-                    index,
-                    record_undo: false,
-                    revert: Some(PageOpFailRevert::FromUndo),
-                });
-                if let Some(doc_id) = doc_id {
-                    self.worker.insert_page_at(doc_id, index);
-                }
-            }
-            UndoEntry::DeletePage { index } => {
-                let doc_id = self.tab().map(|tab| tab.doc.doc_id);
-                let Some(tab) = self.tab_mut() else {
-                    return;
-                };
-                tab.undo.push(UndoEntry::DeletePage { index });
-                tab.page_op = Some(PendingPageOp::Delete {
-                    index,
-                    record_undo: false,
-                    revert: Some(PageOpFailRevert::FromUndo),
-                });
-                if let Some(doc_id) = doc_id {
-                    self.worker.delete_page(doc_id, index);
-                }
-            }
+            StepOutcome::PageOp { kind, index } => match kind {
+                PageOpKind::Insert => self.worker.insert_page_at(doc_id, index),
+                PageOpKind::Delete => self.worker.delete_page(doc_id, index),
+            },
         }
     }
 
@@ -3043,11 +2916,7 @@ impl MarkerApp {
                     focus_edit: false,
                     menu: None,
                     style_bar: None,
-                    pending_undo: None,
-                    undo_edit: None,
-                    undo: Vec::new(),
-                    redo: Vec::new(),
-                    page_op: None,
+                    undo: UndoStack::default(),
                     annot_by_page: Vec::new(),
                     // Imported sessions start at epoch 0. MAX forces the first index build.
                     annot_index_epoch: u64::MAX,
@@ -3202,23 +3071,13 @@ impl MarkerApp {
                         tab.inflight.clear();
                         tab.thumbs_inflight.clear();
                         tab.search.pending = false;
-                        if let Some(op) = tab.page_op.take() {
+                        if let Some(op) = tab.undo.page_op.take() {
                             let revert = match op {
                                 PendingPageOp::Delete { revert, .. }
                                 | PendingPageOp::Insert { revert, .. } => revert,
                             };
-                            match revert {
-                                Some(PageOpFailRevert::FromRedo) => {
-                                    if let Some(entry) = tab.redo.pop() {
-                                        tab.undo.push(entry);
-                                    }
-                                }
-                                Some(PageOpFailRevert::FromUndo) => {
-                                    if let Some(entry) = tab.undo.pop() {
-                                        tab.redo.push(entry);
-                                    }
-                                }
-                                None => {}
+                            if let Some(revert) = revert {
+                                tab.undo.revert_failed_page_op(revert);
                             }
                         }
                     }
@@ -3233,7 +3092,7 @@ impl MarkerApp {
             let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
-            let op = tab.page_op.take();
+            let op = tab.undo.page_op.take();
             match op {
                 Some(PendingPageOp::Insert {
                     index: expected,
@@ -3242,7 +3101,7 @@ impl MarkerApp {
                 }) if expected == index => record_undo,
                 None => true,
                 other => {
-                    tab.page_op = other;
+                    tab.undo.page_op = other;
                     return;
                 }
             }
@@ -3282,11 +3141,7 @@ impl MarkerApp {
         }
         tab.pending_jump = Some((index, Some(0.0)));
         if record_undo {
-            tab.undo.push(UndoEntry::InsertPage { index });
-            if tab.undo.len() > 80 {
-                tab.undo.remove(0);
-            }
-            tab.redo.clear();
+            tab.undo.record_page_op(UndoEntry::InsertPage { index });
         }
         self.error = None;
     }
@@ -3296,14 +3151,14 @@ impl MarkerApp {
             let Some(tab) = self.tab_by_doc_id_mut(doc_id) else {
                 return;
             };
-            match tab.page_op.take() {
+            match tab.undo.page_op.take() {
                 Some(PendingPageOp::Delete {
                     index: expected,
                     record_undo,
                     ..
                 }) if expected == index => record_undo,
                 other => {
-                    tab.page_op = other;
+                    tab.undo.page_op = other;
                     return;
                 }
             }
@@ -3355,11 +3210,7 @@ impl MarkerApp {
         let jump = index.min(tab.doc.pages.len().saturating_sub(1));
         tab.pending_jump = Some((jump, Some(0.0)));
         if record_undo {
-            tab.undo.push(UndoEntry::DeletePage { index });
-            if tab.undo.len() > 80 {
-                tab.undo.remove(0);
-            }
-            tab.redo.clear();
+            tab.undo.record_page_op(UndoEntry::DeletePage { index });
         }
         self.error = None;
     }
@@ -3368,7 +3219,7 @@ impl MarkerApp {
         let Some(tab) = self.tab() else {
             return;
         };
-        if matches!(tab.save, SaveState::Saving) || tab.page_op.is_some() {
+        if matches!(tab.save, SaveState::Saving) || tab.undo.page_op.is_some() {
             return;
         }
         let doc_id = tab.doc.doc_id;
@@ -3380,7 +3231,7 @@ impl MarkerApp {
         };
         self.seal_undo();
         if let Some(tab) = self.tab_mut() {
-            tab.page_op = Some(PendingPageOp::Insert {
+            tab.undo.page_op = Some(PendingPageOp::Insert {
                 index: at,
                 record_undo: true,
                 revert: None,
@@ -3407,7 +3258,7 @@ impl MarkerApp {
             self.error = Some("Finish or cancel the text edit before deleting a page.".into());
             return;
         }
-        if matches!(tab.save, SaveState::Saving) || tab.page_op.is_some() {
+        if matches!(tab.save, SaveState::Saving) || tab.undo.page_op.is_some() {
             return;
         }
         if tab.doc.pages.len() <= 1 {
@@ -3422,7 +3273,7 @@ impl MarkerApp {
         self.seal_undo();
         if let Some(tab) = self.tab_mut() {
             tab.menu = None;
-            tab.page_op = Some(PendingPageOp::Delete {
+            tab.undo.page_op = Some(PendingPageOp::Delete {
                 index,
                 record_undo: true,
                 revert: None,
@@ -4958,10 +4809,9 @@ impl MarkerApp {
                 let upserts: Vec<Annotation> = tab
                     .doc
                     .session
-                    .annotations
-                    .iter()
+                    .cloned_annotations()
+                    .into_iter()
                     .filter(|annot| annot.dirty)
-                    .cloned()
                     .collect();
                 let deletes = tab.doc.session.pending_deletes.clone();
                 let mut math_pdfs = HashMap::new();
@@ -5043,10 +4893,9 @@ impl MarkerApp {
         let upserts: Vec<Annotation> = tab
             .doc
             .session
-            .annotations
-            .iter()
+            .cloned_annotations()
+            .into_iter()
             .filter(|annot| annot.dirty)
-            .cloned()
             .collect();
         let deletes = tab.doc.session.pending_deletes.clone();
         let mut math_pdfs = HashMap::new();

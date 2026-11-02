@@ -342,12 +342,13 @@ pub(crate) enum AnnotFilterKind {
     Note,
     Math,
     Shape,
+    Ink,
     Image,
     Foreign,
 }
 
 impl AnnotFilterKind {
-    pub(crate) const ALL: [Self; 10] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::Highlight,
         Self::Underline,
         Self::StrikeOut,
@@ -356,6 +357,7 @@ impl AnnotFilterKind {
         Self::Note,
         Self::Math,
         Self::Shape,
+        Self::Ink,
         Self::Image,
         Self::Foreign,
     ];
@@ -370,6 +372,7 @@ impl AnnotFilterKind {
             Self::Note => "Note",
             Self::Math => "Equation",
             Self::Shape => "Shape",
+            Self::Ink => "Drawing",
             Self::Image => "Image",
             Self::Foreign => "Imported",
         }
@@ -394,6 +397,7 @@ impl AnnotFilterKind {
             AnnotKind::Note { .. } => Some(Self::Note),
             AnnotKind::Math { .. } => Some(Self::Math),
             AnnotKind::Shape { .. } => Some(Self::Shape),
+            AnnotKind::Ink { .. } => Some(Self::Ink),
             AnnotKind::Image { .. } => Some(Self::Image),
             AnnotKind::Foreign { .. } => Some(Self::Foreign),
         }
@@ -439,11 +443,12 @@ pub(crate) enum Tool {
     Rect,
     Ellipse,
     Line,
+    Draw,
     Math,
 }
 
 impl Tool {
-    pub(crate) const ALL: [Tool; 11] = [
+    pub(crate) const ALL: [Tool; 12] = [
         Tool::Select,
         Tool::Highlight,
         Tool::Underline,
@@ -454,11 +459,12 @@ impl Tool {
         Tool::Rect,
         Tool::Ellipse,
         Tool::Line,
+        Tool::Draw,
         Tool::Math,
     ];
 
     /// Bare letter that selects this tool. Vim pans with `J`/`K`/`L` (not `H` — Highlight).
-    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`.
+    /// Underline is `U`, strikeout is `X`, squiggly is `W`. Note is `N`. Draw is `D`.
     pub(crate) fn shortcut(self) -> Key {
         match self {
             Tool::Select => Key::S,
@@ -471,6 +477,7 @@ impl Tool {
             Tool::Rect => Key::R,
             Tool::Ellipse => Key::E,
             Tool::Line => Key::I,
+            Tool::Draw => Key::D,
             Tool::Math => Key::M,
         }
     }
@@ -487,6 +494,7 @@ impl Tool {
             Tool::Rect => "Rectangle",
             Tool::Ellipse => "Ellipse",
             Tool::Line => "Line",
+            Tool::Draw => "Freeform drawing",
             Tool::Math => "Equation",
         }
     }
@@ -504,6 +512,7 @@ impl Tool {
             | Tool::Rect
             | Tool::Ellipse
             | Tool::Line
+            | Tool::Draw
             | Tool::Math => None,
         }
     }
@@ -516,7 +525,7 @@ impl Tool {
     }
 
     pub(crate) fn is_shape(self) -> bool {
-        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Line)
+        matches!(self, Tool::Rect | Tool::Ellipse | Tool::Line | Tool::Draw)
     }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -571,6 +580,11 @@ pub(crate) enum Drag {
         kind: ShapeKind,
         origin: PdfPoint,
         current: PdfPoint,
+    },
+    /// Freeform pen stroke: points accumulate while the pointer is down.
+    Ink {
+        page: usize,
+        points: Vec<PdfPoint>,
     },
     Create {
         page: usize,

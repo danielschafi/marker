@@ -997,6 +997,7 @@ fn review_row_data(
         AnnotKind::Note { content, color, .. } => ("Note", Some(*color), content.clone()),
         AnnotKind::Text { .. }
         | AnnotKind::Shape { .. }
+        | AnnotKind::Ink { .. }
         | AnnotKind::Math { .. }
         | AnnotKind::Image { .. }
         | AnnotKind::Foreign { .. } => return None,
@@ -1282,6 +1283,7 @@ fn annot_display_color(kind: &AnnotKind) -> Option<Rgb> {
         | AnnotKind::Text { color, .. }
         | AnnotKind::Note { color, .. }
         | AnnotKind::Math { color, .. }
+        | AnnotKind::Ink { color, .. }
         | AnnotKind::Foreign { color, .. } => Some(*color),
         AnnotKind::Shape { stroke, .. } => Some(*stroke),
         AnnotKind::Image { .. } => None,
@@ -1311,6 +1313,7 @@ fn annot_kind_label(kind: &AnnotKind) -> &'static str {
             kind: ShapeKind::Line,
             ..
         } => "Line",
+        AnnotKind::Ink { .. } => "Drawing",
         AnnotKind::Image { .. } => "Image",
         AnnotKind::Foreign { kind, .. } => match kind {
             ForeignKind::Underline => "Underline",
@@ -1342,7 +1345,7 @@ fn annot_snippet(tab: &Tab, annot: &Annotation) -> String {
                 String::new()
             }
         }
-        AnnotKind::Shape { .. } | AnnotKind::Image { .. } => String::new(),
+        AnnotKind::Shape { .. } | AnnotKind::Ink { .. } | AnnotKind::Image { .. } => String::new(),
     };
     one_line_snippet(&raw, 72)
 }

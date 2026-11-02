@@ -512,6 +512,7 @@ fn annot_menu_label(kind: &AnnotKind) -> &'static str {
             kind: ShapeKind::Line,
             ..
         } => "Line",
+        AnnotKind::Ink { .. } => "Drawing",
         AnnotKind::Image { .. } => "Image",
         AnnotKind::Foreign { kind, .. } => match kind {
             crate::annot::ForeignKind::Underline => "Underline",

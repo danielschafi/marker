@@ -441,6 +441,27 @@ fn paint_annotations(
                     }
                 }
             }
+            AnnotKind::Ink {
+                strokes,
+                color,
+                width,
+            } => {
+                let stroke = Stroke::new(
+                    (*width * tab.doc.scale).max(1.0),
+                    color.to_color32(),
+                );
+                for path in strokes {
+                    let pts: Vec<Pos2> = path
+                        .iter()
+                        .map(|point| tab.doc.page_to_screen(page, *point, view))
+                        .collect();
+                    if pts.len() >= 2 {
+                        painter.add(egui::Shape::line(pts, stroke));
+                    } else if let Some(only) = pts.first() {
+                        painter.circle_filled(*only, stroke.width * 0.5, stroke.color);
+                    }
+                }
+            }
             AnnotKind::Math { rect, source, .. } => {
                 let screen = pdf_rect_screen(&tab.doc, page, *rect, view);
                 if let Some(preview) = tab.previews.get(&annot.id) {
@@ -775,6 +796,21 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, pane: PaneCtx) {
                         stroke,
                     ));
                 }
+            }
+        }
+        Some(Drag::Ink { page, points }) => {
+            let stroke = Stroke::new(
+                (app.settings.shape_width * tab.doc.scale).max(1.0),
+                app.settings.shape_color.to_color32(),
+            );
+            let pts: Vec<Pos2> = points
+                .iter()
+                .map(|point| tab.doc.page_to_screen(*page, *point, view))
+                .collect();
+            if pts.len() >= 2 {
+                painter.add(egui::Shape::line(pts, stroke));
+            } else if let Some(only) = pts.first() {
+                painter.circle_filled(*only, stroke.width * 0.5, stroke.color);
             }
         }
         Some(Drag::Create {

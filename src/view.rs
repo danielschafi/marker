@@ -14,10 +14,7 @@ use crate::annot::{
     click_glyph_range, glyph_at, highlight_quads, word_range, AnnotKind, Handle, MarkupStyle,
     ShapeKind, HIGHLIGHT_OPACITY,
 };
-use crate::app::{
-    clipboard_has_image, ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TabId, TextSel,
-    Tool,
-};
+use crate::app::{ContextMenu, CreateKind, DocState, Drag, MarkerApp, Tab, TabId, TextSel, Tool};
 use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection};
 use crate::cite;
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, Rgb, MAX_SCALE, MIN_SCALE};
@@ -28,6 +25,7 @@ use crate::math::rich_text::{
 use crate::math::{EntryKind, MathKey};
 use crate::math_spans;
 use crate::pdf::{DocId, PageInfo, TILE_PX};
+use crate::platform::clipboard_has_image;
 use crate::theme;
 
 const GAP: f32 = 16.0;

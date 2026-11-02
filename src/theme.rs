@@ -3,11 +3,12 @@
 //! On Windows/macOS, `ThemePreference::System` tracks the desktop. On Linux,
 //! winit often reports no system theme, so we read GNOME `gsettings` when present.
 
-use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use egui::{Color32, Context, Theme, ThemePreference};
+
+use crate::platform::gsettings;
 
 #[derive(Clone, Copy)]
 pub(crate) struct ThemeColors {
@@ -226,12 +227,4 @@ fn probe_linux_accent() -> Option<Color32> {
         "slate" => Color32::from_rgb(120, 130, 148),
         _ => return None,
     })
-}
-
-fn gsettings(args: &[&str]) -> Option<String> {
-    let output = Command::new("gsettings").args(args).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }

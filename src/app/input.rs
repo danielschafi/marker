@@ -1447,17 +1447,15 @@ impl MarkerApp {
             Action::NextTab => {
                 if self.tabs.len() >= 2 {
                     if let Some(next) = self.adjacent_tab_id(self.active, 1) {
-                        self.active = next;
+                        self.activate_tab(next);
                     }
-                    self.pulse_tab_list();
                 }
             }
             Action::PrevTab => {
                 if self.tabs.len() >= 2 {
                     if let Some(next) = self.adjacent_tab_id(self.active, -1) {
-                        self.active = next;
+                        self.activate_tab(next);
                     }
-                    self.pulse_tab_list();
                 }
             }
             Action::ToggleSplitSide => self.toggle_split(false),

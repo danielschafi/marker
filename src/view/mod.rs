@@ -88,9 +88,14 @@ pub(crate) fn viewport_tab(app: &mut MarkerApp, ui: &mut egui::Ui, tab_id: TabId
     }
 
     // Clicking the unfocused split pane focuses it for keys; scroll above does not.
+    // Swap rect roles in the same frame so tile dispatch / drop hit-tests stay paired.
     if !pane.focused && (response.clicked() || response.drag_started()) {
+        let previous_focused = app.view_rect;
         app.active = pane.tab_id;
         app.view_rect = pane.rect;
+        if previous_focused.is_positive() {
+            app.split_view_rect = previous_focused;
+        }
     }
 }
 

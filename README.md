@@ -111,7 +111,8 @@ PDF and auto-saves after a short idle period; `Ctrl+S` saves immediately.
 | `Ctrl+Shift+B` | Show or hide the tools strip |
 | `F11` | Toggle zen mode |
 | Click title / `Ctrl+Tab` | Open or cycle tabs |
-| Drag tab (title or list) to viewport edge | Split side-by-side (left/right) or stacked (top/bottom) |
+| Drag tab (title or list) to viewport edge / center | Split side-by-side (left/right) or stacked (top/bottom); center opens beside |
+| Drop on the other pane or a tab list row | Swap panes, replace a pane, or pair tabs (works with 3+ open PDFs) |
 | Right-click title or tab in list | Split side-by-side / stacked / with…, unsplit, or move to a new window |
 | `Ctrl+\` / `Ctrl+Shift+\` | Toggle side-by-side / stacked split with next tab |
 | `Ctrl+Alt+\` | Focus the other split pane |

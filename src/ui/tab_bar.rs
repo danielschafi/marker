@@ -248,8 +248,11 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
     } else if response.drag_started() && tab_count > 1 {
         app.tab_drag = Some(app.active);
         app.tab_menu = None;
+        // Keep the list visible during drag without permanently pinning it.
         if app.tab_list.is_none() {
-            app.tab_list = Some(TabListState::Pinned);
+            app.tab_list = Some(TabListState::Ephemeral {
+                until: std::time::Instant::now() + std::time::Duration::from_secs(60),
+            });
         }
     } else if response.clicked() {
         app.toggle_tab_list();
@@ -258,7 +261,7 @@ fn paint_current_title(app: &mut MarkerApp, ui: &mut egui::Ui, row: Rect) {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
     let tip = if tab_count > 1 {
-        "Open tabs · drag to split · right-click to split · Ctrl+Tab · Ctrl+\\"
+        "Open tabs · drag to an edge to split · drop on a tab or the other pane to place · Ctrl+Tab · Ctrl+\\"
     } else {
         "Current document"
     };
@@ -377,7 +380,9 @@ fn tab_list_row(
     }
     response
         .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), selected, name));
-    let response = response.on_hover_text("Drag to split · right-click for layout");
+    let response = response.on_hover_text(
+        "Drag to a viewport edge or the other pane · drop on a row to place · right-click for layout",
+    );
 
     TabAction {
         select: response.clicked() && !close_clicked,
@@ -772,6 +777,11 @@ pub(super) fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         .find(|(id, _)| Some(*id) == next_id)
         .or_else(|| others.first())
         .map(|(_, name)| format!(" with {name}"));
+    let menu_name = app
+        .tab_by_id(menu_id)
+        .map(tab_file_name)
+        .unwrap_or("tab")
+        .to_owned();
 
     let area = egui::Area::new(Id::new("marker-tab-menu"))
         .order(egui::Order::Foreground)
@@ -781,8 +791,8 @@ pub(super) fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
             egui::Frame::popup(ui.style()).show(ui, |ui| {
                 ui.set_min_width(188.0);
                 if can_split {
-                    if menu_id == active && others.len() > 1 {
-                        ui.menu_button("Split side-by-side with…", |ui| {
+                    if others.len() > 1 {
+                        ui.menu_button(format!("Split side-by-side ({menu_name}) with…"), |ui| {
                             for (other, name) in &others {
                                 if ui.button(name).clicked() {
                                     split_with = Some((*other, false));
@@ -790,7 +800,7 @@ pub(super) fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                                 }
                             }
                         });
-                        ui.menu_button("Split stacked with…", |ui| {
+                        ui.menu_button(format!("Split stacked ({menu_name}) with…"), |ui| {
                             for (other, name) in &others {
                                 if ui.button(name).clicked() {
                                     split_with = Some((*other, true));
@@ -799,15 +809,17 @@ pub(super) fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                             }
                         });
                     } else {
-                        let suffix = if menu_id == active {
-                            next_label.as_deref().unwrap_or("")
-                        } else {
-                            ""
-                        };
-                        if ui.button(format!("Split side-by-side{suffix}")).clicked() {
+                        let suffix = next_label.as_deref().unwrap_or("");
+                        if ui
+                            .button(format!("Split side-by-side ({menu_name}){suffix}"))
+                            .clicked()
+                        {
                             split_side = true;
                         }
-                        if ui.button(format!("Split stacked{suffix}")).clicked() {
+                        if ui
+                            .button(format!("Split stacked ({menu_name}){suffix}"))
+                            .clicked()
+                        {
                             split_stack = true;
                         }
                     }

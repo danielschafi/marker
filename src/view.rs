@@ -1606,7 +1606,7 @@ fn place_box(
         let Some(tab) = app.tab_mut() else {
             return;
         };
-        place_box_tab(tab, page, point, rect, kind, &settings);
+        place_box_tab(tab, page, point, rect, kind, &settings, String::new());
         tab.primary_selected()
     };
     if let Some(id) = id {
@@ -1618,6 +1618,112 @@ fn place_box(
     }
 }
 
+/// Insert a Text or Note annotation filled with `content` (ST6).
+///
+/// Places beside the current selection when one exists; otherwise at the
+/// viewport center (falling back to the current page center).
+pub(crate) fn place_assistant_answer(
+    tab: &mut Tab,
+    view: Rect,
+    kind: CreateKind,
+    settings: &crate::settings::Settings,
+    content: String,
+) -> Option<u64> {
+    if !matches!(kind, CreateKind::Text | CreateKind::Note) {
+        return None;
+    }
+    if tab.doc.pages.is_empty() {
+        return None;
+    }
+    let size = settings.text_size;
+    let (page, point, rect) = match selection_bounds(tab) {
+        Some((page, bounds)) => {
+            let info = tab.doc.pages.get(page)?;
+            let (point, rect) = match kind {
+                CreateKind::Note => {
+                    let point = point_beside_bounds(bounds, info, crate::annot::NOTE_SIZE);
+                    (point, None)
+                }
+                CreateKind::Text => {
+                    let height = size * 1.8 + 4.0;
+                    let rect = rect_beside_bounds(bounds, info, 200.0, height);
+                    (PdfPoint::new(rect.x0, rect.y0), Some(rect))
+                }
+                CreateKind::Math => return None,
+            };
+            (page, point, rect)
+        }
+        None => {
+            let (page, point) = viewport_anchor(&tab.doc, view)?;
+            (page, point, None)
+        }
+    };
+    place_box_tab(tab, page, point, rect, kind, settings, content);
+    tab.primary_selected()
+}
+
+fn selection_bounds(tab: &Tab) -> Option<(usize, PdfRect)> {
+    if let Some(sel) = &tab.assistant.learning {
+        let glyphs = tab.doc.glyphs.get(&sel.page)?;
+        let quads = highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi);
+        return union_pdf_rects(&quads).map(|bounds| (sel.page, bounds));
+    }
+    if let Some(sel) = &tab.text_sel {
+        let glyphs = tab.doc.glyphs.get(&sel.page)?;
+        let quads = highlight_quads(glyphs, sel.glyph_lo, sel.glyph_hi);
+        return union_pdf_rects(&quads).map(|bounds| (sel.page, bounds));
+    }
+    let id = tab.primary_selected()?;
+    let annot = tab.doc.session.get(id)?;
+    match &annot.kind {
+        AnnotKind::Highlight { quads, .. } | AnnotKind::Markup { quads, .. } => {
+            union_pdf_rects(quads).map(|bounds| (annot.page, bounds))
+        }
+        _ => annot.bounds().map(|bounds| (annot.page, bounds)),
+    }
+}
+
+fn viewport_anchor(doc: &DocState, view: Rect) -> Option<(usize, PdfPoint)> {
+    if let Some(hit) = doc.screen_to_page(view.center(), view) {
+        return Some(hit);
+    }
+    let page = doc.current_page(view.height().max(1.0));
+    let info = doc.pages.get(page)?;
+    Some((
+        page,
+        PdfPoint::new((info.x0 + info.x1) * 0.5, (info.y0 + info.y1) * 0.5),
+    ))
+}
+
+fn point_beside_bounds(bounds: PdfRect, page: &PageInfo, width: f32) -> PdfPoint {
+    let rect = rect_beside_bounds(bounds, page, width, width);
+    PdfPoint::new(rect.x0, rect.y0)
+}
+
+fn rect_beside_bounds(bounds: PdfRect, page: &PageInfo, width: f32, height: f32) -> PdfRect {
+    const GAP: f32 = 8.0;
+    let right = bounds.x1 + GAP;
+    if right + width <= page.x1 + 0.5 {
+        return PdfRect::new(right, bounds.y0, right + width, bounds.y0 + height);
+    }
+    let max_x = (page.x1 - width).max(page.x0);
+    let x = bounds.x0.clamp(page.x0, max_x);
+    let y = bounds.y1 + GAP;
+    PdfRect::new(x, y, x + width, y + height)
+}
+
+fn union_pdf_rects(rects: &[PdfRect]) -> Option<PdfRect> {
+    let first = *rects.first()?;
+    Some(rects.iter().skip(1).fold(first, |acc, r| {
+        PdfRect::new(
+            acc.x0.min(r.x0),
+            acc.y0.min(r.y0),
+            acc.x1.max(r.x1),
+            acc.y1.max(r.y1),
+        )
+    }))
+}
+
 fn place_box_tab(
     tab: &mut Tab,
     page: usize,
@@ -1625,6 +1731,7 @@ fn place_box_tab(
     rect: Option<PdfRect>,
     kind: CreateKind,
     settings: &crate::settings::Settings,
+    content: String,
 ) {
     let size = settings.text_size;
     let color = settings.text_color;
@@ -1653,7 +1760,7 @@ fn place_box_tab(
             page,
             AnnotKind::Text {
                 rect,
-                content: String::new(),
+                content,
                 size,
                 color,
             },
@@ -1662,20 +1769,23 @@ fn place_box_tab(
             page,
             AnnotKind::Note {
                 rect,
-                content: String::new(),
+                content,
                 color,
             },
         ),
-        CreateKind::Math => tab.doc.session.insert(
-            page,
-            AnnotKind::Math {
-                rect,
-                source: String::new(),
-                size,
-                color,
-                auto_size: true,
-            },
-        ),
+        CreateKind::Math => {
+            let _ = content;
+            tab.doc.session.insert(
+                page,
+                AnnotKind::Math {
+                    rect,
+                    source: String::new(),
+                    size,
+                    color,
+                    auto_size: true,
+                },
+            )
+        }
     };
     tab.select_only(id);
     tab.editing = Some(id);
@@ -4758,4 +4868,38 @@ pub(crate) fn wanted_tiles(
     );
     doc.scroll_y_prev = doc.scroll_y;
     want
+}
+
+#[cfg(test)]
+mod place_answer_tests {
+    use super::{rect_beside_bounds, PageInfo, PdfRect};
+
+    #[test]
+    fn beside_prefers_right_when_space_allows() {
+        let page = PageInfo {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 600.0,
+            y1: 800.0,
+        };
+        let bounds = PdfRect::new(40.0, 100.0, 120.0, 140.0);
+        let rect = rect_beside_bounds(bounds, &page, 200.0, 30.0);
+        assert!((rect.x0 - 128.0).abs() < f32::EPSILON);
+        assert!((rect.y0 - 100.0).abs() < f32::EPSILON);
+        assert!((rect.width() - 200.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn beside_falls_below_when_right_overflows() {
+        let page = PageInfo {
+            x0: 0.0,
+            y0: 0.0,
+            x1: 200.0,
+            y1: 800.0,
+        };
+        let bounds = PdfRect::new(40.0, 100.0, 180.0, 140.0);
+        let rect = rect_beside_bounds(bounds, &page, 200.0, 30.0);
+        assert!((rect.x0 - 0.0).abs() < f32::EPSILON);
+        assert!((rect.y0 - 148.0).abs() < f32::EPSILON);
+    }
 }

@@ -4813,6 +4813,32 @@ impl MarkerApp {
         self.assistant.cancel(gen, seq);
     }
 
+    /// Insert a finished assistant turn as a Text or Note annotation (ST6).
+    ///
+    /// No-op while streaming, or when `text` is empty. Does not modify the turn.
+    /// Inline `$…$` math stays as source text; the normal dirty/save path applies.
+    pub(crate) fn save_assistant_answer(&mut self, text: &str, kind: CreateKind) {
+        if text.is_empty() || !matches!(kind, CreateKind::Text | CreateKind::Note) {
+            return;
+        }
+        if self.tab().is_some_and(|tab| tab.assistant.streaming) {
+            return;
+        }
+        let view = self.view_rect;
+        let settings = self.settings.clone();
+        self.seal_then_arm();
+        let id = {
+            let Some(tab) = self.tab_mut() else {
+                return;
+            };
+            view::place_assistant_answer(tab, view, kind, &settings, text.to_string())
+        };
+        if let Some(id) = id {
+            self.tag_undo_edit(id);
+            self.open_style_bar(id, true);
+        }
+    }
+
     pub(crate) fn begin_learning_select(&mut self) {
         self.set_assistant_open(true);
         self.capture = CaptureMode::LearningText;

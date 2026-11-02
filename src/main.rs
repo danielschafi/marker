@@ -37,8 +37,12 @@ mod settings {
 mod undo {
     pub use marker::undo::*;
 }
+mod worker {
+    pub use marker::worker::*;
+}
 
 mod app;
+mod assistant_md;
 mod platform;
 mod rich_text_edit;
 mod theme;

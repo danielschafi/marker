@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+use crate::worker::Wake;
+
 /// Parsed CLI flags and PDF paths (non-PDF args are ignored).
 #[derive(Debug, Clone)]
 pub struct LaunchArgs {
@@ -64,13 +66,13 @@ pub struct IpcInbox {
     rx: Receiver<Vec<PathBuf>>,
     /// Kept so the socket file is removed when the primary exits.
     _guard: SocketGuard,
-    wake: Arc<Mutex<Option<egui::Context>>>,
+    wake: Arc<Mutex<Option<Arc<dyn Wake>>>>,
 }
 
 impl IpcInbox {
-    pub fn bind_ctx(&self, ctx: egui::Context) {
+    pub fn bind_wake(&self, wake: Arc<dyn Wake>) {
         if let Ok(mut slot) = self.wake.lock() {
-            *slot = Some(ctx);
+            *slot = Some(wake);
         }
     }
 
@@ -223,7 +225,7 @@ fn bind_primary(socket_path: &Path) -> Option<IpcInbox> {
 fn accept_loop(
     listener: std::os::unix::net::UnixListener,
     tx: Sender<Vec<PathBuf>>,
-    wake: Arc<Mutex<Option<egui::Context>>>,
+    wake: Arc<Mutex<Option<Arc<dyn Wake>>>>,
 ) {
     loop {
         let Ok((stream, _)) = listener.accept() else {
@@ -233,8 +235,8 @@ fn accept_loop(
         if let Some(paths) = handle_client(stream) {
             let _ = tx.send(paths);
             if let Ok(slot) = wake.lock() {
-                if let Some(ctx) = slot.as_ref() {
-                    ctx.request_repaint();
+                if let Some(waker) = slot.as_ref() {
+                    waker.wake();
                 }
             }
         }

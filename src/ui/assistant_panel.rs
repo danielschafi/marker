@@ -311,7 +311,7 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
                             } else if math_spans::has_math(&turn.text) {
                                 paint_assistant_answer_math(ui, math_cache, &turn.text, math_color);
                             } else {
-                                crate::assistant::show_markdown(ui, md_cache, &turn.text);
+                                crate::assistant_md::show_markdown(ui, md_cache, &turn.text);
                             }
                         }
                     }

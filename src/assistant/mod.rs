@@ -18,7 +18,7 @@ pub use bundle::{
     MAX_TEXT_CHARS,
 };
 pub use crop::{clamp_crop_rect, crop_scale, CROP_DPI, CROP_MAX_PNG_BYTES};
-pub use markdown::show as show_markdown;
+pub use markdown::finished_markdown;
 pub use session::status_hint as assistant_session_hint;
 pub use text::{glyphs_intersecting_rects, reconstruct_text, truncate_text};
 pub use types::{

@@ -1,4 +1,8 @@
-//! Safe Markdown rendering for assistant turns (issue #26).
+//! Safe Markdown sanitization for assistant turns (issue #26).
+//!
+//! Painting lives in the binary (`assistant_md`) so the lib stays free of
+//! `egui_commonmark`. Callers that need a finished body for the UI use
+//! [`finished_markdown`].
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -6,9 +10,6 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use std::cell::Cell;
-
-use egui::Ui;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 /// Finished replies kept so a painted turn is not sanitized again next frame.
 const FINISHED_CACHE_CAP: usize = 128;
@@ -162,22 +163,9 @@ fn reset_render_cache() {
     FINISHED_MD.with(|cell| cell.borrow_mut().clear());
 }
 
-/// Render assistant Markdown into `ui`. Plain text stays readable as paragraphs.
-///
-/// Callers pass finished turns only. Streaming text stays a plain label so a
-/// half-open fence is not parsed, and so this cache is not filled with partials.
-pub fn show(ui: &mut Ui, cache: &mut CommonMarkCache, text: &str) {
-    if text.is_empty() {
-        return;
-    }
-    let sanitized = render_markdown(text, false);
-    ui.scope(|ui| {
-        ui.style_mut().url_in_tooltip = true;
-        CommonMarkViewer::new()
-            // Do not assume bare paths are file:// (we never load images anyway).
-            .explicit_image_uri_scheme(true)
-            .show(ui, cache, &sanitized);
-    });
+/// Sanitize a finished assistant turn for painting (cached).
+pub fn finished_markdown(text: &str) -> Arc<str> {
+    render_markdown(text, false)
 }
 
 #[cfg(test)]

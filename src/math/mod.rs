@@ -1,6 +1,7 @@
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use typst::foundations::{Dict, IntoValue};
@@ -10,7 +11,7 @@ use typst_layout::PagedDocument;
 
 use crate::geom::{normalize_latex, Rgb};
 use crate::pdf::DocId;
-use crate::worker::{self, Channel, ShutdownJob};
+use crate::worker::{self, Channel, ShutdownJob, Wake};
 
 mod pipeline;
 
@@ -415,9 +416,9 @@ pub struct MathWorker {
 }
 
 impl MathWorker {
-    pub fn spawn(ctx: egui::Context) -> Self {
+    pub fn spawn(wake: Arc<dyn Wake>) -> Self {
         Self {
-            channel: Channel::spawn("marker-math", ctx, math_loop),
+            channel: Channel::spawn("marker-math", wake, math_loop),
         }
     }
 
@@ -502,7 +503,7 @@ impl MathWorker {
     }
 }
 
-fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender>) {
+fn math_loop(wake: Arc<dyn Wake>, jobs: Receiver<Job>, replies: Sender<MathRender>) {
     // Pay for fonts and the engine before the first equation, not during it.
     let engine = build_engine();
     let mut sched: MathScheduler<RenderRequest> = MathScheduler::new(LIVE_DEBOUNCE);
@@ -510,12 +511,12 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
     let mut reraster: HashMap<MathKey, RerasterRequest> = HashMap::new();
     loop {
         if let Some(job) = sched.poll(Instant::now()) {
-            run_job(&ctx, &replies, &engine, job.payload);
+            run_job(wake.as_ref(), &replies, &engine, job.payload);
             continue;
         }
         if let Some(key) = reraster.keys().next().cloned() {
             if let Some(request) = reraster.remove(&key) {
-                run_reraster(&ctx, &replies, request);
+                run_reraster(wake.as_ref(), &replies, request);
                 continue;
             }
         }
@@ -565,7 +566,7 @@ fn math_loop(ctx: egui::Context, jobs: Receiver<Job>, replies: Sender<MathRender
 }
 
 fn run_job(
-    ctx: &egui::Context,
+    wake: &dyn Wake,
     replies: &Sender<MathRender>,
     engine: &TypstEngine<typst_as_lib::TypstTemplateMainFile>,
     request: RenderRequest,
@@ -578,10 +579,10 @@ fn run_job(
         request.want_pdf,
         RASTER_SCALE,
     );
-    worker::reply(ctx, replies, to_reply(request, rendered));
+    worker::reply(wake, replies, to_reply(request, rendered));
 }
 
-fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: RerasterRequest) {
+fn run_reraster(wake: &dyn Wake, replies: &Sender<MathRender>, request: RerasterRequest) {
     let (preview, width_pt, height_pt) = rasterize_svg(&request.svg, request.raster_scale);
     // Keep the Typst page size from the first render; only the bitmap changes.
     let width_pt = if request.width_pt > 0.0 {
@@ -595,7 +596,7 @@ fn run_reraster(ctx: &egui::Context, replies: &Sender<MathRender>, request: Rera
         height_pt
     };
     worker::reply(
-        ctx,
+        wake,
         replies,
         MathRender {
             doc_id: request.doc_id,

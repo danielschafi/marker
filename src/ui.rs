@@ -17,6 +17,7 @@ use crate::assistant::{
     AssistantRole, CaptureMode,
 };
 use crate::geom::{zoom_percent, Rgb, HIGHLIGHT_COLORS, INK_COLORS};
+use crate::math_spans;
 use crate::pdf::OutlineNode;
 use crate::settings::{HighlightPreset, MAX_HIGHLIGHT_PRESETS};
 use crate::theme::{self, ThemeColors};
@@ -2191,72 +2192,112 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
         .tabs
         .get(active)
         .is_some_and(|tab| tab.assistant.streaming);
-    let cache = &mut app.assistant_md_cache;
-    let turns = app
-        .tabs
-        .get(active)
-        .map(|tab| tab.assistant.turns.as_slice())
-        .unwrap_or(&[]);
+    let math_color = {
+        let c = p(ui.ctx()).text;
+        Rgb::new(c.r(), c.g(), c.b())
+    };
+    // Finished turns only — streaming keeps source until the turn completes (ST7).
+    prepare_assistant_answer_math(app, math_color);
+
     let mut save: Option<(usize, CreateKind)> = None;
-    ScrollArea::vertical()
-        .id_salt("assistant-transcript")
-        .auto_shrink([false, false])
-        .max_height(ui.available_height() - 180.0)
-        .show(ui, |ui| {
-            ui.set_min_width(ui.available_width());
-            if turns.is_empty() {
-                ui.label(
-                    RichText::new(
-                        "Attach selected text or a page region, then ask Cursor a question.",
-                    )
-                    .weak(),
-                );
-            }
-            for (index, turn) in turns.iter().enumerate() {
-                let who = match turn.role {
-                    AssistantRole::User => "You",
-                    AssistantRole::Assistant => "Cursor",
-                };
-                ui.label(RichText::new(who).strong().size(12.0));
-                match turn.role {
-                    // User prompts stay plain so typed Markdown is not re-interpreted.
-                    AssistantRole::User => {
-                        ui.label(&turn.text);
-                    }
-                    AssistantRole::Assistant => {
-                        // While streaming, prefer plain text so half-open fences stay readable.
-                        if turn.incomplete {
-                            if !turn.text.is_empty() {
-                                ui.label(&turn.text);
+    let mut copy: Option<usize> = None;
+    {
+        // Disjoint fields so Markdown cache, math cache, and turns can be borrowed together.
+        let math_cache = &app.math_cache;
+        let md_cache = &mut app.assistant_md_cache;
+        let turns = app
+            .tabs
+            .get(active)
+            .map(|tab| tab.assistant.turns.as_slice())
+            .unwrap_or(&[]);
+        ScrollArea::vertical()
+            .id_salt("assistant-transcript")
+            .auto_shrink([false, false])
+            .max_height(ui.available_height() - 180.0)
+            .show(ui, |ui| {
+                ui.set_min_width(ui.available_width());
+                if turns.is_empty() {
+                    ui.label(
+                        RichText::new(
+                            "Attach selected text or a page region, then ask Cursor a question.",
+                        )
+                        .weak(),
+                    );
+                }
+                for (index, turn) in turns.iter().enumerate() {
+                    let who = match turn.role {
+                        AssistantRole::User => "You",
+                        AssistantRole::Assistant => "Cursor",
+                    };
+                    ui.label(RichText::new(who).strong().size(12.0));
+                    match turn.role {
+                        // User prompts stay plain so typed Markdown is not re-interpreted.
+                        AssistantRole::User => {
+                            ui.label(&turn.text);
+                        }
+                        AssistantRole::Assistant => {
+                            // While streaming, prefer plain text so half-open fences stay readable
+                            // and so we do not enqueue math for every delta.
+                            if turn.incomplete {
+                                if !turn.text.is_empty() {
+                                    ui.label(&turn.text);
+                                }
+                            } else if math_spans::has_math(&turn.text) {
+                                paint_assistant_answer_math(
+                                    ui,
+                                    math_cache,
+                                    &turn.text,
+                                    math_color,
+                                );
+                            } else {
+                                crate::assistant::show_markdown(ui, md_cache, &turn.text);
                             }
-                        } else {
-                            crate::assistant::show_markdown(ui, cache, &turn.text);
                         }
                     }
+                    if turn.incomplete {
+                        ui.label(RichText::new("…").weak());
+                    } else if matches!(turn.role, AssistantRole::Assistant) && !turn.text.is_empty()
+                    {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(!streaming, Button::new("Copy"))
+                                .on_hover_text("Copy the raw answer text")
+                                .clicked()
+                            {
+                                copy = Some(index);
+                            }
+                            if ui
+                                .add_enabled(!streaming, Button::new("Save to page"))
+                                .on_hover_text(
+                                    "Insert this answer as a text annotation on the page",
+                                )
+                                .clicked()
+                            {
+                                save = Some((index, CreateKind::Text));
+                            }
+                            if ui
+                                .add_enabled(!streaming, Button::new("Save as note"))
+                                .on_hover_text("Insert this answer as a sticky note on the page")
+                                .clicked()
+                            {
+                                save = Some((index, CreateKind::Note));
+                            }
+                        });
+                    }
+                    ui.add_space(8.0);
                 }
-                if turn.incomplete {
-                    ui.label(RichText::new("…").weak());
-                } else if matches!(turn.role, AssistantRole::Assistant) && !turn.text.is_empty() {
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(!streaming, Button::new("Save to page"))
-                            .on_hover_text("Insert this answer as a text annotation on the page")
-                            .clicked()
-                        {
-                            save = Some((index, CreateKind::Text));
-                        }
-                        if ui
-                            .add_enabled(!streaming, Button::new("Save as note"))
-                            .on_hover_text("Insert this answer as a sticky note on the page")
-                            .clicked()
-                        {
-                            save = Some((index, CreateKind::Note));
-                        }
-                    });
-                }
-                ui.add_space(8.0);
-            }
-        });
+            });
+    }
+    if let Some(index) = copy {
+        let text = app
+            .tabs
+            .get(active)
+            .and_then(|tab| tab.assistant.turns.get(index))
+            .map(|turn| turn.text.clone());
+        if let Some(text) = text {
+            ui.ctx().copy_text(text);
+        }
+    }
     if let Some((index, kind)) = save {
         let text = app
             .tabs
@@ -2267,6 +2308,124 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
             app.save_assistant_answer(&text, kind);
         }
     }
+}
+
+/// Enqueue background LT0 cache jobs for closed math in finished assistant turns.
+fn prepare_assistant_answer_math(app: &mut MarkerApp, color: Rgb) {
+    let active = app.active;
+    let jobs: Vec<(String, bool)> = {
+        let Some(tab) = app.tabs.get(active) else {
+            return;
+        };
+        tab.assistant
+            .turns
+            .iter()
+            .filter(|turn| {
+                matches!(turn.role, AssistantRole::Assistant)
+                    && !turn.incomplete
+                    && !turn.text.is_empty()
+            })
+            .flat_map(|turn| {
+                math_spans::closed_math_spans(&turn.text)
+                    .into_iter()
+                    .filter_map(|span| {
+                        let inner = &turn.text[span.inner_start..span.inner_end];
+                        if inner.trim().is_empty() {
+                            return None;
+                        }
+                        Some((
+                            math_spans::source_for_render(inner, span.display),
+                            span.display,
+                        ))
+                    })
+            })
+            .collect()
+    };
+    for (source, display) in jobs {
+        app.request_answer_math(source, display, color);
+    }
+}
+
+/// Draw a finished assistant turn with `$…$` / `$$…$$` / `\(...\)` rendered via the math cache.
+///
+/// Pending or unclosed spans stay as source text. Prose is plain (not Markdown) so math can sit
+/// inline; turns without math still go through `show_markdown`.
+fn paint_assistant_answer_math(
+    ui: &mut egui::Ui,
+    math_cache: &crate::math::MathCache<crate::app::InlineReady>,
+    text: &str,
+    color: Rgb,
+) {
+    let size = MarkerApp::ASSISTANT_MATH_SIZE;
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
+        for span in math_spans::parse_spans(text) {
+            match span {
+                math_spans::Span::Prose { start, end } => {
+                    let prose = math_spans::display_prose(&text[start..end]);
+                    for (line_i, line) in prose.split('\n').enumerate() {
+                        if line_i > 0 {
+                            // Force a wrap to the next row (egui has no end_row here).
+                            let rem = ui.available_size_before_wrap().x;
+                            if rem > 0.0 {
+                                ui.add_space(rem);
+                            }
+                        }
+                        if !line.is_empty() {
+                            ui.label(line);
+                        }
+                    }
+                }
+                math_spans::Span::Math {
+                    start,
+                    end,
+                    inner_start,
+                    inner_end,
+                    display,
+                    closed,
+                } => {
+                    let source = &text[start..end];
+                    if !closed {
+                        ui.label(source);
+                        continue;
+                    }
+                    let inner = &text[inner_start..inner_end];
+                    if display {
+                        let rem = ui.available_size_before_wrap().x;
+                        if rem > 0.0 {
+                            ui.add_space(rem);
+                        }
+                    }
+                    let key = crate::math::MathKey::new(inner, display, size, color);
+                    let ready = match math_cache.get(&key) {
+                        Some(crate::math::EntryKind::Ready { value, .. }) => value
+                            .texture
+                            .as_ref()
+                            .map(|texture| (texture.id(), value.w_pt, value.h_pt)),
+                        Some(
+                            crate::math::EntryKind::Pending { .. }
+                            | crate::math::EntryKind::Error { .. },
+                        )
+                        | None => None,
+                    };
+                    if let Some((texture_id, w_pt, h_pt)) = ready {
+                        let w = w_pt.max(1.0);
+                        let h = h_pt.max(1.0);
+                        ui.image((texture_id, Vec2::new(w, h)));
+                    } else {
+                        // Pending / error: keep the raw delimiters visible.
+                        ui.label(source);
+                    }
+                    if display {
+                        let rem = ui.available_size_before_wrap().x;
+                        if rem > 0.0 {
+                            ui.add_space(rem);
+                        }
+                    }
+                }
+            }
+        }
+    });
 }
 
 fn tool_bar(app: &mut MarkerApp, ctx: &egui::Context) {

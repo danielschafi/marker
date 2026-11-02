@@ -1588,4 +1588,75 @@ mod tests {
             preview.width, preview.height
         );
     }
+
+    /// Manual artifact: assistant-panel mock with rendered `$E = mc^2$` (ST7).
+    /// `ST7_MATH_ANSWER_PNG=/path/to.png cargo test --bin marker write_st7_math_answer_png -- --exact --nocapture`
+    #[test]
+    fn write_st7_math_answer_png() {
+        let Ok(path) = std::env::var("ST7_MATH_ANSWER_PNG") else {
+            return;
+        };
+        // Prove the answer path: LaTeX `$E = mc^2$` through mitex/Typst (no PDF bytes).
+        let math_engine = build_engine();
+        let rendered = render_equation(
+            &math_engine,
+            r"$E = mc^2$",
+            14.0,
+            Rgb::new(28, 28, 32),
+            false,
+            RASTER_SCALE,
+        );
+        assert!(rendered.error.is_none(), "{:?}", rendered.error);
+        assert!(rendered.pdf.is_none(), "assistant math must not request PDF");
+        let eq = rendered.preview.expect("preview");
+
+        // Panel mock laid out in Typst so role / prose / Copy stay readable.
+        let panel = r##"
+#set page(width: 360pt, height: auto, margin: 14pt, fill: rgb("#ececf0"))
+#set text(size: 12pt, fill: rgb("#1c1c20"))
+#text(weight: "bold", size: 12pt)[Cursor]
+#v(8pt)
+Energy relates mass and the speed of light: $E = m c^2$.
+#v(12pt)
+#box(fill: rgb("#d2d2da"), inset: (x: 8pt, y: 4pt), radius: 2pt)[
+  #text(size: 10pt)[Copy]
+]
+#h(8pt)
+#text(size: 10pt, fill: rgb("#555555"))[Save to page   Save as note]
+"##;
+        let panel_engine = TypstEngine::builder()
+            .main_file(panel)
+            .search_fonts_with(
+                TypstKitFontOptions::new()
+                    .include_system_fonts(true)
+                    .include_embedded_fonts(true),
+            )
+            .build();
+        let warned = panel_engine.compile::<PagedDocument>();
+        let doc = warned.output.expect("panel typst");
+        let page = doc.pages().first().expect("page");
+        let svg = typst_svg::svg(
+            page,
+            &typst_svg::SvgOptions {
+                render_bleed: false,
+                pretty: false,
+            },
+        );
+        let (preview, _, _) = rasterize_svg(&svg, 2.0);
+        let preview = preview.expect("panel raster");
+        image::save_buffer(
+            &path,
+            &preview.pixels,
+            preview.width,
+            preview.height,
+            image::ColorType::Rgba8,
+        )
+        .expect("write png");
+        eprintln!(
+            "wrote {path}: answer panel + mitex preview {}×{} (pdf={})",
+            eq.width,
+            eq.height,
+            rendered.pdf.is_some()
+        );
+    }
 }

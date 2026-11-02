@@ -12,9 +12,9 @@ use crate::annot::{
     AnnotKind, Annotation, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind,
 };
 use crate::assistant::{
-    absolute_filepath, AssistantAttachment, AssistantEvent, AssistantRequest, AssistantRole,
-    AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach, CaptureMode,
-    PendingCrop, TabAssistant, CROP_DPI, MAX_TEXT_CHARS,
+    absolute_filepath, assistant_configured, AssistantAttachment, AssistantEvent, AssistantRequest,
+    AssistantRole, AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach,
+    CaptureMode, PendingCrop, TabAssistant, CROP_DPI, GENERATE_CARDS_PROMPT, MAX_TEXT_CHARS,
 };
 use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
@@ -107,6 +107,8 @@ pub(crate) struct MarkerApp {
     tile_focus_tab: usize,
     /// Latest wanted tile keys per document generation (read by the pdf worker).
     tile_wanted: Arc<Mutex<HashMap<u64, HashSet<TileKey>>>>,
+    /// Generated Anki CSV waiting for the cards save dialog (ST3).
+    pending_generated_csv: Option<(u64, String)>,
 }
 
 /// Two-pane document layout. `first` is left/top; `second` is right/bottom.
@@ -168,8 +170,8 @@ pub(crate) struct Tab {
     pub(crate) glyphs_waiting: HashSet<usize>,
     /// Study prompt waiting on a one-shot glyph load for `page` (ST5).
     pub(crate) pending_study: Option<(usize, String)>,
-    /// Markdown export waiting on glyph loads for highlight pages (ST1).
-    pub(crate) pending_export: bool,
+    /// Markdown / Anki CSV export waiting on glyph loads for highlight pages (ST1 / ST3).
+    pub(crate) pending_export: Option<PendingExport>,
     pub(crate) previews: HashMap<u64, MathPreview>,
     pub(crate) image_textures: HashMap<u64, (usize, egui::TextureHandle)>,
     /// After Tab exits a math island, place the TextEdit caret here (bytes).
@@ -414,7 +416,7 @@ fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
             pinned.push(page);
         }
     }
-    if tab.pending_export {
+    if tab.pending_export.is_some() {
         for annot in &tab.doc.session.annotations {
             if matches!(
                 annot.kind,
@@ -832,11 +834,19 @@ pub(crate) enum SaveState {
     Failed { message: String, at: Instant },
 }
 
+/// Which highlight export is waiting on glyph loads (ST1 / ST3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PendingExport {
+    Markdown,
+    Cards,
+}
+
 /// Result of an `rfd` file dialog spawned off the UI thread.
 enum DialogReply {
     Open(Option<PathBuf>),
     SaveAs { gen: u64, path: Option<PathBuf> },
     ExportMarkdown { gen: u64, path: Option<PathBuf> },
+    ExportCards { gen: u64, path: Option<PathBuf> },
 }
 
 impl MarkerApp {
@@ -900,6 +910,7 @@ impl MarkerApp {
             tile_frame: 0,
             tile_focus_tab: 0,
             tile_wanted,
+            pending_generated_csv: None,
         };
         for path in paths {
             app.open_path(path);
@@ -1024,21 +1035,36 @@ impl MarkerApp {
     /// If glyph pages are missing, sets `pending_export` and enqueues jobs;
     /// `check_pending_export` / glyph replies finish without freezing the UI.
     pub(crate) fn export_markdown(&mut self) {
+        self.begin_highlight_export(PendingExport::Markdown);
+    }
+
+    /// Export native highlights/markup as Anki-importable CSV (ST3).
+    pub(crate) fn export_cards(&mut self) {
+        self.pending_generated_csv = None;
+        self.begin_highlight_export(PendingExport::Cards);
+    }
+
+    /// Whether the optional "Generate cards" control should show (CLI on PATH).
+    pub(crate) fn assistant_is_configured(&self) -> bool {
+        assistant_configured()
+    }
+
+    fn begin_highlight_export(&mut self, kind: PendingExport) {
         let (gen, missing) = {
             let Some(tab) = self.tab_mut() else {
                 return;
             };
-            tab.pending_export = false;
+            tab.pending_export = None;
             let missing = export_missing_glyph_pages(tab);
             (tab.doc.gen, missing)
         };
         if missing.is_empty() {
-            self.open_export_dialog();
+            self.open_export_dialog_for(gen, kind);
             return;
         }
         let mut to_request = Vec::new();
         if let Some(tab) = self.tab_mut() {
-            tab.pending_export = true;
+            tab.pending_export = Some(kind);
             for page in missing {
                 if tab.glyphs_waiting.insert(page) {
                     to_request.push(page);
@@ -1052,62 +1078,71 @@ impl MarkerApp {
     }
 
     fn check_pending_export(&mut self) {
-        let gens: Vec<u64> = self
+        let pending: Vec<(u64, PendingExport)> = self
             .tabs
             .iter()
-            .filter(|tab| tab.pending_export)
-            .map(|tab| tab.doc.gen)
+            .filter_map(|tab| tab.pending_export.map(|kind| (tab.doc.gen, kind)))
             .collect();
-        for gen in gens {
+        for (gen, _) in pending {
             self.try_finish_pending_export(gen);
         }
     }
 
     fn try_finish_pending_export(&mut self, gen: u64) {
-        {
+        let kind = {
             let Some(tab) = self.tab_by_gen_mut(gen) else {
                 return;
             };
-            if !tab.pending_export {
+            let Some(kind) = tab.pending_export else {
                 return;
-            }
+            };
             if !export_missing_glyph_pages(tab).is_empty() {
                 return;
             }
-            tab.pending_export = false;
-        }
-        self.open_export_dialog_for(gen);
-    }
-
-    fn open_export_dialog(&mut self) {
-        let Some(tab) = self.tab() else {
-            return;
+            tab.pending_export = None;
+            kind
         };
-        let gen = tab.doc.gen;
-        self.open_export_dialog_for(gen);
+        self.open_export_dialog_for(gen, kind);
     }
 
-    fn open_export_dialog_for(&mut self, gen: u64) {
+    fn open_export_dialog_for(&mut self, gen: u64, kind: PendingExport) {
         if self.dialog_busy {
             return;
         }
         let Some(tab) = self.tab_by_gen(gen) else {
             return;
         };
-        let suggested = crate::export::default_export_name(&tab.doc.path);
+        let (suggested, filter_name, filter_ext, reply_kind) = match kind {
+            PendingExport::Markdown => (
+                crate::export::default_export_name(&tab.doc.path),
+                "Markdown",
+                "md",
+                PendingExport::Markdown,
+            ),
+            PendingExport::Cards => (
+                crate::export::default_cards_name(&tab.doc.path),
+                "CSV",
+                "csv",
+                PendingExport::Cards,
+            ),
+        };
         let start_dir = tab.doc.path.parent().map(|p| p.to_path_buf());
         self.dialog_busy = true;
         let tx = self.dialog_tx.clone();
         let ctx = self.egui_ctx.clone();
         thread::spawn(move || {
             let mut dialog = rfd::FileDialog::new()
-                .add_filter("Markdown", &["md"])
+                .add_filter(filter_name, &[filter_ext])
                 .set_file_name(&suggested);
             if let Some(dir) = start_dir {
                 dialog = dialog.set_directory(dir);
             }
             let path = dialog.save_file();
-            let _ = tx.send(DialogReply::ExportMarkdown { gen, path });
+            let reply = match reply_kind {
+                PendingExport::Markdown => DialogReply::ExportMarkdown { gen, path },
+                PendingExport::Cards => DialogReply::ExportCards { gen, path },
+            };
+            let _ = tx.send(reply);
             ctx.request_repaint();
         });
     }
@@ -1134,6 +1169,146 @@ impl MarkerApp {
             Ok(()) => self.error = None,
             Err(err) => {
                 self.error = Some(format!("Could not write {}: {err}", path.display()));
+            }
+        }
+    }
+
+    fn write_export_cards(&mut self, gen: u64, path: PathBuf) {
+        let csv = if let Some((pending_gen, body)) = self.pending_generated_csv.take() {
+            if pending_gen == gen {
+                body
+            } else {
+                self.pending_generated_csv = Some((pending_gen, body));
+                match self.cards_csv_for_tab(gen) {
+                    Some(csv) => csv,
+                    None => return,
+                }
+            }
+        } else {
+            match self.cards_csv_for_tab(gen) {
+                Some(csv) => csv,
+                None => return,
+            }
+        };
+        match std::fs::write(&path, csv) {
+            Ok(()) => self.error = None,
+            Err(err) => {
+                self.error = Some(format!("Could not write {}: {err}", path.display()));
+            }
+        }
+    }
+
+    fn cards_csv_for_tab(&self, gen: u64) -> Option<String> {
+        let tab = self.tab_by_gen(gen)?;
+        let doc_name = tab
+            .doc
+            .path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("document.pdf");
+        let highlights = collect_export_highlights(tab);
+        Some(crate::export::highlights_to_csv(
+            doc_name,
+            &highlights,
+            &tab.doc.glyphs,
+            &self.settings.highlight_presets,
+        ))
+    }
+
+    /// Ask the assistant for Q/A cards from the current selection (ST3).
+    ///
+    /// Uses the existing bundle + fixed prompt. Does not force agent mode on.
+    /// On completion, parses a fenced TSV; failure leaves the raw reply visible
+    /// and skips writing a file.
+    pub(crate) fn generate_cards_from_selection(&mut self) {
+        if !assistant_configured() {
+            return;
+        }
+        self.set_assistant_open(true);
+        if let Some(tab) = self.tab_mut() {
+            tab.pending_study = None;
+            tab.assistant.pending_cards_parse = None;
+        }
+        if let Some((page, raw)) = self.study_selection_text() {
+            self.apply_generate_cards(page, &raw);
+            return;
+        }
+        if let Some(tab) = self.tab_mut() {
+            tab.assistant.error =
+                Some("Select text before generating cards.".into());
+        }
+    }
+
+    fn apply_generate_cards(&mut self, page: usize, raw: &str) {
+        {
+            let Some(tab) = self.tab_mut() else {
+                return;
+            };
+            if raw.trim().is_empty() {
+                tab.assistant.error = Some("Selection has no text.".into());
+                return;
+            }
+            if tab.assistant.streaming {
+                tab.assistant.error = Some("Wait for the current reply to finish.".into());
+                return;
+            }
+            let (text, truncated) = crate::assistant::truncate_text(raw, MAX_TEXT_CHARS);
+            tab.assistant
+                .attachments
+                .retain(|a| !matches!(a, AssistantAttachment::Text { .. }));
+            tab.assistant.attachments.push(AssistantAttachment::Text {
+                page,
+                text,
+                truncated,
+            });
+            tab.assistant.draft = GENERATE_CARDS_PROMPT.to_string();
+            tab.assistant.error = None;
+            tab.assistant.status_line = None;
+            // Do not force agent mode on — leave the user's checkbox as-is.
+            tab.assistant.pending_cards_parse = Some(page);
+        }
+        self.assistant_send();
+        // Disclosure / empty-send failures leave streaming false — drop the parse flag.
+        if let Some(tab) = self.tab_mut() {
+            if !tab.assistant.streaming {
+                tab.assistant.pending_cards_parse = None;
+            }
+        }
+    }
+
+    fn finish_generated_cards(&mut self, gen: u64, page: usize, reply: &str) {
+        match crate::export::parse_cards_tsv_fence(reply) {
+            Ok(cards) => {
+                let n = cards.len();
+                let doc_name = {
+                    let Some(tab) = self.tab_by_gen(gen) else {
+                        return;
+                    };
+                    tab.doc
+                        .path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("document.pdf")
+                        .to_owned()
+                };
+                let source = format!("{doc_name}#page={}", page + 1);
+                let csv =
+                    crate::export::generated_cards_to_csv(&cards, "generated", &source);
+                self.pending_generated_csv = Some((gen, csv));
+                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                    tab.assistant.status_line =
+                        Some(format!("Parsed {n} card(s) — choose a save location."));
+                    tab.assistant.error = None;
+                }
+                self.open_export_dialog_for(gen, PendingExport::Cards);
+            }
+            Err(err) => {
+                if let Some(tab) = self.tab_by_gen_mut(gen) {
+                    tab.assistant.error = Some(format!(
+                        "Could not parse card TSV ({err}). Raw reply is above; no file written."
+                    ));
+                    tab.assistant.status_line = None;
+                }
             }
         }
     }
@@ -2544,7 +2719,7 @@ impl eframe::App for MarkerApp {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
                     || tab.search.pending
-                    || tab.pending_export
+                    || tab.pending_export.is_some()
                     || tab.assistant.streaming
                     || tab.assistant.pending_crop.is_some()
             });
@@ -2586,6 +2761,14 @@ impl MarkerApp {
             }
             Ok(DialogReply::ExportMarkdown { path: None, .. }) => {
                 self.dialog_busy = false;
+            }
+            Ok(DialogReply::ExportCards { gen, path: Some(path) }) => {
+                self.dialog_busy = false;
+                self.write_export_cards(gen, path);
+            }
+            Ok(DialogReply::ExportCards { path: None, .. }) => {
+                self.dialog_busy = false;
+                self.pending_generated_csv = None;
             }
             Err(mpsc::TryRecvError::Empty) => {}
             Err(mpsc::TryRecvError::Disconnected) => self.dialog_busy = false,
@@ -2684,7 +2867,7 @@ impl MarkerApp {
                         inflight: HashSet::new(),
                         glyphs_waiting: HashSet::new(),
                         pending_study: None,
-                        pending_export: false,
+                        pending_export: None,
                         previews: HashMap::new(),
                         image_textures: HashMap::new(),
                         pending_text_caret: None,
@@ -2878,7 +3061,7 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
-        tab.pending_export = false;
+        tab.pending_export = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
@@ -2936,7 +3119,7 @@ impl MarkerApp {
         tab.inflight.clear();
         tab.glyphs_waiting.clear();
         tab.pending_study = None;
-        tab.pending_export = false;
+        tab.pending_export = None;
         let glyphs = std::mem::take(&mut tab.doc.glyphs);
         let order = std::mem::take(&mut tab.doc.glyph_order);
         tab.doc.glyphs.clear();
@@ -5275,83 +5458,103 @@ impl MarkerApp {
             | AssistantEvent::Failed { gen, seq, .. }
             | AssistantEvent::AuthRequired { gen, seq, .. } => (*gen, *seq),
         };
-        let Some(tab) = self.tab_by_gen_mut(gen) else {
-            return;
-        };
-        if tab.assistant.request_seq != seq {
-            return;
-        }
-        match event {
-            AssistantEvent::Started { chat_id, .. } => {
-                tab.assistant.chat_id = Some(chat_id);
-                tab.assistant.status_line = Some("Streaming…".into());
+        let mut parse_cards_reply: Option<(usize, String)> = None;
+        {
+            let Some(tab) = self.tab_by_gen_mut(gen) else {
+                return;
+            };
+            if tab.assistant.request_seq != seq {
+                return;
             }
-            AssistantEvent::Delta { text, .. } => {
-                if let Some(turn) = tab
-                    .assistant
-                    .turns
-                    .iter_mut()
-                    .rev()
-                    .find(|t| t.role == AssistantRole::Assistant)
-                {
-                    turn.text.push_str(&text);
-                    turn.incomplete = true;
+            match event {
+                AssistantEvent::Started { chat_id, .. } => {
+                    tab.assistant.chat_id = Some(chat_id);
+                    tab.assistant.status_line = Some("Streaming…".into());
                 }
-            }
-            AssistantEvent::Completed { text, .. } => {
-                if let Some(turn) = tab
-                    .assistant
-                    .turns
-                    .iter_mut()
-                    .rev()
-                    .find(|t| t.role == AssistantRole::Assistant)
-                {
-                    if turn.text.is_empty() {
-                        turn.text = text;
-                    } else if !text.is_empty() && text.len() >= turn.text.len() {
-                        turn.text = text;
-                    }
-                    turn.incomplete = false;
-                }
-                tab.assistant.streaming = false;
-                // Clear busy status; panel hint shows session-alive / resume (#27).
-                tab.assistant.status_line = None;
-            }
-            AssistantEvent::Cancelled { .. } => {
-                if let Some(turn) = tab
-                    .assistant
-                    .turns
-                    .iter_mut()
-                    .rev()
-                    .find(|t| t.role == AssistantRole::Assistant)
-                {
-                    turn.incomplete = true;
-                    if turn.text.is_empty() {
-                        turn.text = "(stopped)".into();
-                    }
-                }
-                tab.assistant.streaming = false;
-                tab.assistant.status_line = Some("Stopped.".into());
-            }
-            AssistantEvent::Failed { message, .. }
-            | AssistantEvent::AuthRequired { message, .. } => {
-                tab.assistant.streaming = false;
-                tab.assistant.status_line = None;
-                tab.assistant.error = Some(message);
-                if let Some(turn) = tab
-                    .assistant
-                    .turns
-                    .iter_mut()
-                    .rev()
-                    .find(|t| t.role == AssistantRole::Assistant)
-                {
-                    if turn.text.is_empty() {
-                        tab.assistant.turns.pop();
-                    } else {
+                AssistantEvent::Delta { text, .. } => {
+                    if let Some(turn) = tab
+                        .assistant
+                        .turns
+                        .iter_mut()
+                        .rev()
+                        .find(|t| t.role == AssistantRole::Assistant)
+                    {
+                        turn.text.push_str(&text);
                         turn.incomplete = true;
                     }
                 }
+                AssistantEvent::Completed { text, .. } => {
+                    let parse_page = tab.assistant.pending_cards_parse.take();
+                    if let Some(turn) = tab
+                        .assistant
+                        .turns
+                        .iter_mut()
+                        .rev()
+                        .find(|t| t.role == AssistantRole::Assistant)
+                    {
+                        if turn.text.is_empty() {
+                            turn.text = text.clone();
+                        } else if !text.is_empty() && text.len() >= turn.text.len() {
+                            turn.text = text.clone();
+                        }
+                        turn.incomplete = false;
+                    }
+                    tab.assistant.streaming = false;
+                    // Clear busy status; panel hint shows session-alive / resume (#27).
+                    tab.assistant.status_line = None;
+                    if let Some(page) = parse_page {
+                        let final_text = tab
+                            .assistant
+                            .turns
+                            .iter()
+                            .rev()
+                            .find(|t| t.role == AssistantRole::Assistant)
+                            .map(|t| t.text.clone())
+                            .unwrap_or(text);
+                        parse_cards_reply = Some((page, final_text));
+                    }
+                }
+                AssistantEvent::Cancelled { .. } => {
+                    tab.assistant.pending_cards_parse = None;
+                    if let Some(turn) = tab
+                        .assistant
+                        .turns
+                        .iter_mut()
+                        .rev()
+                        .find(|t| t.role == AssistantRole::Assistant)
+                    {
+                        turn.incomplete = true;
+                        if turn.text.is_empty() {
+                            turn.text = "(stopped)".into();
+                        }
+                    }
+                    tab.assistant.streaming = false;
+                    tab.assistant.status_line = Some("Stopped.".into());
+                }
+                AssistantEvent::Failed { message, .. }
+                | AssistantEvent::AuthRequired { message, .. } => {
+                    tab.assistant.pending_cards_parse = None;
+                    tab.assistant.streaming = false;
+                    tab.assistant.status_line = None;
+                    tab.assistant.error = Some(message);
+                    if let Some(turn) = tab
+                        .assistant
+                        .turns
+                        .iter_mut()
+                        .rev()
+                        .find(|t| t.role == AssistantRole::Assistant)
+                    {
+                        if turn.text.is_empty() {
+                            tab.assistant.turns.pop();
+                        } else {
+                            turn.incomplete = true;
+                        }
+                    }
+                }
             }
+        }
+        if let Some((page, reply)) = parse_cards_reply {
+            self.finish_generated_cards(gen, page, &reply);
         }
     }
 

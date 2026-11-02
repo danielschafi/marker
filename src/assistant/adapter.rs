@@ -76,6 +76,14 @@ fn which_agent() -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
+/// Whether the Cursor Agent CLI binary is on PATH (or `MARKER_AGENT`).
+///
+/// Used to hide optional UI that requires the assistant (ST3). Does not check
+/// login — send still probes and reports auth errors.
+pub fn assistant_configured() -> bool {
+    which_agent().is_some()
+}
+
 fn timeout_utility_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {

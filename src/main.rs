@@ -43,6 +43,7 @@ mod worker {
 
 mod app;
 mod assistant_md;
+mod icon;
 mod platform;
 mod rich_text_edit;
 mod theme;
@@ -62,7 +63,8 @@ fn run_ui(paths: Vec<std::path::PathBuf>, inbox: Option<instance::IpcInbox>) -> 
         .with_inner_size([1280.0, 840.0])
         .with_min_inner_size([760.0, 480.0])
         .with_title("Marker")
-        .with_drag_and_drop(true);
+        .with_drag_and_drop(true)
+        .with_icon(icon::window_icon());
 
     let options = eframe::NativeOptions {
         viewport,

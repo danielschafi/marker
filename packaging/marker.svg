@@ -1,7 +1,10 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" role="img" aria-label="Marker">
-  <rect width="128" height="128" rx="28" fill="#1a1a1e"/>
-  <path d="M34 86 L78 28 L98 42 L54 100 Z" fill="#f5d76e"/>
-  <path d="M34 86 L42 106 L54 100 Z" fill="#e8b84a"/>
-  <rect x="72" y="24" width="28" height="12" transform="rotate(35 86 30)" fill="#f7f2d8"/>
-  <path d="M28 108 H92" stroke="#f5d76e" stroke-width="6" stroke-linecap="round" opacity="0.55"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="marker">
+  <rect width="512" height="512" rx="116" fill="#1C1C1F"/>
+  <path d="M152 96H300L376 172V400a16 16 0 0 1-16 16H152a16 16 0 0 1-16-16V112a16 16 0 0 1 16-16Z" fill="#FFFFFF"/>
+  <path d="M300 96V156a16 16 0 0 0 16 16H376Z" fill="#D6D6DB"/>
+  <rect x="176" y="204" width="104" height="14" rx="7" fill="#B8B8BF"/>
+  <rect x="148" y="250" width="256" height="48" rx="14" fill="#FFC93C"/>
+  <rect x="176" y="266" width="164" height="16" rx="8" fill="#1C1C1F"/>
+  <rect x="176" y="330" width="176" height="14" rx="7" fill="#B8B8BF"/>
+  <rect x="176" y="364" width="108" height="14" rx="7" fill="#B8B8BF"/>
 </svg>

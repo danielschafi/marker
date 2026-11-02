@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="marker">
+  <rect width="512" height="512" rx="116" fill="#1C1C1F"/>
+  <path d="M152 96H300L376 172V400a16 16 0 0 1-16 16H152a16 16 0 0 1-16-16V112a16 16 0 0 1 16-16Z" fill="#FFFFFF"/>
+  <path d="M300 96V156a16 16 0 0 0 16 16H376Z" fill="#D6D6DB"/>
+  <rect x="176" y="204" width="104" height="14" rx="7" fill="#B8B8BF"/>
+  <rect x="148" y="250" width="256" height="48" rx="14" fill="#FFC93C"/>
+  <rect x="176" y="266" width="164" height="16" rx="8" fill="#1C1C1F"/>
+  <rect x="176" y="330" width="176" height="14" rx="7" fill="#B8B8BF"/>
+  <rect x="176" y="364" width="108" height="14" rx="7" fill="#B8B8BF"/>
+</svg>

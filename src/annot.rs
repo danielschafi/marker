@@ -282,7 +282,6 @@ pub struct Session {
 }
 
 impl Session {
-    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             annotations: Vec::new(),
@@ -444,6 +443,12 @@ impl Session {
             }
         }
         self.epoch += 1;
+    }
+}
+
+impl Default for Session {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

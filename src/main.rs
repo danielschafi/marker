@@ -1,18 +1,48 @@
-mod annot;
+//! Marker GUI binary. Headless modules live in the [`marker`] library crate;
+//! thin re-exports keep existing `crate::…` paths working in binary modules.
+
+mod annot {
+    pub use marker::annot::*;
+}
+mod assistant {
+    pub use marker::assistant::*;
+}
+mod cite {
+    pub use marker::cite::*;
+}
+mod export {
+    pub use marker::export::*;
+}
+mod geom {
+    pub use marker::geom::*;
+}
+mod instance {
+    pub use marker::instance::*;
+}
+mod math {
+    pub use marker::math::*;
+}
+mod math_spans {
+    pub use marker::math_spans::*;
+}
+mod pdf {
+    pub use marker::pdf::*;
+}
+mod rich_text {
+    pub use marker::rich_text::*;
+}
+mod settings {
+    pub use marker::settings::*;
+}
+mod undo {
+    pub use marker::undo::*;
+}
+
 mod app;
-mod assistant;
-mod cite;
-mod export;
-mod geom;
-mod instance;
-mod math;
-mod math_spans;
-mod pdf;
 mod platform;
-mod settings;
+mod rich_text_edit;
 mod theme;
 mod ui;
-mod undo;
 mod view;
 
 fn main() -> eframe::Result<()> {

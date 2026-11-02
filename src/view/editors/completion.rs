@@ -6,7 +6,7 @@ use egui::{Event, Frame, Id, Key, Modifiers, Pos2};
 
 use super::math_input;
 use crate::app::MarkerApp;
-use crate::math::rich_text::EditorOutput;
+use crate::rich_text_edit::EditorOutput;
 
 fn completion_dismissed_id(text_edit_id: Id) -> Id {
     text_edit_id.with("math-completion-dismissed")

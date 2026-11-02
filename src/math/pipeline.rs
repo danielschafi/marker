@@ -13,6 +13,7 @@ use crate::annot::{AnnotKind, Annotation};
 use crate::geom::Rgb;
 use crate::math_spans;
 use crate::pdf::DocId;
+use crate::worker::Wake;
 
 use super::{
     map_typst_error, needs_sharper_raster, pdf_plan, raster_scale_for, wants_display_math,
@@ -123,9 +124,9 @@ pub struct MathPipeline {
 }
 
 impl MathPipeline {
-    pub fn spawn(ctx: egui::Context) -> Self {
+    pub fn spawn(wake: Arc<dyn Wake>) -> Self {
         Self {
-            worker: MathWorker::spawn(ctx),
+            worker: MathWorker::spawn(wake),
             cache: super::MathCache::new(),
             seq: 1,
             deadlines: HashMap::new(),

@@ -8,7 +8,7 @@ use std::time::Duration;
 use super::{DocId, Error, TileKey};
 use crate::annot::{Annotation, PageGlyphs};
 use crate::geom::PdfRect;
-use crate::worker::{self, Channel, ShutdownJob};
+use crate::worker::{self, Channel, ShutdownJob, Wake};
 
 use super::engine::{
     CropImage, DocumentEngine, OutlineNode, PageInfo, SaveSnapshot, SavedXref, ThumbImage,
@@ -194,21 +194,21 @@ pub struct PdfWorker {
 
 impl PdfWorker {
     pub fn spawn(
-        ctx: egui::Context,
+        wake: Arc<dyn Wake>,
         tile_wanted: Arc<Mutex<HashMap<DocId, HashSet<TileKey>>>>,
         thumb_wanted: Arc<Mutex<HashMap<DocId, HashSet<usize>>>>,
     ) -> Self {
         let (read_tx, read_rx) = mpsc::channel();
         let reads_for_tiles = read_tx.clone();
         let reads_for_reader = read_tx.clone();
-        let channel = Channel::spawn("marker-pdf", ctx, move |ctx, job_rx, reply_tx| {
+        let channel = Channel::spawn("marker-pdf", wake, move |wake, job_rx, reply_tx| {
             let replies_for_reader = reply_tx.clone();
-            let ctx_for_reader = ctx.clone();
+            let wake_for_reader = Arc::clone(&wake);
             thread::Builder::new()
                 .name("marker-pdf-read".into())
                 .spawn(move || {
                     reader_loop(
-                        ctx_for_reader,
+                        wake_for_reader,
                         read_rx,
                         reads_for_reader,
                         replies_for_reader,
@@ -216,7 +216,7 @@ impl PdfWorker {
                 })
                 .expect("pdf read thread");
             worker_loop(
-                ctx,
+                wake,
                 job_rx,
                 reply_tx,
                 reads_for_tiles,
@@ -380,7 +380,7 @@ fn engine_mut(
 }
 
 struct WorkerCtx<'a> {
-    ctx: &'a egui::Context,
+    wake: &'a dyn Wake,
     replies: &'a Sender<PdfReply>,
     reads: &'a Sender<ReadJob>,
     engines: &'a mut HashMap<DocId, DocumentEngine>,
@@ -388,7 +388,7 @@ struct WorkerCtx<'a> {
 
 impl WorkerCtx<'_> {
     fn send(&self, msg: PdfReply) {
-        worker::reply(self.ctx, self.replies, msg);
+        worker::reply(self.wake, self.replies, msg);
     }
 }
 
@@ -687,7 +687,7 @@ fn dequeue_job(jobs: &Receiver<PdfJob>, queued: &mut VecDeque<PdfJob>) -> Option
 }
 
 fn worker_loop(
-    ctx: egui::Context,
+    wake: Arc<dyn Wake>,
     jobs: Receiver<PdfJob>,
     replies: Sender<PdfReply>,
     reads: Sender<ReadJob>,
@@ -698,7 +698,7 @@ fn worker_loop(
     let mut queued = VecDeque::new();
     while let Some(job) = dequeue_job(&jobs, &mut queued) {
         let mut worker = WorkerCtx {
-            ctx: &ctx,
+            wake: wake.as_ref(),
             replies: &replies,
             reads: &reads,
             engines: &mut engines,
@@ -746,7 +746,7 @@ struct ReaderState {
 }
 
 fn reader_loop(
-    ctx: egui::Context,
+    wake: Arc<dyn Wake>,
     jobs: Receiver<ReadJob>,
     jobs_tx: Sender<ReadJob>,
     replies: Sender<PdfReply>,
@@ -760,7 +760,7 @@ fn reader_loop(
     };
     let mut queued = VecDeque::new();
     let io = ReadIo {
-        ctx: &ctx,
+        wake: wake.as_ref(),
         replies: &replies,
         jobs_tx: &jobs_tx,
     };
@@ -890,7 +890,7 @@ fn install_engine(
 }
 
 struct ReadIo<'a> {
-    ctx: &'a egui::Context,
+    wake: &'a dyn Wake,
     replies: &'a Sender<PdfReply>,
     jobs_tx: &'a Sender<ReadJob>,
 }
@@ -959,7 +959,7 @@ fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, doc_id: DocId, page: usiz
     };
     match engine.glyphs(page) {
         Ok(glyphs) => worker::reply(
-            io.ctx,
+            io.wake,
             io.replies,
             PdfReply::Glyphs {
                 doc_id,
@@ -967,7 +967,7 @@ fn handle_glyphs(io: &ReadIo<'_>, state: &ReaderState, doc_id: DocId, page: usiz
                 glyphs,
             },
         ),
-        Err(err) => worker::reply(io.ctx, io.replies, PdfReply::failed(doc_id, err)),
+        Err(err) => worker::reply(io.wake, io.replies, PdfReply::failed(doc_id, err)),
     }
 }
 
@@ -1004,12 +1004,12 @@ fn handle_search(
         }
     }
     if let Some(message) = failed {
-        worker::reply(io.ctx, io.replies, PdfReply::failed(doc_id, message));
+        worker::reply(io.wake, io.replies, PdfReply::failed(doc_id, message));
         return;
     }
     let done = end >= page_count;
     worker::reply(
-        io.ctx,
+        io.wake,
         io.replies,
         PdfReply::Search {
             doc_id,
@@ -1102,10 +1102,10 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn drop_shuts_down_marker_pdf_threads() {
-        let ctx = egui::Context::default();
+        let wake = crate::worker::NoopWake::arc();
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
-        let worker = PdfWorker::spawn(ctx, tile_wanted, thumb_wanted);
+        let worker = PdfWorker::spawn(wake, tile_wanted, thumb_wanted);
         // Reader is spawned from inside the tile thread; wait until both exist.
         let appear = Instant::now() + Duration::from_secs(2);
         loop {
@@ -1155,10 +1155,10 @@ mod tests {
         let path = dir.join("sample.pdf");
         write_sample(&path, 4);
 
-        let ctx = egui::Context::default();
+        let wake = crate::worker::NoopWake::arc();
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
-        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
+        let worker = PdfWorker::spawn(wake, Arc::clone(&tile_wanted), thumb_wanted);
         let doc_id = DocId(3);
         worker.open(doc_id, path);
         let opened = wait_until(&worker, |replies| {
@@ -1267,10 +1267,10 @@ mod tests {
     fn bench_search_overlaps_tiles() {
         let path =
             PathBuf::from(std::env::var("BENCH_PDF").unwrap_or("/tmp/pdfs/progit.pdf".into()));
-        let ctx = egui::Context::default();
+        let wake = crate::worker::NoopWake::arc();
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
-        let worker = PdfWorker::spawn(ctx, Arc::clone(&tile_wanted), thumb_wanted);
+        let worker = PdfWorker::spawn(wake, Arc::clone(&tile_wanted), thumb_wanted);
         worker.open(DocId(1), path);
         let opened = wait_until(&worker, |replies| {
             replies

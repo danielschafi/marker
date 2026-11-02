@@ -1,5 +1,5 @@
 use crate::pdf::DocId;
-use crate::worker::{self, Channel, ShutdownJob};
+use crate::worker::{self, Channel, ShutdownJob, Wake};
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -51,11 +51,11 @@ pub struct AssistantWorker {
 }
 
 impl AssistantWorker {
-    pub fn spawn(ctx: egui::Context) -> Self {
+    pub fn spawn(wake: Arc<dyn Wake>) -> Self {
         let active = Arc::new(Mutex::new(None));
         let active_loop = Arc::clone(&active);
-        let channel = Channel::spawn("marker-assistant", ctx, move |ctx, jobs, events| {
-            worker_loop(ctx, jobs, events, active_loop);
+        let channel = Channel::spawn("marker-assistant", wake, move |wake, jobs, events| {
+            worker_loop(wake, jobs, events, active_loop);
         });
         Self { channel, active }
     }
@@ -97,12 +97,12 @@ impl Drop for AssistantWorker {
     }
 }
 
-fn emit(ctx: &egui::Context, events: &Sender<AssistantEvent>, event: AssistantEvent) {
-    worker::reply(ctx, events, event);
+fn emit(wake: &dyn Wake, events: &Sender<AssistantEvent>, event: AssistantEvent) {
+    worker::reply(wake, events, event);
 }
 
 fn worker_loop(
-    ctx: egui::Context,
+    wake: Arc<dyn Wake>,
     jobs: Receiver<Job>,
     events: Sender<AssistantEvent>,
     active: Arc<Mutex<Option<ActiveChild>>>,
@@ -116,7 +116,7 @@ fn worker_loop(
             }
             Job::Send(request) => {
                 clear_any_active(&active);
-                run_turn(&ctx, &mut capability, request, &events, &active);
+                run_turn(&wake, &mut capability, request, &events, &active);
             }
         }
     }
@@ -148,7 +148,7 @@ fn clear_active_if(active: &Arc<Mutex<Option<ActiveChild>>>, doc_id: DocId, seq:
 }
 
 fn run_turn(
-    ctx: &egui::Context,
+    wake: &Arc<dyn Wake>,
     capability: &mut Option<AgentCapability>,
     request: AssistantRequest,
     events: &Sender<AssistantEvent>,
@@ -166,7 +166,7 @@ fn run_turn(
             }
             Err(message) => {
                 emit(
-                    ctx,
+                    wake.as_ref(),
                     events,
                     AssistantEvent::Failed {
                         doc_id,
@@ -180,7 +180,7 @@ fn run_turn(
     };
     if !cap.logged_in {
         emit(
-            ctx,
+            wake.as_ref(),
             events,
             AssistantEvent::AuthRequired {
                 doc_id,
@@ -199,7 +199,7 @@ fn run_turn(
             Ok(id) => id,
             Err(message) => {
                 emit(
-                    ctx,
+                    wake.as_ref(),
                     events,
                     AssistantEvent::Failed {
                         doc_id,
@@ -216,7 +216,7 @@ fn run_turn(
         Ok(b) => b,
         Err(message) => {
             emit(
-                ctx,
+                wake.as_ref(),
                 events,
                 AssistantEvent::Failed {
                     doc_id,
@@ -229,7 +229,7 @@ fn run_turn(
     };
 
     emit(
-        ctx,
+        wake.as_ref(),
         events,
         AssistantEvent::Started {
             doc_id,
@@ -244,7 +244,7 @@ fn run_turn(
         Err(message) => {
             cleanup_bundle(&bundle);
             emit(
-                ctx,
+                wake.as_ref(),
                 events,
                 AssistantEvent::Failed {
                     doc_id,
@@ -269,13 +269,13 @@ fn run_turn(
     let stdout = child.stdout.take();
     let events_stream = events.clone();
     let cancel_stream = Arc::clone(&cancel);
-    let ctx_stream = ctx.clone();
+    let wake_stream = Arc::clone(wake);
     let reader = thread::spawn(move || {
         stream_stdout(
             stdout,
             doc_id,
             seq,
-            &ctx_stream,
+            wake_stream.as_ref(),
             &events_stream,
             &cancel_stream,
         )
@@ -311,7 +311,11 @@ fn run_turn(
     cleanup_bundle(&bundle);
 
     if was_cancelled {
-        emit(ctx, events, AssistantEvent::Cancelled { doc_id, seq });
+        emit(
+            wake.as_ref(),
+            events,
+            AssistantEvent::Cancelled { doc_id, seq },
+        );
         return;
     }
 
@@ -328,7 +332,7 @@ fn run_turn(
                 .error
                 .unwrap_or_else(|| format!("Cursor Agent exited with {status}"));
             emit(
-                ctx,
+                wake.as_ref(),
                 events,
                 AssistantEvent::Failed {
                     doc_id,
@@ -341,7 +345,7 @@ fn run_turn(
     }
 
     emit(
-        ctx,
+        wake.as_ref(),
         events,
         AssistantEvent::Completed {
             doc_id,
@@ -362,7 +366,7 @@ fn stream_stdout(
     stdout: Option<std::process::ChildStdout>,
     doc_id: DocId,
     seq: u64,
-    ctx: &egui::Context,
+    wake: &dyn Wake,
     events: &Sender<AssistantEvent>,
     cancel: &AtomicBool,
 ) -> StreamOutcome {
@@ -395,7 +399,7 @@ fn stream_stdout(
                     if !assembled.ends_with(&text) {
                         assembled.push_str(&text);
                         emit(
-                            ctx,
+                            wake,
                             events,
                             AssistantEvent::Delta {
                                 doc_id,
@@ -420,7 +424,7 @@ fn stream_stdout(
                         .unwrap_or("Cursor Agent reported an error.")
                         .to_string();
                     emit(
-                        ctx,
+                        wake,
                         events,
                         AssistantEvent::Failed {
                             doc_id,
@@ -436,7 +440,11 @@ fn stream_stdout(
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| assembled.clone());
                     assembled = text.clone();
-                    emit(ctx, events, AssistantEvent::Completed { doc_id, seq, text });
+                    emit(
+                        wake,
+                        events,
+                        AssistantEvent::Completed { doc_id, seq, text },
+                    );
                 }
             }
             _ => {}
@@ -597,8 +605,8 @@ echo '{"type":"result","subtype":"success","is_error":false,"result":"Hello"}'
         let stdout = child.stdout.take();
         let (tx, rx) = std::sync::mpsc::channel();
         let cancel = AtomicBool::new(false);
-        let ctx = egui::Context::default();
-        let outcome = stream_stdout(stdout, DocId(1), 1, &ctx, &tx, &cancel);
+        let wake = crate::worker::NoopWake;
+        let outcome = stream_stdout(stdout, DocId(1), 1, &wake, &tx, &cancel);
         let _ = child.wait();
         assert!(outcome.had_result);
         let events: Vec<_> = rx.try_iter().collect();

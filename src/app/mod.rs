@@ -21,6 +21,7 @@ use crate::settings::Settings;
 use crate::ui;
 use crate::undo::{Direction, PageOpKind, StepOutcome, UndoEntry};
 use crate::view::{self, viewport};
+use crate::worker::EguiWake;
 use egui_commonmark::CommonMarkCache;
 
 /// Identity of one open tab in the strip (stable across reorders / closes).
@@ -295,8 +296,9 @@ impl MarkerApp {
         ui::apply_theme(&cc.egui_ctx);
         let (dialog_tx, dialog_rx) = mpsc::channel();
         let egui_ctx = cc.egui_ctx.clone();
+        let wake = EguiWake::arc(egui_ctx.clone());
         if let Some(inbox) = ipc.as_ref() {
-            inbox.bind_ctx(egui_ctx.clone());
+            inbox.bind_wake(Arc::clone(&wake));
         }
         let tile_wanted = Arc::new(Mutex::new(HashMap::new()));
         let thumb_wanted = Arc::new(Mutex::new(HashMap::new()));
@@ -325,12 +327,12 @@ impl MarkerApp {
             vim_count: 0,
             vim_g: false,
             worker: PdfWorker::spawn(
-                egui_ctx.clone(),
+                Arc::clone(&wake),
                 Arc::clone(&tile_wanted),
                 Arc::clone(&thumb_wanted),
             ),
-            math: MathPipeline::spawn(egui_ctx.clone()),
-            assistant: AssistantWorker::spawn(egui_ctx.clone()),
+            math: MathPipeline::spawn(Arc::clone(&wake)),
+            assistant: AssistantWorker::spawn(wake),
             next_doc_id: DocId(1),
             next_tab_id: TabId(1),
             dialog_tx,

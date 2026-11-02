@@ -189,7 +189,9 @@ pub(crate) struct Tab {
     pub(crate) detach_after_save: bool,
     pub(crate) outline_open: bool,
     pub(crate) annots_open: bool,
+    pub(crate) review_open: bool,
     pub(crate) annot_sidebar: AnnotSidebarState,
+    pub(crate) review: ReviewState,
     pub(crate) assistant: TabAssistant,
     pub(crate) search: SearchState,
     pub(crate) last_hl: Option<(Instant, usize, u32, Option<u64>)>,
@@ -614,6 +616,24 @@ pub(crate) struct AnnotSidebarState {
     pub(crate) kinds: HashSet<AnnotFilterKind>,
     /// Empty means every color. Non-empty is an OR of selected palette colors.
     pub(crate) colors: Vec<Rgb>,
+}
+
+/// How the review panel buckets highlights and notes (ST4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub(crate) enum ReviewGroupMode {
+    #[default]
+    Preset,
+    Outline,
+}
+
+/// Local UI state for the review panel. Never written to the PDF.
+#[derive(Default)]
+pub(crate) struct ReviewState {
+    pub(crate) group_by: ReviewGroupMode,
+    /// When true, rows show only the prompt (page + preset) until clicked.
+    pub(crate) hide_text: bool,
+    /// Annot ids whose quote is revealed while `hide_text` is on.
+    pub(crate) revealed: HashSet<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2881,7 +2901,9 @@ impl MarkerApp {
                         detach_after_save: false,
                         outline_open: has_outline,
                         annots_open: false,
+                        review_open: false,
                         annot_sidebar: AnnotSidebarState::default(),
+                        review: ReviewState::default(),
                         assistant: TabAssistant::default(),
                         search: SearchState::default(),
                         last_hl: None,

@@ -81,10 +81,16 @@ fn tab_bar(app: &mut MarkerApp, ctx: &egui::Context) {
             let center_reserve = 160.0;
             let left_rect = Rect::from_min_max(
                 row.left_top(),
-                Pos2::new((row.center().x - center_reserve).max(row.left() + 8.0), row.bottom()),
+                Pos2::new(
+                    (row.center().x - center_reserve).max(row.left() + 8.0),
+                    row.bottom(),
+                ),
             );
             let right_rect = Rect::from_min_max(
-                Pos2::new((row.center().x + center_reserve).min(row.right() - 8.0), row.top()),
+                Pos2::new(
+                    (row.center().x + center_reserve).min(row.right() - 8.0),
+                    row.top(),
+                ),
                 row.right_bottom(),
             );
 
@@ -131,9 +137,7 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
     }
     if app.tab().is_some()
         && chrome_button(ui, "Cards", false)
-            .on_hover_text(
-                "Export highlights as CSV for Anki import (cloze or front/back)",
-            )
+            .on_hover_text("Export highlights as CSV for Anki import (cloze or front/back)")
             .clicked()
     {
         app.export_cards();
@@ -193,9 +197,7 @@ fn chrome_nav(app: &mut MarkerApp, ui: &mut egui::Ui) {
             app.toggle_preset_editor();
         }
         if chrome_button(ui, "Zen", app.zen)
-            .on_hover_text(
-                "Fullscreen reading; chrome hides until the pointer hits the top (F11)",
-            )
+            .on_hover_text("Fullscreen reading; chrome hides until the pointer hits the top (F11)")
             .clicked()
         {
             app.toggle_zen(ui.ctx());
@@ -339,7 +341,11 @@ fn tab_list_row(
     drop_target: bool,
 ) -> TabAction {
     let colors = p(ui.ctx());
-    let color = if selected { colors.text } else { colors.text_dim };
+    let color = if selected {
+        colors.text
+    } else {
+        colors.text_dim
+    };
     let galley = ui.painter().layout_no_wrap(
         name.to_owned(),
         FontId::new(12.5, FontFamily::Proportional),
@@ -399,11 +405,7 @@ fn tab_list_row(
             close_color,
         );
         close.widget_info(|| {
-            WidgetInfo::labeled(
-                WidgetType::Button,
-                ui.is_enabled(),
-                format!("Close {name}"),
-            )
+            WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), format!("Close {name}"))
         });
         let close = close.on_hover_text("Close tab (Ctrl+W)");
         close_clicked = close.clicked() || close.middle_clicked();
@@ -412,9 +414,8 @@ fn tab_list_row(
     if response.dragged() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
     }
-    response.widget_info(|| {
-        WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), selected, name)
-    });
+    response
+        .widget_info(|| WidgetInfo::selected(WidgetType::Button, ui.is_enabled(), selected, name));
     let response = response.on_hover_text("Drag to split · right-click for layout");
 
     TabAction {
@@ -499,7 +500,9 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         12.0
     };
 
-    let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+    let pointer = ctx
+        .pointer_interact_pos()
+        .or_else(|| ctx.pointer_latest_pos());
     let drag_src = app.tab_drag;
 
     let area = egui::Area::new(Id::new("marker-tab-list"))
@@ -509,24 +512,17 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
         .show(ctx, |ui| {
             egui::Frame::popup(ui.style())
                 .fill(colors.chrome)
-                .stroke(Stroke::new(1.0, colors.hairline))
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
                 .corner_radius(CornerRadius::same(10))
                 .inner_margin(egui::Margin::same(6))
                 .show(ui, |ui| {
                     ui.set_width(row_width);
                     ui.spacing_mut().item_spacing = vec2(0.0, 2.0);
                     for (index, name, selected, dirty) in &names {
-                        let is_drop = drop_over == Some(*index)
-                            && drag_src.is_some_and(|src| src != *index);
-                        let action = tab_list_row(
-                            ui,
-                            name,
-                            *selected,
-                            *dirty,
-                            *index,
-                            row_width,
-                            is_drop,
-                        );
+                        let is_drop =
+                            drop_over == Some(*index) && drag_src.is_some_and(|src| src != *index);
+                        let action =
+                            tab_list_row(ui, name, *selected, *dirty, *index, row_width, is_drop);
                         if action.hovered {
                             keep_alive = true;
                         }
@@ -540,17 +536,9 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
                             drag_tab = Some(*index);
                         }
                         if action.menu && !dragging {
-                            tab_menu = action
-                                .pointer
-                                .map(|pos| (*index, pos))
-                                .or_else(|| {
-                                    Some((
-                                        *index,
-                                        ui.ctx()
-                                            .pointer_latest_pos()
-                                            .unwrap_or(Pos2::ZERO),
-                                    ))
-                                });
+                            tab_menu = action.pointer.map(|pos| (*index, pos)).or_else(|| {
+                                Some((*index, ui.ctx().pointer_latest_pos().unwrap_or(Pos2::ZERO)))
+                            });
                         }
                     }
                 });
@@ -602,9 +590,9 @@ fn paint_tab_list(app: &mut MarkerApp, ctx: &egui::Context, show_chrome: bool) {
 
     let pinned = matches!(app.tab_list, Some(TabListState::Pinned));
     // Title / indicator toggles already ran this frame; ignore those clicks for dismiss.
-    let chrome_toggle = ["marker-current-tab", "marker-tabs-indicator"].iter().any(|id| {
-        ctx.read_response(Id::new(*id)).is_some_and(|r| r.clicked())
-    });
+    let chrome_toggle = ["marker-current-tab", "marker-tabs-indicator"]
+        .iter()
+        .any(|id| ctx.read_response(Id::new(*id)).is_some_and(|r| r.clicked()));
     let outside = pinned
         && !dragging
         && ctx.input(|input| input.pointer.button_clicked(PointerButton::Primary))
@@ -745,17 +733,16 @@ fn search_bar(app: &mut MarkerApp, ctx: &egui::Context) {
                                 } else {
                                     Color32::TRANSPARENT
                                 };
-                                let text = if selected {
-                                    colors.accent
-                                } else {
-                                    colors.text
-                                };
+                                let text = if selected { colors.accent } else { colors.text };
                                 let response = ui.add(
                                     Button::new(RichText::new(label).size(12.0).color(text))
                                         .fill(fill)
                                         .stroke(Stroke::NONE)
                                         .corner_radius(4.0)
-                                        .min_size(Vec2::new(ui.available_width(), SEARCH_HIT_ROW_H)),
+                                        .min_size(Vec2::new(
+                                            ui.available_width(),
+                                            SEARCH_HIT_ROW_H,
+                                        )),
                                 );
                                 if response.clicked() {
                                     tab.search.current = index;
@@ -803,9 +790,7 @@ fn document_controls(app: &mut MarkerApp, ui: &mut egui::Ui) {
         (page, count)
     });
     let want_page_focus = app.page_focus;
-    let dirty = app
-        .tab()
-        .is_some_and(|tab| tab.doc.session.is_dirty());
+    let dirty = app.tab().is_some_and(|tab| tab.doc.session.is_dirty());
     let notice = app.tab().and_then(|tab| match &tab.save {
         SaveState::Clean | SaveState::Dirty { .. } => None,
         SaveState::Saving => Some((
@@ -943,8 +928,7 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
     } else {
         colors.chrome_raised
     };
-    ui.painter()
-        .rect_filled(rect, CornerRadius::same(5), fill);
+    ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
     ui.painter().text(
         rect.center(),
         Align2::CENTER_CENTER,
@@ -959,9 +943,7 @@ fn tabs_indicator_button(app: &mut MarkerApp, ui: &mut egui::Ui) {
     if response.clicked() {
         app.toggle_tab_list();
     }
-    response.widget_info(|| {
-        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Open tabs")
-    });
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), "Open tabs"));
     response.on_hover_text("Open tabs · Ctrl+Tab to cycle");
 }
 
@@ -974,12 +956,10 @@ fn control_cluster(ui: &mut egui::Ui, add_contents: impl FnOnce(&mut egui::Ui)) 
         .begin(ui);
     prepared.content_ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     prepared.content_ui.spacing_mut().button_padding = vec2(0.0, 0.0);
-    prepared
-        .content_ui
-        .horizontal(|ui| {
-            ui.set_height(CONTROL_H);
-            add_contents(ui);
-        });
+    prepared.content_ui.horizontal(|ui| {
+        ui.set_height(CONTROL_H);
+        add_contents(ui);
+    });
     prepared.end(ui);
 }
 
@@ -989,7 +969,7 @@ fn cluster_sep(ui: &mut egui::Ui) {
     ui.painter().vline(
         rect.center().x,
         (rect.top() - 1.0)..=(rect.bottom() + 1.0),
-        Stroke::new(1.0, colors.hairline),
+        Stroke::new(1.0_f32, colors.hairline),
     );
 }
 
@@ -1004,8 +984,7 @@ fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response 
         Color32::TRANSPARENT
     };
     if fill != Color32::TRANSPARENT {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(5), fill);
+        ui.painter().rect_filled(rect, CornerRadius::same(5), fill);
     }
     ui.painter().text(
         rect.center(),
@@ -1015,9 +994,7 @@ fn cluster_button(ui: &mut egui::Ui, label: &str, size: Vec2) -> egui::Response 
         colors.text,
     );
     let access_name = cluster_button_name(label);
-    response.widget_info(|| {
-        WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), access_name)
-    });
+    response.widget_info(|| WidgetInfo::labeled(WidgetType::Button, ui.is_enabled(), access_name));
     response
 }
 
@@ -1265,7 +1242,7 @@ fn outline_panel(app: &mut MarkerApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::new()
                 .fill(colors.chrome)
-                .stroke(Stroke::new(1.0, colors.hairline))
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
                 .inner_margin(10.0),
         )
         .show(ctx, |ui| {
@@ -1358,8 +1335,8 @@ fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                         let aspect = aspects.get(page).copied().unwrap_or(1.414);
                         let img_h = THUMB_PANEL_IMG_W * aspect;
                         let row_h = img_h + 22.0;
-                        let (row_rect, response) =
-                            ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
+                        let (row_rect, response) = ui
+                            .allocate_exact_size(vec2(ui.available_width(), row_h), Sense::click());
                         if clip.intersects(row_rect) {
                             wanted.push(page);
                         }
@@ -1400,11 +1377,7 @@ fn thumbs_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                             Align2::CENTER_TOP,
                             label,
                             FontId::proportional(11.0),
-                            if selected {
-                                colors.accent
-                            } else {
-                                colors.text
-                            },
+                            if selected { colors.accent } else { colors.text },
                         );
                         if response.clicked() {
                             jump = Some(page);
@@ -1607,11 +1580,7 @@ fn review_panel(app: &mut MarkerApp, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 ui.label(RichText::new("Review").strong().size(14.0));
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .small_button("×")
-                        .on_hover_text("Hide review")
-                        .clicked()
-                    {
+                    if ui.small_button("×").on_hover_text("Hide review").clicked() {
                         close = true;
                     }
                 });
@@ -1738,9 +1707,7 @@ fn review_row_data(
             };
             (annot_kind_label(&annot.kind), Some(*color), quote)
         }
-        AnnotKind::Note { content, color, .. } => {
-            ("Note", Some(*color), content.clone())
-        }
+        AnnotKind::Note { content, color, .. } => ("Note", Some(*color), content.clone()),
         _ => return None,
     };
     let preset = color
@@ -1853,12 +1820,7 @@ fn review_row(ui: &mut egui::Ui, row: &ReviewRow, show_quote: bool) -> egui::Res
                                 .color(colors.text.gamma_multiply(0.85)),
                         );
                     } else {
-                        ui.label(
-                            RichText::new("Click to reveal")
-                                .size(11.0)
-                                .italics()
-                                .weak(),
-                        );
+                        ui.label(RichText::new("Click to reveal").size(11.0).italics().weak());
                     }
                 });
             });
@@ -1929,7 +1891,11 @@ fn annot_row_matches(
         "{} {} {}",
         row.kind_label,
         row.snippet,
-        if row.read_only { "read-only imported" } else { "" }
+        if row.read_only {
+            "read-only imported"
+        } else {
+            ""
+        }
     )
     .to_ascii_lowercase();
     hay.contains(query)
@@ -2092,14 +2058,14 @@ fn annot_snippet(tab: &Tab, annot: &Annotation) -> String {
 }
 
 fn one_line_snippet(text: &str, max_chars: usize) -> String {
-    let collapsed: String = text
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let collapsed: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
     if collapsed.chars().count() <= max_chars {
         return collapsed;
     }
-    let mut out: String = collapsed.chars().take(max_chars.saturating_sub(1)).collect();
+    let mut out: String = collapsed
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect();
     out.push('…');
     out
 }
@@ -2109,7 +2075,7 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
         return;
     }
     let colors = p(ctx);
-    let max_w = (ctx.content_rect().width() * 0.45).min(640.0).max(300.0);
+    let max_w = (ctx.content_rect().width() * 0.45).clamp(300.0, 640.0);
     let mut send = false;
     let mut stop = false;
     let mut new_chat = false;
@@ -2128,7 +2094,7 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
         .frame(
             egui::Frame::new()
                 .fill(colors.chrome)
-                .stroke(Stroke::new(1.0, colors.hairline))
+                .stroke(Stroke::new(1.0_f32, colors.hairline))
                 .inner_margin(10.0),
         )
         .show(ctx, |ui| {
@@ -2193,11 +2159,10 @@ fn assistant_panel(app: &mut MarkerApp, ctx: &egui::Context) {
                 {
                     begin_region = true;
                 }
-                if streaming {
-                    if ui.small_button("Stop").on_hover_text("Ctrl+.").clicked() {
+                if streaming
+                    && ui.small_button("Stop").on_hover_text("Ctrl+.").clicked() {
                         stop = true;
                     }
-                }
             });
 
             let attachments: Vec<(String, Option<egui::TextureHandle>)> = app
@@ -2404,12 +2369,7 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
                                     ui.label(&turn.text);
                                 }
                             } else if math_spans::has_math(&turn.text) {
-                                paint_assistant_answer_math(
-                                    ui,
-                                    math_cache,
-                                    &turn.text,
-                                    math_color,
-                                );
+                                paint_assistant_answer_math(ui, math_cache, &turn.text, math_color);
                             } else {
                                 crate::assistant::show_markdown(ui, md_cache, &turn.text);
                             }
@@ -2650,7 +2610,11 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
     let icon = Rect::from_center_size(rect.center() + vec2(-2.5, -0.5), Vec2::splat(13.0));
     let color = if selected { colors.accent } else { colors.text };
     paint_tool_icon(ui.painter(), icon, tool, color);
-    let key_color = if selected { colors.accent } else { colors.text_dim };
+    let key_color = if selected {
+        colors.accent
+    } else {
+        colors.text_dim
+    };
     ui.painter().text(
         rect.right_bottom() + vec2(-1.0, 0.0),
         Align2::RIGHT_BOTTOM,
@@ -2673,7 +2637,7 @@ fn tool_chip(ui: &mut egui::Ui, current: &mut Tool, tool: Tool) {
 }
 
 fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color32) {
-    let stroke = Stroke::new(1.35, color);
+    let stroke = Stroke::new(1.35_f32, color);
     let origin = rect.left_top();
     match tool {
         Tool::Select => {
@@ -2705,10 +2669,7 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 Stroke::new(1.7_f32, color),
             );
             for x in [3.0, 7.0, 11.0] {
-                painter.line_segment(
-                    [origin + vec2(x, 2.2), origin + vec2(x, 8.6)],
-                    stroke,
-                );
+                painter.line_segment([origin + vec2(x, 2.2), origin + vec2(x, 8.6)], stroke);
             }
         }
         Tool::StrikeOut => {
@@ -2717,10 +2678,7 @@ fn paint_tool_icon(painter: &egui::Painter, rect: Rect, tool: Tool, color: Color
                 Stroke::new(1.7_f32, color),
             );
             for x in [3.2, 7.0, 10.8] {
-                painter.line_segment(
-                    [origin + vec2(x, 2.4), origin + vec2(x, 11.6)],
-                    stroke,
-                );
+                painter.line_segment([origin + vec2(x, 2.4), origin + vec2(x, 11.6)], stroke);
             }
         }
         Tool::Squiggly => {
@@ -2843,10 +2801,7 @@ fn paint_tab_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                         } else {
                             ""
                         };
-                        if ui
-                            .button(format!("Split side-by-side{suffix}"))
-                            .clicked()
-                        {
+                        if ui.button(format!("Split side-by-side{suffix}")).clicked() {
                             split_side = true;
                         }
                         if ui.button(format!("Split stacked{suffix}")).clicked() {
@@ -2910,7 +2865,9 @@ pub(crate) fn tab_drag_overlay(app: &mut MarkerApp, ctx: &egui::Context) {
         return;
     }
 
-    let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+    let pointer = ctx
+        .pointer_interact_pos()
+        .or_else(|| ctx.pointer_latest_pos());
     let primary_down = ctx.input(|input| input.pointer.primary_down());
     let released = ctx.input(|input| input.pointer.primary_released());
 
@@ -3028,7 +2985,7 @@ fn paint_tab_drag_feedback(
             painter.rect_stroke(
                 highlight,
                 CornerRadius::same(4),
-                Stroke::new(1.5, colors.accent.gamma_multiply(0.85)),
+                Stroke::new(1.5_f32, colors.accent.gamma_multiply(0.85)),
                 StrokeKind::Inside,
             );
         }
@@ -3053,7 +3010,7 @@ fn paint_tab_drag_feedback(
     painter.rect_stroke(
         pill,
         CornerRadius::same(6),
-        Stroke::new(1.0, colors.hairline),
+        Stroke::new(1.0_f32, colors.hairline),
         StrokeKind::Inside,
     );
     painter.galley(
@@ -3069,10 +3026,7 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
         SplitDropZone::ActivePane => app.view_rect,
         // List-row highlight is painted in the open-tabs overlay.
         SplitDropZone::Tab(_) => Rect::NOTHING,
-        SplitDropZone::Left
-        | SplitDropZone::Right
-        | SplitDropZone::Top
-        | SplitDropZone::Bottom => {
+        SplitDropZone::Left | SplitDropZone::Right | SplitDropZone::Top | SplitDropZone::Bottom => {
             let full = if app.split.is_some() {
                 let a = app.view_rect;
                 let b = app.split_view_rect;
@@ -3095,18 +3049,14 @@ fn drop_zone_rect(app: &MarkerApp, zone: SplitDropZone) -> Rect {
                 SplitDropZone::Left => {
                     Rect::from_min_max(full.min, Pos2::new(mid_x, full.bottom()))
                 }
-                SplitDropZone::Right => {
-                    Rect::from_min_max(Pos2::new(mid_x, full.top()), full.max)
-                }
-                SplitDropZone::Top => {
-                    Rect::from_min_max(full.min, Pos2::new(full.right(), mid_y))
-                }
+                SplitDropZone::Right => Rect::from_min_max(Pos2::new(mid_x, full.top()), full.max),
+                SplitDropZone::Top => Rect::from_min_max(full.min, Pos2::new(full.right(), mid_y)),
                 SplitDropZone::Bottom => {
                     Rect::from_min_max(Pos2::new(full.left(), mid_y), full.max)
                 }
-                SplitDropZone::OtherPane
-                | SplitDropZone::ActivePane
-                | SplitDropZone::Tab(_) => unreachable!(),
+                SplitDropZone::OtherPane | SplitDropZone::ActivePane | SplitDropZone::Tab(_) => {
+                    unreachable!()
+                }
             }
         }
     }
@@ -3152,8 +3102,7 @@ pub(crate) fn split_viewports(app: &mut MarkerApp, ui: &mut egui::Ui, split: Spl
     });
 
     let response = ui.interact(handle_rect, Id::new("marker-split-handle"), Sense::drag());
-    ui.painter()
-        .rect_filled(handle_rect, 0.0, colors.chrome);
+    ui.painter().rect_filled(handle_rect, 0.0, colors.chrome);
     if response.hovered() || response.dragged() {
         ui.painter().rect_filled(
             handle_rect.shrink(1.0),
@@ -3190,7 +3139,7 @@ fn vbar(ui: &mut egui::Ui) {
     ui.painter().vline(
         rect.center().x,
         rect.top()..=rect.bottom(),
-        Stroke::new(1.0, colors.hairline),
+        Stroke::new(1.0_f32, colors.hairline),
     );
 }
 
@@ -3300,7 +3249,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                         ui.add_space(28.0);
                         ui.label(RichText::new("Recent").size(13.0).color(colors.text_dim));
                         ui.add_space(8.0);
-                        let list_width = ui.available_width().min(440.0).max(280.0);
+                        let list_width = ui.available_width().clamp(280.0, 440.0);
                         let exists_flags = recent_file_flags(ui.ctx(), &recent);
                         for (path, exists) in recent.iter().zip(exists_flags) {
                             let name = path
@@ -3311,17 +3260,14 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                 .parent()
                                 .map(|p| p.display().to_string())
                                 .unwrap_or_default();
-                            let (rect, response) = ui.allocate_exact_size(
-                                Vec2::new(list_width, 44.0),
-                                Sense::click(),
-                            );
+                            let (rect, response) =
+                                ui.allocate_exact_size(Vec2::new(list_width, 44.0), Sense::click());
                             let fill = if response.hovered() {
                                 theme::chrome_overlay(ui.ctx(), 18)
                             } else {
                                 theme::chrome_overlay(ui.ctx(), 10)
                             };
-                            ui.painter()
-                                .rect_filled(rect, CornerRadius::same(8), fill);
+                            ui.painter().rect_filled(rect, CornerRadius::same(8), fill);
                             let name_color = if exists { colors.text } else { colors.text_dim };
                             ui.painter().text(
                                 Pos2::new(rect.left() + 12.0, rect.top() + 7.0),
@@ -3334,11 +3280,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                 ui.painter().text(
                                     Pos2::new(rect.left() + 12.0, rect.top() + 24.0),
                                     Align2::LEFT_TOP,
-                                    if exists {
-                                        parent.as_str()
-                                    } else {
-                                        "(missing)"
-                                    },
+                                    if exists { parent.as_str() } else { "(missing)" },
                                     FontId::new(11.0, FontFamily::Proportional),
                                     colors.text_dim,
                                 );
@@ -3354,7 +3296,11 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                     ui.id().with(("recent-forget", path.as_os_str())),
                                     Sense::click(),
                                 );
-                                let close_color = if close.hovered() { colors.text } else { colors.text_dim };
+                                let close_color = if close.hovered() {
+                                    colors.text
+                                } else {
+                                    colors.text_dim
+                                };
                                 ui.painter().text(
                                     close_rect.center(),
                                     Align2::CENTER_CENTER,
@@ -3362,10 +3308,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                     FontId::new(14.0, FontFamily::Proportional),
                                     close_color,
                                 );
-                                if close
-                                    .on_hover_text("Remove from recent")
-                                    .clicked()
-                                {
+                                if close.on_hover_text("Remove from recent").clicked() {
                                     remove_clicked = true;
                                     forget = Some(path.clone());
                                 }
@@ -3388,8 +3331,7 @@ pub(crate) fn empty_state(app: &mut MarkerApp, ui: &mut egui::Ui) {
                                     open_path = Some(path.clone());
                                 } else {
                                     forget = Some(path.clone());
-                                    app.error =
-                                        Some(format!("File not found: {}", path.display()));
+                                    app.error = Some(format!("File not found: {}", path.display()));
                                 }
                             }
                             if response.secondary_clicked() {
@@ -3444,8 +3386,7 @@ fn outline_node(
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, depth < 1);
     let header = ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        let toggle =
-            state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+        let toggle = state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
         let title = ui.add(
             Button::new(&node.title)
                 .frame(false)
@@ -3491,7 +3432,7 @@ pub(crate) fn color_dot(ui: &mut egui::Ui, color: Rgb, selected: bool, name: &st
         ui.painter().circle_stroke(
             rect.center(),
             6.5,
-            Stroke::new(1.35, theme::color_dot_selection_ring(ui.ctx())),
+            Stroke::new(1.35_f32, theme::color_dot_selection_ring(ui.ctx())),
         );
     }
     response.widget_info(|| {
@@ -3596,14 +3537,9 @@ fn brand_family() -> FontFamily {
 fn brand_wordmark(ui: &mut egui::Ui) {
     let colors = p(ui.ctx());
     let font = FontId::new(72.0, brand_family());
-    let galley = ui.fonts_mut(|fonts| {
-        fonts.layout_no_wrap("Marker".to_owned(), font, colors.text)
-    });
+    let galley = ui.fonts_mut(|fonts| fonts.layout_no_wrap("Marker".to_owned(), font, colors.text));
     let (rect, _) = ui.allocate_exact_size(galley.size(), Sense::hover());
-    let text_pos = Pos2::new(
-        rect.center().x - galley.size().x * 0.5,
-        rect.top(),
-    );
+    let text_pos = Pos2::new(rect.center().x - galley.size().x * 0.5, rect.top());
     ui.painter().galley(text_pos, galley, colors.text);
 }
 
@@ -3623,7 +3559,10 @@ mod tests {
     #[test]
     fn highlight_color_name_is_exact_rgb_or_custom() {
         let presets = crate::settings::default_highlight_presets();
-        assert_eq!(highlight_color_name(&presets, HIGHLIGHT_COLORS[0]), "Key idea");
+        assert_eq!(
+            highlight_color_name(&presets, HIGHLIGHT_COLORS[0]),
+            "Key idea"
+        );
         assert_eq!(highlight_color_name(&presets, Rgb::new(1, 2, 3)), "Custom");
     }
 

@@ -21,8 +21,8 @@ use crate::assistant::{glyphs_intersecting_rects, CaptureMode, LearningSelection
 use crate::cite;
 use crate::geom::{tile_render_scale, PdfPoint, PdfRect, Rgb, MAX_SCALE, MIN_SCALE};
 use crate::math::rich_text::{
-    self, conceal_editor, preview_bubble, BubbleImage, CharSpan, EditorOutput, Render, Style,
-    MATH_ERROR_IDLE_SECS, LaidRun, MathMetrics, TextMeasure,
+    self, conceal_editor, preview_bubble, BubbleImage, CharSpan, EditorOutput, LaidRun,
+    MathMetrics, Render, Style, TextMeasure, MATH_ERROR_IDLE_SECS,
 };
 use crate::math::{EntryKind, MathKey};
 use crate::math_spans;
@@ -355,14 +355,14 @@ fn handle_pointer(app: &mut MarkerApp, response: &egui::Response) {
         }
         return;
     }
-    if middle.2 {
-        if matches!(
+    if middle.2
+        && matches!(
             app.tab().and_then(|tab| tab.drag.as_ref()),
             Some(Drag::Pan { .. })
-        ) {
-            if let Some(tab) = app.tab_mut() {
-                tab.drag = None;
-            }
+        )
+    {
+        if let Some(tab) = app.tab_mut() {
+            tab.drag = None;
         }
     }
 
@@ -795,11 +795,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 current_pt: point,
             });
         }
-        Drag::Marquee {
-            page,
-            origin,
-            ..
-        } => {
+        Drag::Marquee { page, origin, .. } => {
             let Some(tab) = app.tab_mut() else {
                 return;
             };
@@ -815,11 +811,7 @@ fn update_primary(app: &mut MarkerApp, pos: Pos2, view: Rect) {
                 current: point,
             });
         }
-        Drag::Region {
-            page,
-            origin,
-            ..
-        } => {
+        Drag::Region { page, origin, .. } => {
             let Some(tab) = app.tab_mut() else {
                 return;
             };
@@ -1314,7 +1306,10 @@ fn select_glyphs_at_point(
             if let Some(old) = replace {
                 tab.doc.session.remove(old);
             }
-            let id = tab.doc.session.insert(page, text_mark_kind(style, quads, color));
+            let id = tab
+                .doc
+                .session
+                .insert(page, text_mark_kind(style, quads, color));
             // Leave the new mark unselected so the user can keep marking.
             tab.selected.clear();
             tab.text_sel = None;
@@ -1883,7 +1878,12 @@ fn paint_document(app: &mut MarkerApp, painter: &egui::Painter, view: Rect, pixe
     };
     let (first, last) = page_range;
     for page in first..=last {
-        let rect = app.tabs.get(tab_idx).expect("checked").doc.page_rect(page, view);
+        let rect = app
+            .tabs
+            .get(tab_idx)
+            .expect("checked")
+            .doc
+            .page_rect(page, view);
         let shadow = rect.expand(2.0).translate(Vec2::new(0.0, 4.0));
         painter.rect_filled(shadow, 6.0, Color32::from_black_alpha(28));
         painter.rect_filled(rect, 1.0, page_bg);
@@ -1925,7 +1925,11 @@ fn paint_highlight_fills(
 ) {
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
-    let indices = tab.annot_by_page.get(page).map(|v| v.as_slice()).unwrap_or(&[]);
+    let indices = tab
+        .annot_by_page
+        .get(page)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     for &index in indices {
         let annot = &tab.doc.session.annotations[index];
         if let AnnotKind::Highlight { quads, color } = &annot.kind {
@@ -1969,7 +1973,11 @@ fn paint_highlight_fills(
 
 fn text_mark_kind(style: Option<MarkupStyle>, quads: Vec<PdfRect>, color: Rgb) -> AnnotKind {
     match style {
-        Some(style) => AnnotKind::Markup { style, quads, color },
+        Some(style) => AnnotKind::Markup {
+            style,
+            quads,
+            color,
+        },
         None => AnnotKind::Highlight { quads, color },
     }
 }
@@ -2182,7 +2190,11 @@ fn paint_annotations(
 ) {
     let page_rect = tab.doc.page_rect(page, view);
     let painter = painter.with_clip_rect(page_rect.intersect(view));
-    let indices = tab.annot_by_page.get(page).map(|v| v.as_slice()).unwrap_or(&[]);
+    let indices = tab
+        .annot_by_page
+        .get(page)
+        .map(|v| v.as_slice())
+        .unwrap_or(&[]);
     for &index in indices {
         let annot = &tab.doc.session.annotations[index];
         let selected = tab.is_selected(annot.id);
@@ -2195,15 +2207,7 @@ fn paint_annotations(
                 quads,
                 color,
             } => {
-                paint_markup_strokes(
-                    &painter,
-                    &tab.doc,
-                    page,
-                    view,
-                    *style,
-                    quads,
-                    *color,
-                );
+                paint_markup_strokes(&painter, &tab.doc, page, view, *style, quads, *color);
             }
             AnnotKind::Text {
                 rect,
@@ -2351,15 +2355,7 @@ fn paint_annotations(
                 ..
             } => {
                 paint_foreign(
-                    &painter,
-                    &tab.doc,
-                    page,
-                    view,
-                    *kind,
-                    *rect,
-                    quads,
-                    strokes,
-                    *color,
+                    &painter, &tab.doc, page, view, *kind, *rect, quads, strokes, *color,
                 );
             }
             AnnotKind::Future(_) => {}
@@ -2370,7 +2366,7 @@ fn paint_annotations(
                 painter.rect_stroke(
                     screen,
                     1.0,
-                    Stroke::new(1.0, Color32::from_rgb(70, 130, 220)),
+                    Stroke::new(1.0_f32, Color32::from_rgb(70, 130, 220)),
                     egui::StrokeKind::Outside,
                 );
                 for (_, point) in annot.kind.handles() {
@@ -2380,7 +2376,7 @@ fn paint_annotations(
                     painter.rect_stroke(
                         handle,
                         1.0,
-                        Stroke::new(1.0, Color32::from_rgb(70, 130, 220)),
+                        Stroke::new(1.0_f32, Color32::from_rgb(70, 130, 220)),
                         egui::StrokeKind::Inside,
                     );
                 }
@@ -2389,6 +2385,8 @@ fn paint_annotations(
     }
 }
 
+// RF11 packs foreign annot paint args into a context struct.
+#[allow(clippy::too_many_arguments)]
 fn paint_foreign(
     painter: &egui::Painter,
     doc: &DocState,
@@ -2554,7 +2552,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
             origin,
             current,
         }) => {
-            let stroke = Stroke::new(1.5, Color32::from_rgb(80, 160, 255));
+            let stroke = Stroke::new(1.5_f32, Color32::from_rgb(80, 160, 255));
             let rect = pdf_rect_screen(
                 &tab.doc,
                 *page,
@@ -2562,11 +2560,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
                 view,
             );
             painter.rect_stroke(rect, 0.0, stroke, egui::StrokeKind::Inside);
-            painter.rect_filled(
-                rect,
-                0.0,
-                Color32::from_rgba_unmultiplied(80, 160, 255, 40),
-            );
+            painter.rect_filled(rect, 0.0, Color32::from_rgba_unmultiplied(80, 160, 255, 40));
         }
         Some(Drag::Highlight {
             style: Some(style),
@@ -2656,7 +2650,7 @@ fn paint_drag_preview(app: &MarkerApp, painter: &egui::Painter, view: Rect) {
             painter.rect_stroke(
                 rect,
                 1.0,
-                Stroke::new(1.0, Color32::from_rgb(70, 130, 220)),
+                Stroke::new(1.0_f32, Color32::from_rgb(70, 130, 220)),
                 egui::StrokeKind::Inside,
             );
         }
@@ -2766,7 +2760,9 @@ pub(crate) fn cached_math_metrics(
 ) -> Option<MathMetrics> {
     let key = crate::math::MathKey::new(inner, display, size_pt, color);
     match cache.get(&key) {
-        Some(crate::math::EntryKind::Ready { value, .. }) if value.w_pt > 1.0 && value.h_pt > 1.0 => {
+        Some(crate::math::EntryKind::Ready { value, .. })
+            if value.w_pt > 1.0 && value.h_pt > 1.0 =>
+        {
             Some(MathMetrics {
                 w_pt: value.w_pt,
                 h_pt: value.h_pt,
@@ -2782,6 +2778,8 @@ pub(crate) fn cached_math_metrics(
     }
 }
 
+// RF11 packs rich-text paint style into a context struct.
+#[allow(clippy::too_many_arguments)]
 fn paint_rich_text(
     painter: &egui::Painter,
     ctx: &egui::Context,
@@ -2800,9 +2798,10 @@ fn paint_rich_text(
     let font_px = paint_font_px(size_pt * scale, last_zoom);
     let measure = EguiMeasure { ctx };
     let width_pt = screen.width() / scale;
-    let runs = rich_text::layout_rich_text(content, size_pt, width_pt, &measure, &|inner, display| {
-        cached_math_metrics(cache, inner, display, size_pt, color)
-    });
+    let runs =
+        rich_text::layout_rich_text(content, size_pt, width_pt, &measure, &|inner, display| {
+            cached_math_metrics(cache, inner, display, size_pt, color)
+        });
     for run in runs {
         match run {
             LaidRun::Prose { text, x, y, .. } => {
@@ -2867,6 +2866,8 @@ fn paint_rich_text(
     }
 }
 
+// RF11 packs the edit target into an EditTarget struct.
+#[allow(clippy::too_many_arguments)]
 fn edit_text_annot(
     app: &mut MarkerApp,
     ctx: &egui::Context,
@@ -2915,7 +2916,7 @@ fn edit_text_annot(
         .constrain(false)
         .show(ctx, |ui| {
             ui.set_max_width(screen.width().max(24.0));
-            ui.visuals_mut().text_cursor.stroke = Stroke::new(2.0, Color32::BLACK);
+            ui.visuals_mut().text_cursor.stroke = Stroke::new(2.0_f32, Color32::BLACK);
             let font_px = (size * scale).max(8.0);
             let style = math_edit_style(color.to_color32(), font_px);
             let autosnippets = app.settings.math_autosnippets;
@@ -3064,11 +3065,7 @@ fn math_edit_style(ink: Color32, font_px: f32) -> Style {
     Style {
         font: FontId::new(font_px, FontFamily::Proportional),
         color: ink,
-        source_color: Color32::from_rgb(
-            ink.r() / 2 + 36,
-            ink.g() / 2 + 64,
-            ink.b() / 2 + 110,
-        ),
+        source_color: Color32::from_rgb(ink.r() / 2 + 36, ink.g() / 2 + 64, ink.b() / 2 + 110),
         source_bg: Color32::from_rgba_unmultiplied(80, 120, 220, 36),
         error: Color32::from_rgb(210, 70, 60),
     }
@@ -3101,9 +3098,10 @@ fn ready_texture(
 ) -> Option<(egui::TextureHandle, f32, f32)> {
     let key = MathKey::new(inner, display, size_pt, color);
     match cache.get(&key)? {
-        EntryKind::Ready { value, .. } => {
-            value.texture.clone().map(|texture| (texture, value.w_pt, value.h_pt))
-        }
+        EntryKind::Ready { value, .. } => value
+            .texture
+            .clone()
+            .map(|texture| (texture, value.w_pt, value.h_pt)),
         EntryKind::Pending { .. } | EntryKind::Error { .. } => None,
     }
 }
@@ -3215,7 +3213,13 @@ struct CompletionSession {
     query: String,
 }
 
-fn completion_hits(content: &str, caret: usize) -> Option<(math_input::CompletionQuery, Vec<&'static math_input::LatexCommand>)> {
+fn completion_hits(
+    content: &str,
+    caret: usize,
+) -> Option<(
+    math_input::CompletionQuery,
+    Vec<&'static math_input::LatexCommand>,
+)> {
     let query = math_input::completion_query(content, caret)?;
     let hits = math_input::rank_completions(&query.prefix);
     if hits.is_empty() {
@@ -3225,13 +3229,16 @@ fn completion_hits(content: &str, caret: usize) -> Option<(math_input::Completio
     }
 }
 
-fn completion_popup_open(ctx: &egui::Context, text_edit_id: Id, content: &str, caret: usize) -> bool {
+fn completion_popup_open(
+    ctx: &egui::Context,
+    text_edit_id: Id,
+    content: &str,
+    caret: usize,
+) -> bool {
     let Some((query, _)) = completion_hits(content, caret) else {
         return false;
     };
-    let dismissed = ctx.data(|data| {
-        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
-    });
+    let dismissed = ctx.data(|data| data.get_temp::<String>(completion_dismissed_id(text_edit_id)));
     dismissed.as_ref() != Some(&query.prefix)
 }
 
@@ -3248,9 +3255,7 @@ fn apply_completion_keys(
     }
     let caret = range.primary.index;
     let (query, hits) = completion_hits(content, caret)?;
-    let dismissed = ctx.data(|data| {
-        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
-    });
+    let dismissed = ctx.data(|data| data.get_temp::<String>(completion_dismissed_id(text_edit_id)));
     if dismissed.as_ref() == Some(&query.prefix) {
         return None;
     }
@@ -3369,7 +3374,8 @@ fn reclaim_edit_after_completion_escape(app: &mut MarkerApp, ctx: &egui::Context
     if !ctx.input(|input| input.key_pressed(Key::Escape)) {
         return;
     }
-    let Some(session) = ctx.data(|data| data.get_temp::<CompletionSession>(completion_session_id()))
+    let Some(session) =
+        ctx.data(|data| data.get_temp::<CompletionSession>(completion_session_id()))
     else {
         return;
     };
@@ -3414,9 +3420,7 @@ fn paint_math_completion(
         });
         return;
     };
-    let dismissed = ctx.data(|data| {
-        data.get_temp::<String>(completion_dismissed_id(text_edit_id))
-    });
+    let dismissed = ctx.data(|data| data.get_temp::<String>(completion_dismissed_id(text_edit_id)));
     if dismissed.as_ref() == Some(&query.prefix) {
         ctx.data_mut(|data| data.remove::<CompletionSession>(completion_session_id()));
         return;
@@ -3633,7 +3637,11 @@ fn bubble_plan(
         ctx.request_repaint_after(Duration::from_secs_f64(MATH_ERROR_IDLE_SECS - idle_secs));
     }
     Some(BubblePlan {
-        anchor: span_screen_rect(&output.galley, output.galley_pos, &char_span_of(&span, content)),
+        anchor: span_screen_rect(
+            &output.galley,
+            output.galley_pos,
+            &char_span_of(&span, content),
+        ),
         state,
         current: ready_white_texture(cache, inner, span.display, size_pt, color),
         ordinal: span.index,
@@ -3673,9 +3681,10 @@ fn paint_math_bubble(
         return;
     }
     let shown = match bubble.image {
-        BubbleImage::Current => plan.current.clone().map(|(texture, w, h)| {
-            (texture, w, h, Color32::WHITE)
-        }),
+        BubbleImage::Current => plan
+            .current
+            .clone()
+            .map(|(texture, w, h)| (texture, w, h, Color32::WHITE)),
         BubbleImage::LastGoodDimmed => last.and_then(|preview| {
             preview.white_texture.map(|texture| {
                 (
@@ -3715,9 +3724,7 @@ fn paint_math_bubble(
                 .show(ui, |ui| {
                     if let Some((texture, w, h, tint)) = shown {
                         let nat = Vec2::new(w * scale, h * scale);
-                        let fit = (240.0 / nat.x.max(1.0))
-                            .min(72.0 / nat.y.max(1.0))
-                            .min(1.0);
+                        let fit = (240.0 / nat.x.max(1.0)).min(72.0 / nat.y.max(1.0)).min(1.0);
                         let (rect, _) = ui.allocate_exact_size(nat * fit, Sense::hover());
                         ui.painter().image(
                             texture.id(),
@@ -3765,7 +3772,9 @@ fn inline_editors(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
         AnnotKind::Text {
             rect, size, color, ..
         } => {
-            edit_text_annot(app, ctx, view, id, page, gen, scale, focus, rect, size, color);
+            edit_text_annot(
+                app, ctx, view, id, page, gen, scale, focus, rect, size, color,
+            );
         }
         AnnotKind::Math { rect, .. } => {
             let screen = {
@@ -3891,7 +3900,8 @@ fn ensure_image_textures(app: &mut MarkerApp, ctx: &egui::Context) {
         return;
     }
     tab.image_textures_epoch = epoch;
-    let live: Vec<(u64, usize, std::sync::Arc<[u8]>, u32, u32)> = tab
+    type LiveImage = (u64, usize, std::sync::Arc<[u8]>, u32, u32);
+    let live: Vec<LiveImage> = tab
         .doc
         .session
         .annotations
@@ -4006,8 +4016,10 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
     if pos.y + estimated.y > view.bottom() - 4.0 {
         pos.y = mark.top() - estimated.y - 6.0;
     }
-    pos.x = (pos.x - estimated.x * 0.5)
-        .clamp(view.left() + 4.0, (view.right() - estimated.x - 4.0).max(view.left() + 4.0));
+    pos.x = (pos.x - estimated.x * 0.5).clamp(
+        view.left() + 4.0,
+        (view.right() - estimated.x - 4.0).max(view.left() + 4.0),
+    );
 
     let mut delete = false;
     let area = egui::Area::new(Id::new("marker-style-bar"))
@@ -4048,13 +4060,13 @@ fn paint_style_bar(app: &mut MarkerApp, ctx: &egui::Context, view: Rect) {
         }
         app.delete_selected();
     } else if left_outside {
-        let pointer = ctx.pointer_interact_pos().or_else(|| ctx.pointer_latest_pos());
+        let pointer = ctx
+            .pointer_interact_pos()
+            .or_else(|| ctx.pointer_latest_pos());
         let hit_self = pointer.and_then(|pos| {
             let tab = app.tab()?;
             let (page, point) = tab.doc.screen_to_page(pos, view)?;
-            tab.doc
-                .session
-                .hit_test(page, point, 6.0 / tab.doc.scale)
+            tab.doc.session.hit_test(page, point, 6.0 / tab.doc.scale)
         }) == Some(bar.id);
         if hit_self {
             // Clicked the annotation under the strip — keep selection, dismiss strip.
@@ -4074,9 +4086,9 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
 
     let on_annot = menu.hit.is_some();
     let selected_len = app.tab().map(|tab| tab.selected.len()).unwrap_or(0);
-    let multi = menu.hit.is_some_and(|id| {
-        selected_len > 1 && app.tab().is_some_and(|tab| tab.is_selected(id))
-    });
+    let multi = menu
+        .hit
+        .is_some_and(|id| selected_len > 1 && app.tab().is_some_and(|tab| tab.is_selected(id)));
     let hit_kind = menu.hit.and_then(|id| {
         app.tab()
             .and_then(|tab| tab.doc.session.get(id))
@@ -4091,9 +4103,7 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
                 tab.doc.session.get(*id).is_some_and(|annot| {
                     !matches!(
                         annot.kind,
-                        AnnotKind::Image { .. }
-                            | AnnotKind::Future(_)
-                            | AnnotKind::Foreign { .. }
+                        AnnotKind::Image { .. } | AnnotKind::Future(_) | AnnotKind::Foreign { .. }
                     )
                 })
             })
@@ -4131,13 +4141,12 @@ fn paint_menu(app: &mut MarkerApp, ctx: &egui::Context) {
         hit_kind,
         Some(AnnotKind::Highlight { .. } | AnnotKind::Markup { .. })
     );
-    let show_assistant_actions = has_learning
-        || has_text_sel
-        || on_highlight
-        || (!on_annot && copy_text.is_some());
+    let show_assistant_actions =
+        has_learning || has_text_sel || on_highlight || (!on_annot && copy_text.is_some());
     let show_assistant_invite = !on_annot && !show_assistant_actions;
     let show_assistant = show_assistant_actions || show_assistant_invite;
-    let can_attach_shot = has_learning || has_text_sel || on_highlight || (!on_annot && copy_text.is_some());
+    let can_attach_shot =
+        has_learning || has_text_sel || on_highlight || (!on_annot && copy_text.is_some());
 
     let header = menu_context_header(
         hit_kind.as_ref(),
@@ -4390,11 +4399,7 @@ fn menu_item_enabled(
 }
 
 /// Build `quote` + citation from page-0 glyphs and the file name (no info dict yet).
-fn quoted_citation_clipboard(
-    app: &MarkerApp,
-    menu: &ContextMenu,
-    quote: &str,
-) -> Option<String> {
+fn quoted_citation_clipboard(app: &MarkerApp, menu: &ContextMenu, quote: &str) -> Option<String> {
     let tab = app.tab()?;
     let glyphs = tab.doc.glyphs.get(&0)?;
     let page0 = cite::page_text(glyphs);
@@ -4439,7 +4444,11 @@ fn menu_context_header(
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 let preview: String = trimmed.chars().take(28).collect();
-                let ellipsis = if trimmed.chars().count() > 28 { "…" } else { "" };
+                let ellipsis = if trimmed.chars().count() > 28 {
+                    "…"
+                } else {
+                    ""
+                };
                 return Some(format!("“{preview}{ellipsis}”"));
             }
         }
@@ -4575,12 +4584,18 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     }
 
     // Match egui's floating ScrollArea look (same as the empty homepage).
-    let scroll_style = ui.spacing().scroll.clone();
+    let scroll_style = ui.spacing().scroll;
     let hovering_view = ui.rect_contains_pointer(view);
     let outer_margin = 4.0;
-    let max_w = scroll_style.bar_width.max(scroll_style.floating_width).max(6.0);
+    let max_w = scroll_style
+        .bar_width
+        .max(scroll_style.floating_width)
+        .max(6.0);
     let track = Rect::from_min_max(
-        Pos2::new(view.right() - max_w - outer_margin, view.top() + outer_margin),
+        Pos2::new(
+            view.right() - max_w - outer_margin,
+            view.top() + outer_margin,
+        ),
         Pos2::new(view.right() - outer_margin, view.bottom() - outer_margin),
     );
 
@@ -4591,10 +4606,9 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     );
     let hovering_bar = response.hovered() || response.dragged();
 
-    let bar_t = ui.ctx().animate_bool_responsive(
-        Id::new(("marker-scroll-bar", scroll_id)),
-        hovering_bar,
-    );
+    let bar_t = ui
+        .ctx()
+        .animate_bool_responsive(Id::new(("marker-scroll-bar", scroll_id)), hovering_bar);
     let show_t = ui.ctx().animate_bool_responsive(
         Id::new(("marker-scroll-show", scroll_id)),
         hovering_view || hovering_bar,
@@ -4661,7 +4675,9 @@ fn paint_scrollbar(app: &mut MarkerApp, ui: &mut egui::Ui, view: Rect) {
     ui.painter().rect_filled(
         bar_rect,
         widget.corner_radius,
-        visuals.extreme_bg_color.gamma_multiply(background_opacity * show_t),
+        visuals
+            .extreme_bg_color
+            .gamma_multiply(background_opacity * show_t),
     );
 
     // Small tick marks for pages that have a Find hit (FT12). Skip when the
@@ -4721,7 +4737,14 @@ pub(crate) struct TileWant {
     pub words: Vec<usize>,
 }
 
-fn tile_distance_sq(doc: &DocState, page: usize, col: i32, row: i32, scale: f32, view: Rect) -> u32 {
+fn tile_distance_sq(
+    doc: &DocState,
+    page: usize,
+    col: i32,
+    row: i32,
+    scale: f32,
+    view: Rect,
+) -> u32 {
     let rect = doc.page_rect(page, view);
     let cx = view.center().x;
     let cy = view.center().y;
@@ -4734,6 +4757,8 @@ fn tile_distance_sq(doc: &DocState, page: usize, col: i32, row: i32, scale: f32,
     dx.mul_add(dx, dy * dy).min(f32::MAX) as u32
 }
 
+// RF11 packs band/tile collection params into a context struct.
+#[allow(clippy::too_many_arguments)]
 fn collect_tiles_in_band(
     doc: &DocState,
     inflight: &std::collections::HashSet<crate::app::TileKey>,
@@ -4826,9 +4851,7 @@ pub(crate) fn wanted_tiles(
         want.words.push(0);
     }
     if scroll_dir < 0.0 {
-        if first > 0
-            && !doc.glyphs.contains_key(&(first - 1))
-            && !want.words.contains(&(first - 1))
+        if first > 0 && !doc.glyphs.contains_key(&(first - 1)) && !want.words.contains(&(first - 1))
         {
             want.words.push(first - 1);
         }

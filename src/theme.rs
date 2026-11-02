@@ -57,7 +57,8 @@ impl ThemeColors {
     };
 }
 
-static LINUX_CACHE: Mutex<Option<(Instant, Option<Theme>, Option<Color32>)>> = Mutex::new(None);
+type LinuxThemeCache = Option<(Instant, Option<Theme>, Option<Color32>)>;
+static LINUX_CACHE: Mutex<LinuxThemeCache> = Mutex::new(None);
 
 /// Resolved Marker chrome for the current egui theme, with optional OS accent.
 pub(crate) fn palette(ctx: &Context) -> ThemeColors {
@@ -110,7 +111,7 @@ fn install_visuals(ctx: &Context, theme: Theme, c: &ThemeColors) {
     visuals.extreme_bg_color = c.backdrop;
     visuals.faint_bg_color = c.faint_bg;
     visuals.widgets.noninteractive.bg_fill = c.chrome;
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0, c.hairline);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, c.hairline);
     visuals.widgets.inactive.bg_fill = c.widget_inactive;
     visuals.widgets.hovered.bg_fill = c.widget_hovered;
     visuals.widgets.active.bg_fill = c.widget_active;

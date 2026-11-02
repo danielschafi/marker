@@ -21,10 +21,7 @@ fn main() -> eframe::Result<()> {
     }
 }
 
-fn run_ui(
-    paths: Vec<std::path::PathBuf>,
-    inbox: Option<instance::IpcInbox>,
-) -> eframe::Result<()> {
+fn run_ui(paths: Vec<std::path::PathBuf>, inbox: Option<instance::IpcInbox>) -> eframe::Result<()> {
     let viewport = egui::ViewportBuilder::default()
         .with_inner_size([1280.0, 840.0])
         .with_min_inner_size([760.0, 480.0])

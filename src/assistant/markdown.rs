@@ -25,9 +25,7 @@ thread_local! {
 /// Schemes allowed for clickable links in assistant Markdown.
 fn link_scheme_allowed(url: &str) -> bool {
     let lower = url.trim().to_ascii_lowercase();
-    lower.starts_with("https://")
-        || lower.starts_with("http://")
-        || lower.starts_with("mailto:")
+    lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }
 
 /// Rewrite Markdown so only http(s)/mailto destinations stay clickable.

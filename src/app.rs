@@ -1,22 +1,20 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use egui::{DragValue, Key, ViewportCommand};
 
-use crate::annot::{
-    AnnotKind, Annotation, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind,
-};
+use crate::annot::{AnnotKind, Annotation, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind};
 use crate::assistant::{
     absolute_filepath, assistant_configured, AssistantAttachment, AssistantEvent, AssistantRequest,
-    AssistantRole, AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput, BundleTextAttach,
-    CaptureMode, PendingCrop, TabAssistant, CROP_DPI, GENERATE_CARDS_PROMPT, MAX_TEXT_CHARS,
+    AssistantRole, AssistantTurn, AssistantWorker, BundleImageAttach, BundleInput,
+    BundleTextAttach, CaptureMode, PendingCrop, TabAssistant, CROP_DPI, GENERATE_CARDS_PROMPT,
+    MAX_TEXT_CHARS,
 };
-use egui_commonmark::CommonMarkCache;
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::instance::{self, IpcInbox};
 use crate::math::{
@@ -24,12 +22,11 @@ use crate::math::{
     MathKey, MathLane, MathRender, MathWorker, PdfPlan, RgbaImage,
 };
 use crate::math_spans;
-use crate::pdf::{
-    InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot,
-};
+use crate::pdf::{InlineMathSave, OutlineNode, PageInfo, PdfReply, PdfWorker, SaveSnapshot};
 use crate::settings::Settings;
 use crate::ui::{self, color_dot, highlight_color_name, ink_color_name, palette_for};
 use crate::view::{self, viewport};
+use egui_commonmark::CommonMarkCache;
 
 pub(crate) struct MarkerApp {
     pub(crate) settings: Settings,
@@ -380,9 +377,7 @@ fn collect_export_highlights(tab: &Tab) -> Vec<crate::export::ExportHighlight> {
         .annotations
         .iter()
         .filter_map(|annot| match &annot.kind {
-            AnnotKind::Note { rect, content, .. } => {
-                Some((annot.page, *rect, content.as_str()))
-            }
+            AnnotKind::Note { rect, content, .. } => Some((annot.page, *rect, content.as_str())),
             _ => None,
         })
         .collect();
@@ -771,9 +766,13 @@ pub(crate) enum CreateKind {
 enum UndoEntry {
     Annots(Session),
     /// A blank page was inserted at this index.
-    InsertPage { index: usize },
+    InsertPage {
+        index: usize,
+    },
     /// A page was deleted at this index (undo re-inserts a blank page).
-    DeletePage { index: usize },
+    DeletePage {
+        index: usize,
+    },
 }
 
 /// How to restore undo/redo stacks when a page op fails after they were pre-mutated.
@@ -1336,8 +1335,7 @@ impl MarkerApp {
             return;
         }
         if let Some(tab) = self.tab_mut() {
-            tab.assistant.error =
-                Some("Select text before generating cards.".into());
+            tab.assistant.error = Some("Select text before generating cards.".into());
         }
     }
 
@@ -1394,8 +1392,7 @@ impl MarkerApp {
                         .to_owned()
                 };
                 let source = format!("{doc_name}#page={}", page + 1);
-                let csv =
-                    crate::export::generated_cards_to_csv(&cards, "generated", &source);
+                let csv = crate::export::generated_cards_to_csv(&cards, "generated", &source);
                 self.pending_generated_csv = Some((gen, csv));
                 if let Some(tab) = self.tab_by_gen_mut(gen) {
                     tab.assistant.status_line =
@@ -1834,10 +1831,8 @@ impl MarkerApp {
         let view = self.view_rect;
         let cursor = view.center();
         if let Some(doc) = self.doc_mut() {
-            let target = (percent / 100.0 * crate::geom::ZOOM_100).clamp(
-                crate::geom::MIN_SCALE,
-                crate::geom::MAX_SCALE,
-            );
+            let target = (percent / 100.0 * crate::geom::ZOOM_100)
+                .clamp(crate::geom::MIN_SCALE, crate::geom::MAX_SCALE);
             if (target - doc.scale).abs() > f32::EPSILON {
                 doc.zoom_at(target / doc.scale, cursor, view);
                 doc.last_fit = None;
@@ -1959,8 +1954,7 @@ impl MarkerApp {
                 tab.undo_edit = None;
                 tab.menu = None;
                 tab.style_bar = None;
-                tab.selected
-                    .retain(|id| tab.doc.session.get(*id).is_some());
+                tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
                 if !matches!(tab.save, SaveState::Saving) {
                     tab.save = SaveState::Dirty {
                         since: Instant::now(),
@@ -2023,8 +2017,7 @@ impl MarkerApp {
                 tab.undo_edit = None;
                 tab.menu = None;
                 tab.style_bar = None;
-                tab.selected
-                    .retain(|id| tab.doc.session.get(*id).is_some());
+                tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
                 if !matches!(tab.save, SaveState::Saving) {
                     tab.save = SaveState::Dirty {
                         since: Instant::now(),
@@ -2087,10 +2080,10 @@ impl MarkerApp {
                         return Some(text);
                     }
                 }
-                AnnotKind::Text { content, .. } | AnnotKind::Note { content, .. } => {
-                    if !content.is_empty() {
-                        return Some(content.clone());
-                    }
+                AnnotKind::Text { content, .. } | AnnotKind::Note { content, .. }
+                    if !content.is_empty() =>
+                {
+                    return Some(content.clone());
                 }
                 _ => {}
             }
@@ -2123,12 +2116,9 @@ impl MarkerApp {
         self.seal_then_arm();
         if let Some(tab) = self.tab_mut() {
             for id in &ids {
-                if tab
-                    .doc
-                    .session
-                    .get(*id)
-                    .is_some_and(|annot| matches!(annot.kind, crate::annot::AnnotKind::Foreign { .. }))
-                {
+                if tab.doc.session.get(*id).is_some_and(|annot| {
+                    matches!(annot.kind, crate::annot::AnnotKind::Foreign { .. })
+                }) {
                     continue;
                 }
                 tab.doc.session.remove(*id);
@@ -2768,7 +2758,12 @@ impl eframe::App for MarkerApp {
         }
         let pixels_per_point = ctx.pixels_per_point();
         if self.active != self.tile_focus_tab && self.tile_focus_tab < self.tabs.len() {
-            trim_tab_tiles(self, self.tile_focus_tab, UNFOCUSED_TAB_TILE_BYTES, pixels_per_point);
+            trim_tab_tiles(
+                self,
+                self.tile_focus_tab,
+                UNFOCUSED_TAB_TILE_BYTES,
+                pixels_per_point,
+            );
         }
         if self.active != self.tile_focus_tab {
             self.tile_focus_tab = self.active;
@@ -2834,7 +2829,11 @@ impl eframe::App for MarkerApp {
             let focused = ctx.input(|input| input.focused);
             let base = if focused { 16 } else { 33 };
             let elapsed = self.last_frame.elapsed().as_millis() as u64;
-            let wait = if elapsed < 8 { base.max(8 - elapsed) } else { base };
+            let wait = if elapsed < 8 {
+                base.max(8 - elapsed)
+            } else {
+                base
+            };
             ctx.request_repaint_after(Duration::from_millis(wait));
         } else if let Some(when) = self.math_deadlines.values().copied().min() {
             ctx.request_repaint_after(when.saturating_duration_since(Instant::now()));
@@ -2857,19 +2856,28 @@ impl MarkerApp {
                 self.open_path(path);
             }
             Ok(DialogReply::Open(None)) => self.dialog_busy = false,
-            Ok(DialogReply::SaveAs { gen, path: Some(path) }) => {
+            Ok(DialogReply::SaveAs {
+                gen,
+                path: Some(path),
+            }) => {
                 self.dialog_busy = false;
                 self.start_save_as(gen, path);
             }
             Ok(DialogReply::SaveAs { path: None, .. }) => self.dialog_busy = false,
-            Ok(DialogReply::ExportMarkdown { gen, path: Some(path) }) => {
+            Ok(DialogReply::ExportMarkdown {
+                gen,
+                path: Some(path),
+            }) => {
                 self.dialog_busy = false;
                 self.write_export_markdown(gen, path);
             }
             Ok(DialogReply::ExportMarkdown { path: None, .. }) => {
                 self.dialog_busy = false;
             }
-            Ok(DialogReply::ExportCards { gen, path: Some(path) }) => {
+            Ok(DialogReply::ExportCards {
+                gen,
+                path: Some(path),
+            }) => {
                 self.dialog_busy = false;
                 self.write_export_cards(gen, path);
             }
@@ -3291,8 +3299,7 @@ impl MarkerApp {
                 *page -= 1;
             }
         }
-        tab.selected
-            .retain(|id| tab.doc.session.get(*id).is_some());
+        tab.selected.retain(|id| tab.doc.session.get(*id).is_some());
         if tab.selected.is_empty() {
             tab.editing = None;
         }
@@ -3407,7 +3414,10 @@ impl MarkerApp {
                         tab.save = SaveState::Clean;
                     }
                     let clean = !tab.doc.session.is_dirty();
-                    (tab.close_after_save && clean, tab.detach_after_save && clean)
+                    (
+                        tab.close_after_save && clean,
+                        tab.detach_after_save && clean,
+                    )
                 };
                 if detach {
                     self.finish_detach_tab(index);
@@ -4163,7 +4173,10 @@ impl MarkerApp {
             let Some(preview) = tab.previews.get(&id) else {
                 return;
             };
-            if preview.pending || preview.pdf_pending || preview.pdf.is_some() || preview.error.is_some()
+            if preview.pending
+                || preview.pdf_pending
+                || preview.pdf.is_some()
+                || preview.error.is_some()
             {
                 return;
             }
@@ -4255,7 +4268,8 @@ impl MarkerApp {
                             Some(EntryKind::Error { .. }) => {}
                             Some(EntryKind::Pending { .. }) => waiting = true,
                             Some(EntryKind::Ready { value, .. }) => {
-                                match pdf_plan(value.pdf_pending, true, value.pdf.is_some(), false) {
+                                match pdf_plan(value.pdf_pending, true, value.pdf.is_some(), false)
+                                {
                                     PdfPlan::Have => {}
                                     PdfPlan::Wait => waiting = true,
                                     PdfPlan::Request => jobs.push(Job::Inline {
@@ -4428,10 +4442,7 @@ impl MarkerApp {
                 .tile_wanted
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            guard.insert(
-                gen,
-                wanted.tiles.iter().map(|req| req.key).collect(),
-            );
+            guard.insert(gen, wanted.tiles.iter().map(|req| req.key).collect());
         }
         let mut glyph_pages = Vec::new();
         let mut tiles = Vec::new();
@@ -4493,15 +4504,11 @@ impl MarkerApp {
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
         if ctx.input(|input| {
-            input.key_pressed(Key::S)
-                && input.modifiers.command
-                && input.modifiers.shift
+            input.key_pressed(Key::S) && input.modifiers.command && input.modifiers.shift
         }) {
             self.save_as_dialog();
         } else if ctx.input(|input| {
-            input.key_pressed(Key::S)
-                && input.modifiers.command
-                && !input.modifiers.shift
+            input.key_pressed(Key::S) && input.modifiers.command && !input.modifiers.shift
         }) {
             if let Some(tab) = self.tab_mut() {
                 tab.force_save = true;
@@ -4517,16 +4524,12 @@ impl MarkerApp {
             self.page_focus = true;
         }
         if ctx.input(|input| {
-            input.key_pressed(Key::Enter)
-                && input.modifiers.command
-                && input.modifiers.shift
+            input.key_pressed(Key::Enter) && input.modifiers.command && input.modifiers.shift
         }) {
             self.insert_page_after_current();
         }
         if ctx.input(|input| {
-            input.key_pressed(Key::Backspace)
-                && input.modifiers.command
-                && input.modifiers.shift
+            input.key_pressed(Key::Backspace) && input.modifiers.command && input.modifiers.shift
         }) {
             self.delete_current_page();
         }
@@ -4567,20 +4570,18 @@ impl MarkerApp {
         }) {
             self.explain_selection();
         }
-        if ctx.input(|input| {
-            input.key_pressed(Key::Period) && input.modifiers.command
-        }) {
+        if ctx.input(|input| input.key_pressed(Key::Period) && input.modifiers.command) {
             self.assistant_stop();
         }
-        if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command) {
-            if self.tabs.len() >= 2 {
-                if input_shift(ctx) {
-                    self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
-                } else {
-                    self.active = (self.active + 1) % self.tabs.len();
-                }
-                self.pulse_tab_list();
+        if ctx.input(|input| input.key_pressed(Key::Tab) && input.modifiers.command)
+            && self.tabs.len() >= 2
+        {
+            if input_shift(ctx) {
+                self.active = (self.active + self.tabs.len() - 1) % self.tabs.len();
+            } else {
+                self.active = (self.active + 1) % self.tabs.len();
             }
+            self.pulse_tab_list();
         }
         if ctx.input(|input| {
             input.key_pressed(Key::Backslash) && input.modifiers.command && !input.modifiers.alt
@@ -4588,9 +4589,7 @@ impl MarkerApp {
             self.toggle_split(input_shift(ctx));
         }
         if ctx.input(|input| {
-            input.key_pressed(Key::Backslash)
-                && input.modifiers.command
-                && input.modifiers.alt
+            input.key_pressed(Key::Backslash) && input.modifiers.command && input.modifiers.alt
         }) {
             self.focus_split_other();
         }
@@ -4618,19 +4617,21 @@ impl MarkerApp {
         }
         let editing = self.tab().is_some_and(|tab| tab.editing.is_some());
         let paste_image = ctx.input(|input| {
-            input.events.iter().any(|event| matches!(event, egui::Event::Paste(_)))
-                || (input.modifiers.command
-                    && input.modifiers.shift
-                    && input.key_pressed(Key::V))
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Paste(_)))
+                || (input.modifiers.command && input.modifiers.shift && input.key_pressed(Key::V))
         });
         if paste_image && !editing {
             let _ = self.paste_clipboard_image();
         }
         let want_copy = ctx.input(|input| {
-            input.events.iter().any(|event| matches!(event, egui::Event::Copy))
-                || (input.modifiers.command
-                    && !input.modifiers.shift
-                    && input.key_pressed(Key::C))
+            input
+                .events
+                .iter()
+                .any(|event| matches!(event, egui::Event::Copy))
+                || (input.modifiers.command && !input.modifiers.shift && input.key_pressed(Key::C))
         });
         if want_copy && !editing {
             if let Some(text) = self.copyable_selection_text() {
@@ -4650,9 +4651,7 @@ impl MarkerApp {
         let mut arrow_dy = 0.0_f32;
         let vim = ctx.input(|input| self.handle_vim(input));
         let mut escaped = false;
-        let has_selection = self
-            .tab()
-            .is_some_and(|tab| !tab.selected.is_empty());
+        let has_selection = self.tab().is_some_and(|tab| !tab.selected.is_empty());
         // Style bar owns Left/Right for color cycling when a selection is active.
         let style_bar_open = self.tab().is_some_and(|tab| tab.style_bar.is_some());
         let step = (self.view_rect.height() * 0.045).clamp(28.0, 72.0);
@@ -4687,21 +4686,20 @@ impl MarkerApp {
                 }
             }
             // N / Shift+N step search hits when find is open.
-            if input.key_pressed(Key::N) && !input.modifiers.command {
-                if self
+            if input.key_pressed(Key::N)
+                && !input.modifiers.command
+                && self
                     .tab()
                     .is_some_and(|tab| tab.search.open && !tab.search.hits.is_empty())
-                {
-                    search_delta = Some(if input.modifiers.shift { -1 } else { 1 });
-                }
+            {
+                search_delta = Some(if input.modifiers.shift { -1 } else { 1 });
             }
-            if input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace) {
-                if self
+            if (input.key_pressed(Key::Delete) || input.key_pressed(Key::Backspace))
+                && self
                     .tab()
                     .is_some_and(|tab| tab.editing.is_none() && !tab.selected.is_empty())
-                {
-                    delete_selected = true;
-                }
+            {
+                delete_selected = true;
             }
             if input.modifiers.command
                 && (input.key_pressed(Key::Equals) || input.key_pressed(Key::Plus))
@@ -5076,9 +5074,7 @@ impl MarkerApp {
             ColorTarget::Highlights => self
                 .selected_highlight_color()
                 .unwrap_or(self.settings.highlight_color),
-            ColorTarget::Ink => self
-                .selected_ink_color()
-                .unwrap_or(self.active_color()),
+            ColorTarget::Ink => self.selected_ink_color().unwrap_or(self.active_color()),
         };
         let mut picked = None;
         match target {
@@ -5306,10 +5302,7 @@ impl MarkerApp {
             "Summarize this page",
             "Summarize this page clearly for a learner.",
         ),
-        (
-            "Explain simply",
-            "Explain this simply for a learner.",
-        ),
+        ("Explain simply", "Explain this simply for a learner."),
         (
             "Define terms",
             "Define the key terms in this text for a learner.",
@@ -5674,9 +5667,9 @@ impl MarkerApp {
                         .rev()
                         .find(|t| t.role == AssistantRole::Assistant)
                     {
-                        if turn.text.is_empty() {
-                            turn.text = text.clone();
-                        } else if !text.is_empty() && text.len() >= turn.text.len() {
+                        if turn.text.is_empty()
+                            || (!text.is_empty() && text.len() >= turn.text.len())
+                        {
                             turn.text = text.clone();
                         }
                         turn.incomplete = false;
@@ -5745,9 +5738,8 @@ impl MarkerApp {
         if !self.zen {
             return true;
         }
-        let top_hover = ctx.input(|input| {
-            input.pointer.hover_pos().is_some_and(|pos| pos.y <= 10.0)
-        });
+        let top_hover =
+            ctx.input(|input| input.pointer.hover_pos().is_some_and(|pos| pos.y <= 10.0));
         if top_hover {
             self.zen_chrome_until = Some(Instant::now() + Duration::from_millis(900));
             ctx.request_repaint_after(Duration::from_millis(950));
@@ -6021,9 +6013,8 @@ impl MarkerApp {
     fn selected_highlight_color(&self) -> Option<Rgb> {
         let tab = self.tab()?;
         for id in &tab.selected {
-            if let Some(
-                AnnotKind::Highlight { color, .. } | AnnotKind::Markup { color, .. },
-            ) = tab.doc.session.get(*id).map(|a| &a.kind)
+            if let Some(AnnotKind::Highlight { color, .. } | AnnotKind::Markup { color, .. }) =
+                tab.doc.session.get(*id).map(|a| &a.kind)
             {
                 return Some(*color);
             }
@@ -6367,7 +6358,11 @@ impl MarkerApp {
                 self.title_tab_gen = gen;
                 self.title_dirty_epoch = epoch;
                 self.title_dirty = dirty;
-                if dirty { " •" } else { "" }
+                if dirty {
+                    " •"
+                } else {
+                    ""
+                }
             };
             format!("Marker — {name}{dirty_suffix}")
         } else {
@@ -6521,8 +6516,21 @@ fn tile_eviction_tier(app: &MarkerApp, tab_idx: usize, key: &TileKey, pixels_per
     1
 }
 
-fn tile_evict_rank(tier: u8, last_used: u64, tab_idx: usize, key: &TileKey) -> (u8, u64, usize, usize, u32, i32, i32) {
-    (tier, last_used, tab_idx, key.page, key.scale_bits, key.col, key.row)
+fn tile_evict_rank(
+    tier: u8,
+    last_used: u64,
+    tab_idx: usize,
+    key: &TileKey,
+) -> (u8, u64, usize, usize, u32, i32, i32) {
+    (
+        tier,
+        last_used,
+        tab_idx,
+        key.page,
+        key.scale_bits,
+        key.col,
+        key.row,
+    )
 }
 
 fn pick_tile_to_evict(app: &MarkerApp, pixels_per_point: f32) -> Option<(usize, TileKey)> {
@@ -6685,7 +6693,9 @@ pub(crate) fn clipboard_has_image() -> bool {
             let list = String::from_utf8_lossy(&output.stdout);
             if list.lines().any(|line| {
                 let line = line.trim().to_ascii_lowercase();
-                line.starts_with("image/") || line.contains("image/png") || line.contains("image/jpeg")
+                line.starts_with("image/")
+                    || line.contains("image/png")
+                    || line.contains("image/jpeg")
             }) {
                 return true;
             }

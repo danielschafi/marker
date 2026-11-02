@@ -79,9 +79,7 @@ pub fn highlights_to_markdown(
             out.push('\n');
             let name = preset_name_for(presets, hl.color);
             let link = format!("{doc_name}#page={page_1}");
-            out.push_str(&format!(
-                "**{name}** · p.{page_1} · [{link}]({link})\n"
-            ));
+            out.push_str(&format!("**{name}** · p.{page_1} · [{link}]({link})\n"));
             if let Some(note) = hl.note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
                 out.push('\n');
                 out.push_str(note);
@@ -137,8 +135,7 @@ pub fn default_cards_name(pdf_path: &std::path::Path) -> String {
 
 /// Escape one CSV field (RFC 4180): quote when needed; double internal quotes.
 pub fn csv_escape(field: &str) -> String {
-    if field.contains('"') || field.contains(',') || field.contains('\n') || field.contains('\r')
-    {
+    if field.contains('"') || field.contains(',') || field.contains('\n') || field.contains('\r') {
         let mut out = String::with_capacity(field.len() + 2);
         out.push('"');
         for ch in field.chars() {
@@ -205,11 +202,7 @@ pub fn highlights_to_csv(
             let quote = quote_for(hl, glyphs);
             let tag = preset_name_for(presets, hl.color);
             let source = format!("{doc_name}#page={page_1}");
-            let note = hl
-                .note
-                .as_deref()
-                .map(str::trim)
-                .filter(|s| !s.is_empty());
+            let note = hl.note.as_deref().map(str::trim).filter(|s| !s.is_empty());
             match note {
                 Some(note) => push_csv_row(&mut out, quote.trim(), note, tag, &source),
                 None => push_csv_row(&mut out, &cloze_front(&quote), "", tag, &source),
@@ -220,11 +213,7 @@ pub fn highlights_to_csv(
 }
 
 /// Build CSV from assistant-generated front/back pairs (ST3).
-pub fn generated_cards_to_csv(
-    cards: &[(String, String)],
-    tag: &str,
-    source: &str,
-) -> String {
+pub fn generated_cards_to_csv(cards: &[(String, String)], tag: &str, source: &str) -> String {
     let mut out = String::from("front,back,tag,source\n");
     for (front, back) in cards {
         push_csv_row(&mut out, front, back, tag, source);

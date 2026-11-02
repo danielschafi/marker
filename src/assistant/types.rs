@@ -141,33 +141,10 @@ impl TabAssistant {
 /// Events from the assistant worker to the UI thread.
 #[derive(Debug)]
 pub enum AssistantEvent {
-    Started {
-        gen: u64,
-        seq: u64,
-        chat_id: String,
-    },
-    Delta {
-        gen: u64,
-        seq: u64,
-        text: String,
-    },
-    Completed {
-        gen: u64,
-        seq: u64,
-        text: String,
-    },
-    Cancelled {
-        gen: u64,
-        seq: u64,
-    },
-    Failed {
-        gen: u64,
-        seq: u64,
-        message: String,
-    },
-    AuthRequired {
-        gen: u64,
-        seq: u64,
-        message: String,
-    },
+    Started { gen: u64, seq: u64, chat_id: String },
+    Delta { gen: u64, seq: u64, text: String },
+    Completed { gen: u64, seq: u64, text: String },
+    Cancelled { gen: u64, seq: u64 },
+    Failed { gen: u64, seq: u64, message: String },
+    AuthRequired { gen: u64, seq: u64, message: String },
 }

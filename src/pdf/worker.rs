@@ -231,6 +231,8 @@ impl PdfWorker {
         let _ = self.jobs.send(PdfJob::Close { gen });
     }
 
+    // RF7 packs tile coords into a request struct.
+    #[allow(clippy::too_many_arguments)]
     pub fn tile(
         &self,
         gen: u64,
@@ -336,9 +338,7 @@ fn job_sort_key(job: &PdfJob) -> (u8, u32) {
         | PdfJob::InsertPageAt { .. }
         | PdfJob::DeletePage { .. } => (0, 0),
         PdfJob::Tile {
-            prefetch,
-            distance,
-            ..
+            prefetch, distance, ..
         } => {
             if *prefetch {
                 (2, *distance)
@@ -478,14 +478,7 @@ fn handle_thumb(
     }
 }
 
-fn handle_crop(
-    ctx: &mut WorkerCtx<'_>,
-    gen: u64,
-    seq: u64,
-    page: usize,
-    rect: PdfRect,
-    dpi: f32,
-) {
+fn handle_crop(ctx: &mut WorkerCtx<'_>, gen: u64, seq: u64, page: usize, rect: PdfRect, dpi: f32) {
     let result = match engine_mut(ctx.engines, gen) {
         Ok(engine) => engine.render_crop_png(page, rect, dpi),
         Err(_) => Err("No document is open.".into()),
@@ -509,12 +502,7 @@ fn handle_save(ctx: &mut WorkerCtx<'_>, gen: u64, snapshot: SaveSnapshot) {
     ctx.send(reply);
 }
 
-fn handle_save_as(
-    ctx: &mut WorkerCtx<'_>,
-    gen: u64,
-    path: PathBuf,
-    snapshot: SaveSnapshot,
-) {
+fn handle_save_as(ctx: &mut WorkerCtx<'_>, gen: u64, path: PathBuf, snapshot: SaveSnapshot) {
     release_reader(ctx.reads, gen);
     let reply = match engine_mut(ctx.engines, gen) {
         Ok(engine) => {

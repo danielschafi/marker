@@ -69,7 +69,7 @@ pub(super) fn paint_document(
         }
         let tab = app.tabs.get(tab_idx).expect("checked");
         paint_search_hits(tab, painter, page, view);
-        paint_annotations(tab, &app.math_cache, painter, page, view);
+        paint_annotations(tab, &app.math.cache, painter, page, view);
     }
     paint_drag_preview(app, painter, pane);
     paint_learning_selection(app, painter, pane);
@@ -324,7 +324,7 @@ fn paint_search_hits(tab: &Tab, painter: &egui::Painter, page: usize, view: Rect
 
 fn paint_annotations(
     tab: &Tab,
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     painter: &egui::Painter,
     page: usize,
     view: Rect,
@@ -888,7 +888,7 @@ impl EguiMeasure<'_> {
 }
 
 pub(crate) fn cached_math_metrics(
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     inner: &str,
     display: bool,
     size_pt: f32,
@@ -919,7 +919,7 @@ pub(crate) fn cached_math_metrics(
 pub(crate) fn paint_rich_text(
     painter: &egui::Painter,
     ctx: &egui::Context,
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     screen: Rect,
     content: &str,
     size_pt: f32,

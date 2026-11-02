@@ -12,7 +12,13 @@ use crate::geom::{normalize_latex, Rgb};
 use crate::pdf::DocId;
 use crate::worker::{self, Channel, ShutdownJob};
 
+mod pipeline;
+
 pub use crate::rich_text;
+pub use pipeline::{
+    upload_preview, upload_white_preview, white_preview_image, BlockReplyEffect, InlinePreview,
+    InlineReady, MathPipeline, MathPreview, VisibleMathPane, ASSISTANT_MATH_SIZE,
+};
 
 /// Live-lane trailing debounce. Latest edit wins; this only limits texture churn.
 const LIVE_DEBOUNCE: Duration = Duration::from_millis(40);

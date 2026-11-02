@@ -161,9 +161,7 @@ impl MarkerApp {
         let tab = self.tabs.remove(index);
         debug_assert_eq!(tab.id, id);
         let doc_id = tab.doc.doc_id;
-        self.math_scan.remove(&doc_id);
-        self.math_deadlines.retain(|(g, _, _), _| *g != doc_id);
-        self.math_last_good.retain(|(g, _, _), _| *g != doc_id);
+        self.math.forget_doc(doc_id);
         if tab.assistant.streaming {
             self.assistant
                 .cancel(tab.doc.doc_id, tab.assistant.request_seq);

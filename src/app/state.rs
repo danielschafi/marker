@@ -11,6 +11,7 @@ use egui::Key;
 use crate::annot::{AnnotKind, Handle, MarkupStyle, PageGlyphs, Session, ShapeKind};
 use crate::assistant::TabAssistant;
 use crate::geom::{PdfPoint, Rgb};
+use crate::math::MathPreview;
 use crate::pdf::{DocId, OpenedDoc, OutlineNode, PageInfo};
 use crate::undo::UndoStack;
 
@@ -318,27 +319,6 @@ pub(crate) struct CachedThumb {
 
 pub(crate) use crate::pdf::TileKey;
 
-pub(crate) struct MathPreview {
-    pub(super) source: String,
-    pub(super) size: f32,
-    pub(super) color: Rgb,
-    pub(super) req: u64,
-    pub(crate) pending: bool,
-    pub(crate) texture: Option<egui::TextureHandle>,
-    pub(crate) width_pt: f32,
-    pub(crate) height_pt: f32,
-    pub(super) pdf: Option<Vec<u8>>,
-    pub(super) pdf_pending: bool,
-    pub(super) pdf_req: Option<u64>,
-    pub(crate) error: Option<String>,
-}
-
-impl MathPreview {
-    /// True when the block preview has a final PDF or a terminal error.
-    pub(crate) fn is_settled(&self) -> bool {
-        !self.pending && (self.pdf.is_some() || self.error.is_some())
-    }
-}
 #[derive(Default)]
 pub(crate) struct SearchState {
     pub(crate) open: bool,

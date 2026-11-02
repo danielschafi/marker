@@ -270,7 +270,7 @@ fn paint_assistant_turns(ui: &mut egui::Ui, app: &mut MarkerApp) {
     let mut copy: Option<usize> = None;
     {
         // Disjoint fields so Markdown cache, math cache, and turns can be borrowed together.
-        let math_cache = &app.math_cache;
+        let math_cache = &app.math.cache;
         let md_cache = &mut app.assistant_md_cache;
         let turns = active
             .and_then(|i| app.tabs.get(i))
@@ -410,7 +410,7 @@ fn prepare_assistant_answer_math(app: &mut MarkerApp, color: Rgb) {
 /// inline; turns without math still go through `show_markdown`.
 fn paint_assistant_answer_math(
     ui: &mut egui::Ui,
-    math_cache: &crate::math::MathCache<crate::app::InlineReady>,
+    math_cache: &crate::math::MathCache<crate::math::InlineReady>,
     text: &str,
     color: Rgb,
 ) {

@@ -14,7 +14,7 @@ use crate::assistant::{
 };
 use crate::geom::{PdfPoint, PdfRect, Rgb};
 use crate::instance::IpcInbox;
-use crate::math::{EntryKind, MathCache, MathKey, MathWorker};
+use crate::math::MathPipeline;
 use crate::pdf::{DocId, PdfReply, PdfWorker};
 use crate::platform;
 use crate::settings::Settings;
@@ -75,19 +75,9 @@ pub(crate) struct MarkerApp {
     vim_count: u32,
     vim_g: bool,
     worker: PdfWorker,
-    math: MathWorker,
+    /// Cache, deadlines, scan stamps, and Typst worker behind one interface.
+    pub(crate) math: MathPipeline,
     assistant: AssistantWorker,
-    math_seq: u64,
-    /// Per-key debounce. `(doc_id, annot id, span key)`; `None` is a standalone math annot.
-    /// A key already waiting is not postponed, so one frame cannot drop the others.
-    math_deadlines: HashMap<(DocId, u64, Option<u64>), Instant>,
-    /// Shared equation renders. Keyed by source, display, size, and color.
-    pub(crate) math_cache: MathCache<InlineReady>,
-    /// Last successful key for `(doc_id, annot id, span ordinal)`, so a later error
-    /// can still find the previous good render.
-    math_last_good: HashMap<(DocId, u64, usize), MathKey>,
-    /// Last prepare_visible_math scan: doc_id → (epoch, cache rev, first, last, zoom×ppp bits).
-    math_scan: HashMap<DocId, (u64, u64, usize, usize, u32)>,
     next_doc_id: DocId,
     next_tab_id: TabId,
     dialog_tx: Sender<DialogReply>,
@@ -278,41 +268,6 @@ fn pinned_glyph_pages(tab: &Tab) -> Vec<usize> {
     pinned
 }
 
-/// Ready payload for [`MathCache`]. The SVG stays so a later zoom can re-raster.
-pub(crate) struct InlineReady {
-    /// SVG stays so a later zoom can re-raster without asking Typst again.
-    pub(crate) svg: String,
-    pub(crate) texture: Option<egui::TextureHandle>,
-    /// Alpha-identical white copy used by the fixed-contrast live preview.
-    pub(crate) white_texture: Option<egui::TextureHandle>,
-    /// CSS-pixel multiplier used for `texture` (√2 buckets from the base 3×).
-    pub(crate) raster_scale: f32,
-    pub(crate) w_pt: f32,
-    pub(crate) h_pt: f32,
-    pub(crate) baseline_pt: Option<f32>,
-    pub(crate) pdf: Option<Vec<u8>>,
-    pub(crate) pdf_pending: bool,
-    pdf_req: Option<u64>,
-    /// In-flight sharper raster (`MathRender::req`), if any.
-    reraster_req: Option<u64>,
-}
-
-enum CacheAction {
-    Skip,
-    Preview,
-    Pdf,
-}
-
-/// What paint and the popup need from one cached equation.
-pub(crate) struct InlinePreview {
-    pub(crate) pending: bool,
-    pub(crate) texture: Option<egui::TextureHandle>,
-    pub(crate) white_texture: Option<egui::TextureHandle>,
-    pub(crate) width_pt: f32,
-    pub(crate) height_pt: f32,
-    pub(crate) error: Option<String>,
-}
-
 /// Result of an `rfd` file dialog spawned off the UI thread.
 enum DialogReply {
     Open(Option<PathBuf>),
@@ -373,13 +328,8 @@ impl MarkerApp {
                 Arc::clone(&tile_wanted),
                 Arc::clone(&thumb_wanted),
             ),
-            math: MathWorker::spawn(egui_ctx.clone()),
+            math: MathPipeline::spawn(egui_ctx.clone()),
             assistant: AssistantWorker::spawn(egui_ctx.clone()),
-            math_seq: 1,
-            math_deadlines: HashMap::new(),
-            math_cache: MathCache::new(),
-            math_last_good: HashMap::new(),
-            math_scan: HashMap::new(),
             next_doc_id: DocId(1),
             next_tab_id: TabId(1),
             dialog_tx,
@@ -448,9 +398,9 @@ impl MarkerApp {
     /// renders while the text buffer is borrowed.
     pub(crate) fn math_cache_and_tab_mut(
         &mut self,
-    ) -> Option<(&crate::math::MathCache<InlineReady>, &mut Tab)> {
+    ) -> Option<(&crate::math::MathCache<crate::math::InlineReady>, &mut Tab)> {
         let index = self.tab_index(self.active)?;
-        Some((&self.math_cache, &mut self.tabs[index]))
+        Some((&self.math.cache, &mut self.tabs[index]))
     }
 
     pub(crate) fn doc(&self) -> Option<&DocState> {
@@ -486,9 +436,7 @@ impl MarkerApp {
     /// First request for a key starts the timer. Later calls in the same burst
     /// do not push it back, and they do not erase a different key's timer.
     fn arm_math_deadline(&mut self, doc_id: DocId, id: u64, span_key: Option<u64>) {
-        self.math_deadlines
-            .entry((doc_id, id, span_key))
-            .or_insert_with(|| Instant::now() + Duration::from_millis(40));
+        self.math.arm_deadline(doc_id, id, span_key);
     }
 
     pub(crate) fn queue_jump(&mut self, page: usize, y: Option<f32>) {
@@ -1126,10 +1074,7 @@ impl MarkerApp {
         }
         if let Some(doc_id) = self.tab().map(|tab| tab.doc.doc_id) {
             for id in &ids {
-                self.math_last_good
-                    .retain(|&(g, annot, _), _| g != doc_id || annot != *id);
-                self.math_deadlines
-                    .retain(|&(g, annot, _), _| g != doc_id || annot != *id);
+                self.math.forget_annot(doc_id, *id);
             }
         }
         self.seal_undo();
@@ -1268,7 +1213,7 @@ impl eframe::App for MarkerApp {
         });
         let pending = !self.opening.is_empty()
             || self.dialog_busy
-            || !self.math_deadlines.is_empty()
+            || self.math.has_deadlines()
             || self.tabs.iter().any(|tab| {
                 matches!(tab.save, SaveState::Saving)
                     || !tab.inflight.is_empty()
@@ -1288,7 +1233,7 @@ impl eframe::App for MarkerApp {
                 base
             };
             ctx.request_repaint_after(Duration::from_millis(wait));
-        } else if let Some(when) = self.math_deadlines.values().copied().min() {
+        } else if let Some(when) = self.math.soonest_deadline() {
             ctx.request_repaint_after(when.saturating_duration_since(Instant::now()));
         } else if pending {
             ctx.request_repaint_after(Duration::from_millis(500));
@@ -1303,7 +1248,7 @@ impl eframe::App for MarkerApp {
 
 impl MarkerApp {
     /// Point size used for math inside finished assistant turns (ST7).
-    pub(crate) const ASSISTANT_MATH_SIZE: f32 = 14.0;
+    pub(crate) const ASSISTANT_MATH_SIZE: f32 = crate::math::ASSISTANT_MATH_SIZE;
 
     pub(crate) fn dispatch_tiles(&mut self, pixels_per_point: f32) {
         if let Some(index) = self.tab_index(self.active) {

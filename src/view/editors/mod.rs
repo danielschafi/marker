@@ -249,7 +249,7 @@ fn math_edit_style(ink: Color32, font_px: f32) -> Style {
 }
 
 fn cache_render(
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     inner: &str,
     display: bool,
     size_pt: f32,
@@ -267,7 +267,7 @@ fn cache_render(
 }
 
 fn ready_texture(
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     inner: &str,
     display: bool,
     size_pt: f32,
@@ -284,7 +284,7 @@ fn ready_texture(
 }
 
 fn ready_white_texture(
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     inner: &str,
     display: bool,
     size_pt: f32,
@@ -378,7 +378,7 @@ fn ime_composing(ui: &egui::Ui) -> bool {
 
 fn paint_concealed_math(
     ui: &egui::Ui,
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     output: &EditorOutput,
     size_pt: f32,
     color: crate::geom::Rgb,
@@ -479,7 +479,7 @@ fn bubble_plan(
     ctx: &egui::Context,
     content: &str,
     output: &EditorOutput,
-    cache: &crate::math::MathCache<crate::app::InlineReady>,
+    cache: &crate::math::MathCache<crate::math::InlineReady>,
     size_pt: f32,
     color: crate::geom::Rgb,
     typed: bool,

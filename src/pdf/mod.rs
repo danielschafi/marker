@@ -22,4 +22,4 @@ pub use engine::{
     CropImage, Error, InlineMathSave, OutlineNode, PageInfo, SaveSnapshot, SavedXref, TileImage,
     TILE_PX,
 };
-pub use worker::{PdfReply, PdfWorker};
+pub use worker::{OpenedDoc, PdfReply, PdfWorker};

@@ -362,9 +362,7 @@ pub(crate) fn apply_ink(
     )?;
     annot.set_color(rgb_color(color))?;
     annot.set_border_width(width.max(0.25))?;
-    if let Some(bounds) = crate::annot::ink_bounds(strokes, width) {
-        annot.set_rect(to_rect(bounds))?;
-    }
+    // Ink annots have no Rect property; MuPDF derives bounds from the ink list.
     Ok(())
 }
 
@@ -511,9 +509,7 @@ pub(crate) fn create_annot(
             )?;
             annot.set_color(rgb_color(*color))?;
             annot.set_border_width(width.max(0.25))?;
-            if let Some(bounds) = crate::annot::ink_bounds(strokes, *width) {
-                annot.set_rect(to_rect(bounds))?;
-            }
+            // Ink annots have no Rect property; MuPDF derives bounds from the ink list.
             write_marker(
                 doc,
                 &annot,

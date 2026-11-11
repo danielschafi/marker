@@ -5,6 +5,7 @@ mod convert;
 mod engine;
 mod raster;
 mod repair;
+mod save_transaction;
 mod worker;
 
 /// Identity of one open document slot (UI ↔ PDF worker).

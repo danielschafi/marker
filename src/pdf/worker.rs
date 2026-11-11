@@ -1038,6 +1038,609 @@ mod tests {
         }
     }
 
+    struct SaveFixture {
+        dir: PathBuf,
+        worker: PdfWorker,
+        id: DocId,
+    }
+
+    impl SaveFixture {
+        fn new() -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "marker-save-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir(&dir).unwrap();
+            write_sample(&dir.join("sample.pdf"), 1);
+            let worker = PdfWorker::spawn(
+                crate::worker::NoopWake::arc(),
+                Arc::new(Mutex::new(HashMap::new())),
+                Arc::new(Mutex::new(HashMap::new())),
+            );
+            Self {
+                dir,
+                worker,
+                id: DocId(139),
+            }
+        }
+
+        fn open(&self, path: PathBuf) -> Box<super::OpenedDoc> {
+            self.worker.open(self.id, path);
+            wait_until(&self.worker, |replies| {
+                replies
+                    .iter()
+                    .any(|reply| matches!(reply, PdfReply::Opened(_) | PdfReply::Failed { .. }))
+            })
+            .into_iter()
+            .find_map(|reply| match reply {
+                PdfReply::Opened(doc) => Some(doc),
+                PdfReply::Failed { message, .. } => panic!("open failed: {message}"),
+                _ => None,
+            })
+            .expect("open reply")
+        }
+
+        fn save(
+            &self,
+            snapshot: SaveSnapshot,
+        ) -> Result<Vec<crate::pdf::engine::SavedXref>, String> {
+            self.worker.save(self.id, snapshot);
+            wait_until(&self.worker, |replies| {
+                replies
+                    .iter()
+                    .any(|reply| matches!(reply, PdfReply::Saved { .. }))
+            })
+            .into_iter()
+            .find_map(|reply| match reply {
+                PdfReply::Saved { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("save reply")
+        }
+
+        fn names(&self) -> Vec<String> {
+            let mut names: Vec<_> = std::fs::read_dir(&self.dir)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+                .collect();
+            names.sort();
+            names
+        }
+    }
+
+    impl Drop for SaveFixture {
+        fn drop(&mut self) {
+            self.worker.close(self.id);
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    #[test]
+    fn saving_and_reopening_leaves_only_the_pdf_and_preserves_existing_backup() {
+        let fixture = SaveFixture::new();
+        let path = fixture.dir.join("sample.pdf");
+        fixture.open(path.clone());
+        assert_eq!(fixture.names(), ["sample.pdf"]);
+        fixture.save(empty_save()).unwrap();
+        assert_eq!(fixture.names(), ["sample.pdf"]);
+        std::fs::write(fixture.dir.join("sample.pdf.bak"), b"existing backup").unwrap();
+        fixture.save(empty_save()).unwrap();
+        fixture.worker.close(fixture.id);
+        fixture.open(path);
+        assert_eq!(fixture.names(), ["sample.pdf", "sample.pdf.bak"]);
+        assert_eq!(
+            std::fs::read(fixture.dir.join("sample.pdf.bak")).unwrap(),
+            b"existing backup"
+        );
+    }
+
+    #[test]
+    fn failed_save_as_reports_error_preserves_source_and_cleans_candidate() {
+        let fixture = SaveFixture::new();
+        let path = fixture.dir.join("sample.pdf");
+        let original = std::fs::read(&path).unwrap();
+        fixture.open(path.clone());
+        let destination = fixture.dir.join("destination.pdf");
+        std::fs::create_dir(&destination).unwrap();
+        fixture
+            .worker
+            .save_as(fixture.id, destination, empty_save());
+        let replies = wait_until(&fixture.worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
+        });
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, PdfReply::SavedAs { result: Err(_), .. })));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(fixture.names(), ["destination.pdf", "sample.pdf"]);
+        fixture.save(empty_save()).unwrap();
+        fixture.worker.close(fixture.id);
+        fixture.open(path);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn save_as_preserves_symbolic_link_target_and_access_mode() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let fixture = SaveFixture::new();
+        let source = fixture.dir.join("sample.pdf");
+        let original = std::fs::read(&source).unwrap();
+        let destination = fixture.dir.join("destination.pdf");
+        write_sample(&destination, 2);
+        std::fs::set_permissions(&destination, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let link = fixture.dir.join("link.pdf");
+        symlink("destination.pdf", &link).unwrap();
+        fixture.open(source.clone());
+        fixture
+            .worker
+            .save_as(fixture.id, link.clone(), empty_save());
+        let replies = wait_until(&fixture.worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
+        });
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, PdfReply::SavedAs { result: Ok(_), .. })));
+        assert!(std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::metadata(&destination)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read(&source).unwrap(), original);
+        fixture.worker.close(fixture.id);
+        assert_eq!(fixture.open(link).pages.len(), 1);
+        assert_eq!(
+            fixture.names(),
+            ["destination.pdf", "link.pdf", "sample.pdf"]
+        );
+    }
+
+    #[cfg(unix)]
+    struct PausedSave {
+        child: std::process::Child,
+        ready: PathBuf,
+        resume: PathBuf,
+    }
+
+    #[cfg(unix)]
+    impl PausedSave {
+        fn start(fixture: &SaveFixture) -> (Self, PathBuf) {
+            let ready = fixture.dir.with_extension("ready");
+            let resume = fixture.dir.with_extension("resume");
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "pdf::worker::tests::save_in_subprocess",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .env("MARKER_TEST_SAVE_PDF", fixture.dir.join("sample.pdf"))
+                .env("MARKER_TEST_SAVE_READY", &ready)
+                .env("MARKER_TEST_SAVE_RESUME", &resume)
+                .spawn()
+                .unwrap();
+            let mut process = Self {
+                child,
+                ready,
+                resume,
+            };
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Ok(candidate) = std::fs::read_to_string(&process.ready) {
+                    return (process, PathBuf::from(candidate));
+                }
+                assert!(
+                    process.child.try_wait().unwrap().is_none(),
+                    "save process exited before pausing"
+                );
+                assert!(Instant::now() < deadline, "save process did not pause");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+
+        fn resume(&mut self) {
+            std::fs::write(&self.resume, b"resume").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(status) = self.child.try_wait().unwrap() {
+                    assert!(status.success());
+                    return;
+                }
+                assert!(Instant::now() < deadline, "save process did not complete");
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for PausedSave {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+            let _ = std::fs::remove_file(&self.ready);
+            let _ = std::fs::remove_file(&self.resume);
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper, run by the interrupted-save test"]
+    #[cfg(unix)]
+    fn save_in_subprocess() {
+        use crate::annot::{AnnotKind, Annotation};
+        use crate::geom::{PdfRect, Rgb};
+        let path = PathBuf::from(std::env::var_os("MARKER_TEST_SAVE_PDF").expect("subprocess PDF"));
+        let worker = PdfWorker::spawn(
+            crate::worker::NoopWake::arc(),
+            Arc::new(Mutex::new(HashMap::new())),
+            Arc::new(Mutex::new(HashMap::new())),
+        );
+        let id = DocId(139);
+        worker.open(id, path);
+        let replies = wait_until(&worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::Opened(_) | PdfReply::Failed { .. }))
+        });
+        assert_no_fail(&replies);
+        let xref = replies.iter().find_map(|reply| match reply {
+            PdfReply::Opened(doc) => doc
+                .annotations
+                .iter()
+                .find(|annotation| annotation.id == 139)
+                .and_then(|annotation| annotation.xref),
+            _ => None,
+        });
+        let mut snapshot = empty_save();
+        snapshot.upserts.push(Annotation {
+            id: 139,
+            page: 0,
+            xref,
+            dirty: true,
+            revision: 0,
+            kind: AnnotKind::Note {
+                rect: PdfRect::new(72.0, 120.0, 96.0, 144.0),
+                content: "completed child save".into(),
+                color: Rgb::new(255, 196, 0),
+            },
+        });
+        worker.save(id, snapshot);
+        let replies = wait_until(&worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::Saved { .. }))
+        });
+        assert!(replies
+            .iter()
+            .any(|reply| matches!(reply, PdfReply::Saved { result: Ok(_), .. })));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn opening_protects_another_process_save_then_cleans_its_abandoned_candidate() {
+        use std::os::unix::fs::PermissionsExt;
+        let fixture = SaveFixture::new();
+        let path = fixture.dir.join("sample.pdf");
+        let original = std::fs::read(&path).unwrap();
+        let (mut process, candidate) = PausedSave::start(&fixture);
+        assert_eq!(
+            std::fs::metadata(&candidate).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(fixture.open(path.clone()).annotations.is_empty());
+        assert!(
+            candidate.exists(),
+            "another process's active candidate must survive open"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            original,
+            "target must stay intact before replacement"
+        );
+        process.resume();
+        drop(process);
+        fixture.worker.close(fixture.id);
+        let opened = fixture.open(path.clone());
+        assert_eq!(opened.annotations.len(), 1);
+        assert_eq!(opened.annotations[0].id, 139);
+        assert_eq!(fixture.names(), ["sample.pdf"]);
+
+        for (name, contents) in [
+            ("sample.pdf.bak", "original backup"),
+            ("sample.pdf.marker-tmp", "ambiguous legacy save"),
+            (
+                "sample.pdf.marker-save-v1-unknown.marker-tmp",
+                "unrecognized owner",
+            ),
+            (
+                "other.pdf.marker-save-v1-999999-123-0.marker-tmp",
+                "unrelated file",
+            ),
+        ] {
+            std::fs::write(fixture.dir.join(name), contents).unwrap();
+        }
+        let saved = std::fs::read(&path).unwrap();
+        let (mut process, abandoned) = PausedSave::start(&fixture);
+        process.child.kill().unwrap();
+        process.child.wait().unwrap();
+        drop(process);
+        assert!(abandoned.exists());
+        std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o400)).unwrap();
+        fixture.worker.close(fixture.id);
+        let opened = fixture.open(path);
+        assert_eq!(opened.annotations.len(), 1);
+        assert!(
+            !abandoned.exists(),
+            "reopening must remove the dead process's candidate"
+        );
+        assert_eq!(
+            std::fs::read(fixture.dir.join("sample.pdf")).unwrap(),
+            saved
+        );
+        assert_eq!(
+            fixture.names(),
+            [
+                "other.pdf.marker-save-v1-999999-123-0.marker-tmp",
+                "sample.pdf",
+                "sample.pdf.bak",
+                "sample.pdf.marker-save-v1-unknown.marker-tmp",
+                "sample.pdf.marker-tmp",
+            ]
+        );
+        assert_eq!(
+            std::fs::read(fixture.dir.join("sample.pdf.bak")).unwrap(),
+            b"original backup"
+        );
+    }
+
+    #[test]
+    fn repeated_saves_compaction_and_save_as_preserve_annotations_and_refresh_reader() {
+        use crate::annot::{AnnotKind, Annotation};
+        use crate::geom::{PdfRect, Rgb};
+        let fixture = SaveFixture::new();
+        let source = fixture.dir.join("sample.pdf");
+        fixture.open(source.clone());
+        let first_content = "first saved note ".repeat(2048);
+        let second_content = "second saved note ".repeat(2048);
+        let mut note = Annotation {
+            id: 139,
+            page: 0,
+            xref: None,
+            dirty: true,
+            revision: 0,
+            kind: AnnotKind::Note {
+                rect: PdfRect::new(72.0, 120.0, 96.0, 144.0),
+                content: first_content,
+                color: Rgb::new(255, 196, 0),
+            },
+        };
+        let mut snapshot = empty_save();
+        snapshot.upserts.push(note.clone());
+        note.xref = Some(fixture.save(snapshot).unwrap()[0].xref);
+        let first_len = std::fs::metadata(&source).unwrap().len();
+        if let AnnotKind::Note { content, .. } = &mut note.kind {
+            *content = second_content.clone();
+        }
+        let mut snapshot = empty_save();
+        snapshot.upserts.push(note.clone());
+        note.xref = Some(fixture.save(snapshot).unwrap()[0].xref);
+        assert!(
+            std::fs::metadata(&source).unwrap().len() < first_len * 3 / 2,
+            "compaction should not retain every large annotation revision"
+        );
+
+        fixture.worker.glyphs(fixture.id, 0);
+        fixture.worker.search(fixture.id, 139, "Hello".into());
+        let replies = wait_until(&fixture.worker, |replies| {
+            replies.iter().any(|reply| matches!(reply, PdfReply::Glyphs { glyphs, .. } if !glyphs.is_empty()))
+                && replies.iter().any(|reply| matches!(reply, PdfReply::Search { seq: 139, done: true, hits, .. } if !hits.is_empty()))
+        });
+        assert_no_fail(&replies);
+        fixture.worker.close(fixture.id);
+        let opened = fixture.open(source.clone());
+        assert_eq!(opened.annotations.len(), 1);
+        assert!(
+            matches!(&opened.annotations[0].kind, AnnotKind::Note { content, .. } if content == &second_content)
+        );
+        note.xref = opened.annotations[0].xref;
+        let source_bytes = std::fs::read(&source).unwrap();
+        let destination = fixture.dir.join("copy.pdf");
+        let mut snapshot = empty_save();
+        snapshot.upserts.push(note.clone());
+        fixture
+            .worker
+            .save_as(fixture.id, destination.clone(), snapshot);
+        let replies = wait_until(&fixture.worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
+        });
+        note.xref = replies.into_iter().find_map(|reply| match reply {
+            PdfReply::SavedAs { result, .. } => Some(result.unwrap()[0].xref),
+            _ => None,
+        });
+        if let AnnotKind::Note { content, .. } = &mut note.kind {
+            *content = "saved after retarget".into();
+        }
+        let mut snapshot = empty_save();
+        snapshot.upserts.push(note);
+        fixture.save(snapshot).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+        fixture.worker.close(fixture.id);
+        let opened = fixture.open(destination);
+        assert_eq!(opened.annotations.len(), 1);
+        assert!(
+            matches!(&opened.annotations[0].kind, AnnotKind::Note { content, .. } if content == "saved after retarget")
+        );
+        fixture.worker.close(fixture.id);
+        fixture.open(source);
+        assert_eq!(fixture.names(), ["copy.pdf", "sample.pdf"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn abandoned_cleanup_permission_error_is_reported_and_open_can_be_retried() {
+        use std::os::unix::fs::PermissionsExt;
+        // Root bypasses directory write permissions, so this failure is unavailable.
+        // SAFETY: geteuid takes no arguments and only reports the effective user ID.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        struct RestoreDirectory(PathBuf);
+        impl Drop for RestoreDirectory {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        let fixture = SaveFixture::new();
+        let path = fixture.dir.join("sample.pdf");
+        let original = std::fs::read(&path).unwrap();
+        let (mut process, abandoned) = PausedSave::start(&fixture);
+        process.child.kill().unwrap();
+        process.child.wait().unwrap();
+        drop(process);
+        let restore = RestoreDirectory(fixture.dir.clone());
+        std::fs::set_permissions(&fixture.dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        fixture.worker.open(fixture.id, path.clone());
+        let replies = wait_including_failure(&fixture.worker, |replies| {
+            replies
+                .iter()
+                .any(|reply| matches!(reply, PdfReply::Opened(_) | PdfReply::Failed { .. }))
+        });
+        assert!(replies.iter().any(|reply| matches!(reply, PdfReply::Failed { message, .. } if message.contains("could not remove abandoned save"))));
+        assert!(abandoned.exists());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        drop(restore);
+        fixture.open(path);
+        assert!(!abandoned.exists());
+        assert_eq!(fixture.names(), ["sample.pdf"]);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn replacement_preserves_owner_group_and_posix_access_acl() {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::MetadataExt;
+        let fixture = SaveFixture::new();
+        let path = fixture.dir.join("sample.pdf");
+        let file = std::fs::File::open(&path).unwrap();
+        let mut groups = [0_u32; 64];
+        // SAFETY: the output array has capacity for the group count passed in.
+        let count = unsafe { libc::getgroups(64, groups.as_mut_ptr()) };
+        assert!(count >= 0);
+        let metadata = file.metadata().unwrap();
+        if let Some(group) = groups[..usize::try_from(count).unwrap()]
+            .iter()
+            .find(|group| **group != metadata.gid())
+        {
+            // SAFETY: this valid descriptor remains open, -1 keeps its owner.
+            // Restricted user namespaces can hide supplementary group mappings.
+            let _ = unsafe { libc::fchown(file.as_raw_fd(), u32::MAX, *group) };
+        }
+        // Linux POSIX ACL xattr v2: owner rw, named current user r, group r,
+        // mask r, others none. Tags/layout follow linux/posix_acl_xattr.h.
+        let mut acl = 2_u32.to_le_bytes().to_vec();
+        for (tag, permission, id) in [
+            (1_u16, 6_u16, u32::MAX),
+            (2, 4, metadata.uid()),
+            (4, 4, u32::MAX),
+            (16, 4, u32::MAX),
+            (32, 0, u32::MAX),
+        ] {
+            acl.extend_from_slice(&tag.to_le_bytes());
+            acl.extend_from_slice(&permission.to_le_bytes());
+            acl.extend_from_slice(&id.to_le_bytes());
+        }
+        let name = c"system.posix_acl_access";
+        // SAFETY: the valid descriptor, C string and ACL byte buffer live through this call.
+        assert_eq!(
+            unsafe {
+                libc::fsetxattr(
+                    file.as_raw_fd(),
+                    name.as_ptr(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            },
+            0,
+            "fixture ACL: {}",
+            std::io::Error::last_os_error()
+        );
+        let before = file.metadata().unwrap();
+        fixture.open(path.clone());
+        fixture.save(empty_save()).unwrap();
+        let after = std::fs::metadata(&path).unwrap();
+        assert_eq!(
+            (after.uid(), after.gid(), after.mode()),
+            (before.uid(), before.gid(), before.mode())
+        );
+        let file = std::fs::File::open(path).unwrap();
+        let mut saved_acl = vec![0; acl.len()];
+        // SAFETY: the descriptor, C string and writable output buffer are valid for this call.
+        let len = unsafe {
+            libc::fgetxattr(
+                file.as_raw_fd(),
+                name.as_ptr(),
+                saved_acl.as_mut_ptr().cast(),
+                saved_acl.len(),
+            )
+        };
+        assert_eq!(
+            len,
+            isize::try_from(acl.len()).unwrap(),
+            "saved ACL: {}",
+            std::io::Error::last_os_error()
+        );
+        assert_eq!(saved_acl, acl);
+
+        // A target without an ACL must not acquire the directory's default ACL.
+        let directory = std::fs::File::open(&fixture.dir).unwrap();
+        // SAFETY: the valid directory descriptor, name and ACL bytes outlive the call.
+        assert_eq!(
+            unsafe {
+                libc::fsetxattr(
+                    directory.as_raw_fd(),
+                    c"system.posix_acl_default".as_ptr(),
+                    acl.as_ptr().cast(),
+                    acl.len(),
+                    0,
+                )
+            },
+            0
+        );
+        // SAFETY: this valid descriptor and ACL name outlive the call.
+        assert_eq!(
+            unsafe { libc::fremovexattr(file.as_raw_fd(), name.as_ptr()) },
+            0
+        );
+        fixture.save(empty_save()).unwrap();
+        let file = std::fs::File::open(fixture.dir.join("sample.pdf")).unwrap();
+        // SAFETY: a null buffer and zero size query the ACL length on a valid descriptor.
+        assert_eq!(
+            unsafe { libc::fgetxattr(file.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ENODATA)
+        );
+        assert_eq!(fixture.names(), ["sample.pdf"]);
+    }
+
     #[cfg(target_os = "linux")]
     fn thread_names() -> Vec<String> {
         let mut names = Vec::new();
@@ -1318,11 +1921,19 @@ mod tests {
     }
 
     fn wait_until(worker: &PdfWorker, pred: impl Fn(&[PdfReply]) -> bool) -> Vec<PdfReply> {
+        let replies = wait_including_failure(worker, pred);
+        assert_no_fail(&replies);
+        replies
+    }
+
+    fn wait_including_failure(
+        worker: &PdfWorker,
+        pred: impl Fn(&[PdfReply]) -> bool,
+    ) -> Vec<PdfReply> {
         let start = Instant::now();
         let mut all = Vec::new();
         while start.elapsed() < Duration::from_secs(20) {
             all.extend(worker.poll());
-            assert_no_fail(&all);
             if pred(&all) {
                 return all;
             }

@@ -215,43 +215,112 @@ fn search_page_respects_case_flag_on_sample() {
 }
 
 #[test]
-fn first_persist_copies_pristine_bytes_to_bak() {
-    let dir = std::env::temp_dir().join(format!(
-        "marker-bak-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+fn failed_candidate_sync_preserves_pdf_and_allows_annotation_retry() {
+    let dir = std::env::temp_dir().join(format!("marker-sync-failure-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sample.pdf");
     sample_pdf(&path);
     let original = std::fs::read(&path).unwrap();
-    let bak = bak_path(&path);
-
     let mut engine = DocumentEngine::open(&path).unwrap().engine;
-    let empty = SaveSnapshot {
+    let snapshot = SaveSnapshot {
+        upserts: vec![Annotation {
+            id: 139,
+            page: 0,
+            xref: None,
+            dirty: true,
+            revision: 0,
+            kind: AnnotKind::Note {
+                rect: PdfRect::new(72.0, 120.0, 96.0, 144.0),
+                content: "retry this note".into(),
+                color: Rgb::new(255, 196, 0),
+            },
+        }],
+        deletes: Vec::new(),
+        math_pdfs: HashMap::new(),
+        inline_math: Vec::new(),
+        rich_text_parents: Vec::new(),
+    };
+    let result = super::super::save_transaction::with_failure(
+        super::super::save_transaction::Failure::Sync,
+        || engine.save(&snapshot),
+    );
+    assert!(result.is_err(), "synchronization failure must be reported");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert!(DocumentEngine::open(&path).unwrap().annotations.is_empty());
+    engine.save(&snapshot).unwrap();
+    let loaded = DocumentEngine::open(&path).unwrap();
+    assert_eq!(
+        loaded.annotations.len(),
+        1,
+        "retry must not duplicate new notes"
+    );
+    assert_eq!(loaded.annotations[0].id, 139);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn failed_candidate_write_and_replacement_leave_readable_target_and_no_temporary_files() {
+    use super::super::save_transaction::{with_failure, Failure};
+    for failure in [Failure::Write, Failure::Replace] {
+        let dir = std::env::temp_dir().join(format!("marker-write-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sample.pdf");
+        sample_pdf(&path);
+        let original = std::fs::read(&path).unwrap();
+        let mut engine = DocumentEngine::open(&path).unwrap().engine;
+        let snapshot = SaveSnapshot {
+            upserts: Vec::new(),
+            deletes: Vec::new(),
+            math_pdfs: HashMap::new(),
+            inline_math: Vec::new(),
+            rich_text_parents: Vec::new(),
+        };
+        assert!(with_failure(failure, || engine.save(&snapshot)).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let reopened = DocumentEngine::open(&path).unwrap();
+        assert!(!reopened
+            .engine
+            .search_page(0, "Hello", true)
+            .unwrap()
+            .is_empty());
+        engine.save(&snapshot).unwrap();
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[test]
+fn cleanup_failure_is_reported_with_the_original_save_error() {
+    use super::super::save_transaction::{with_failure, Failure};
+    let dir = std::env::temp_dir().join(format!("marker-cleanup-failure-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("sample.pdf");
+    sample_pdf(&path);
+    let original = std::fs::read(&path).unwrap();
+    let mut engine = DocumentEngine::open(&path).unwrap().engine;
+    let snapshot = SaveSnapshot {
         upserts: Vec::new(),
         deletes: Vec::new(),
         math_pdfs: HashMap::new(),
         inline_math: Vec::new(),
         rich_text_parents: Vec::new(),
     };
-    engine.save(&empty).unwrap();
+    let error = with_failure(Failure::Cleanup, || engine.save(&snapshot))
+        .expect_err("failed removal must be reported");
+    let message = error.to_string();
     assert!(
-        bak.exists(),
-        "expected {}.bak after first save",
-        path.display()
+        message.contains("injected save failure"),
+        "original error: {message}"
     );
-    assert_eq!(std::fs::read(&bak).unwrap(), original);
-
-    // Second save must not rotate or rewrite an existing bak.
-    std::fs::write(&bak, b"frozen-bak").unwrap();
-    engine.save(&empty).unwrap();
-    assert_eq!(std::fs::read(&bak).unwrap(), b"frozen-bak");
-
-    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        message.contains("could not remove temporary save"),
+        "cleanup error: {message}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]

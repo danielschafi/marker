@@ -41,6 +41,23 @@ pub enum Error {
     /// MuPDF reported no pages (and Poppler repair was unavailable or also failed).
     #[error("This PDF has no readable pages. It may be damaged.")]
     NoReadablePages,
+    #[error("could not remove temporary save: {source}")]
+    TemporarySaveCleanup {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{save} (could not remove temporary save: {cleanup})")]
+    SaveAndCleanup {
+        #[source]
+        save: Box<Error>,
+        cleanup: std::io::Error,
+    },
+    #[error("could not remove abandoned save {}: {source}", path.display())]
+    AbandonedSaveCleanup {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{0}")]
     Message(String),
 }
@@ -501,6 +518,10 @@ impl DocumentEngine {
 
     /// Stage incremental output and any compaction before one atomic replacement.
     /// `Ok(true)` means xrefs may have moved during a full rewrite.
+    ///
+    /// # Errors
+    /// Returns PDF encoding/validation errors or transaction metadata, write,
+    /// synchronization, replacement, and cleanup failures.
     fn persist(&mut self) -> Result<bool, Error> {
         let path = self.path.clone();
         let incremental = self.doc.can_be_saved_incrementally();
@@ -511,7 +532,7 @@ impl DocumentEngine {
                 options.set_incremental(true);
                 let name = candidate
                     .to_str()
-                    .ok_or("The PDF path is not valid UTF-8.")?;
+                    .ok_or("the PDF path is not valid UTF-8")?;
                 self.doc.save_with_options(name, options)?;
             } else {
                 self.doc.write_to_with_options(file, options)?;

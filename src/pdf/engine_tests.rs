@@ -214,11 +214,44 @@ fn search_page_respects_case_flag_on_sample() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+struct SaveTestDirectory(PathBuf);
+
+impl SaveTestDirectory {
+    fn new(label: &str) -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "marker-{label}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for SaveTestDirectory {
+    fn drop(&mut self) {
+        // Best-effort teardown must not mask an assertion panic.
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn empty_save() -> SaveSnapshot {
+    SaveSnapshot {
+        upserts: Vec::new(),
+        deletes: Vec::new(),
+        math_pdfs: HashMap::new(),
+        inline_math: Vec::new(),
+        rich_text_parents: Vec::new(),
+    }
+}
+
 #[test]
 fn failed_candidate_sync_preserves_pdf_and_allows_annotation_retry() {
-    let dir = std::env::temp_dir().join(format!("marker-sync-failure-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("sample.pdf");
+    let dir = SaveTestDirectory::new("sync-failure");
+    let path = dir.0.join("sample.pdf");
     sample_pdf(&path);
     let original = std::fs::read(&path).unwrap();
     let mut engine = DocumentEngine::open(&path).unwrap().engine;
@@ -246,7 +279,7 @@ fn failed_candidate_sync_preserves_pdf_and_allows_annotation_retry() {
     );
     assert!(result.is_err(), "synchronization failure must be reported");
     assert_eq!(std::fs::read(&path).unwrap(), original);
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
     assert!(DocumentEngine::open(&path).unwrap().annotations.is_empty());
     engine.save(&snapshot).unwrap();
     let loaded = DocumentEngine::open(&path).unwrap();
@@ -256,29 +289,21 @@ fn failed_candidate_sync_preserves_pdf_and_allows_annotation_retry() {
         "retry must not duplicate new notes"
     );
     assert_eq!(loaded.annotations[0].id, 139);
-    std::fs::remove_dir_all(&dir).unwrap();
 }
 
 #[test]
 fn failed_candidate_write_and_replacement_leave_readable_target_and_no_temporary_files() {
     use super::super::save_transaction::{with_failure, Failure};
     for failure in [Failure::Write, Failure::Replace] {
-        let dir = std::env::temp_dir().join(format!("marker-write-failure-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("sample.pdf");
+        let dir = SaveTestDirectory::new("write-failure");
+        let path = dir.0.join("sample.pdf");
         sample_pdf(&path);
         let original = std::fs::read(&path).unwrap();
         let mut engine = DocumentEngine::open(&path).unwrap().engine;
-        let snapshot = SaveSnapshot {
-            upserts: Vec::new(),
-            deletes: Vec::new(),
-            math_pdfs: HashMap::new(),
-            inline_math: Vec::new(),
-            rich_text_parents: Vec::new(),
-        };
+        let snapshot = empty_save();
         assert!(with_failure(failure, || engine.save(&snapshot)).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
         let reopened = DocumentEngine::open(&path).unwrap();
         assert!(!reopened
             .engine
@@ -286,29 +311,25 @@ fn failed_candidate_write_and_replacement_leave_readable_target_and_no_temporary
             .unwrap()
             .is_empty());
         engine.save(&snapshot).unwrap();
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 1);
     }
 }
 
 #[test]
 fn cleanup_failure_is_reported_with_the_original_save_error() {
     use super::super::save_transaction::{with_failure, Failure};
-    let dir = std::env::temp_dir().join(format!("marker-cleanup-failure-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("sample.pdf");
+    let dir = SaveTestDirectory::new("cleanup-failure");
+    let path = dir.0.join("sample.pdf");
     sample_pdf(&path);
     let original = std::fs::read(&path).unwrap();
     let mut engine = DocumentEngine::open(&path).unwrap().engine;
-    let snapshot = SaveSnapshot {
-        upserts: Vec::new(),
-        deletes: Vec::new(),
-        math_pdfs: HashMap::new(),
-        inline_math: Vec::new(),
-        rich_text_parents: Vec::new(),
-    };
+    let snapshot = empty_save();
     let error = with_failure(Failure::Cleanup, || engine.save(&snapshot))
         .expect_err("failed removal must be reported");
+    assert!(
+        std::error::Error::source(&error).is_some(),
+        "the original save error must remain available as a source"
+    );
     let message = error.to_string();
     assert!(
         message.contains("injected save failure"),
@@ -319,8 +340,7 @@ fn cleanup_failure_is_reported_with_the_original_save_error() {
         "cleanup error: {message}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), original);
-    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
-    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 2);
 }
 
 #[test]

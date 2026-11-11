@@ -1102,6 +1102,25 @@ mod tests {
             .expect("save reply")
         }
 
+        fn save_as(
+            &self,
+            destination: PathBuf,
+            snapshot: SaveSnapshot,
+        ) -> Result<Vec<crate::pdf::engine::SavedXref>, String> {
+            self.worker.save_as(self.id, destination, snapshot);
+            wait_until(&self.worker, |replies| {
+                replies
+                    .iter()
+                    .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
+            })
+            .into_iter()
+            .find_map(|reply| match reply {
+                PdfReply::SavedAs { result, .. } => Some(result),
+                _ => None,
+            })
+            .expect("save as reply")
+        }
+
         fn names(&self) -> Vec<String> {
             let mut names: Vec<_> = std::fs::read_dir(&self.dir)
                 .unwrap()
@@ -1115,6 +1134,7 @@ mod tests {
     impl Drop for SaveFixture {
         fn drop(&mut self) {
             self.worker.close(self.id);
+            // Best-effort teardown must not mask an assertion panic.
             let _ = std::fs::remove_dir_all(&self.dir);
         }
     }
@@ -1139,6 +1159,25 @@ mod tests {
     }
 
     #[test]
+    fn saving_and_save_as_support_long_pdf_basenames() {
+        let fixture = SaveFixture::new();
+        let source_name = format!("{}.pdf", "s".repeat(226));
+        let destination_name = format!("{}.pdf", "d".repeat(226));
+        let source = fixture.dir.join(&source_name);
+        std::fs::rename(fixture.dir.join("sample.pdf"), &source).unwrap();
+        fixture.open(source.clone());
+        fixture.save(empty_save()).unwrap();
+        let source_bytes = std::fs::read(&source).unwrap();
+        let destination = fixture.dir.join(&destination_name);
+        fixture.save_as(destination.clone(), empty_save()).unwrap();
+        fixture.save(empty_save()).unwrap();
+        assert_eq!(std::fs::read(&source).unwrap(), source_bytes);
+        fixture.worker.close(fixture.id);
+        assert_eq!(fixture.open(destination).pages.len(), 1);
+        assert_eq!(fixture.names(), [destination_name, source_name]);
+    }
+
+    #[test]
     fn failed_save_as_reports_error_preserves_source_and_cleans_candidate() {
         let fixture = SaveFixture::new();
         let path = fixture.dir.join("sample.pdf");
@@ -1146,17 +1185,7 @@ mod tests {
         fixture.open(path.clone());
         let destination = fixture.dir.join("destination.pdf");
         std::fs::create_dir(&destination).unwrap();
-        fixture
-            .worker
-            .save_as(fixture.id, destination, empty_save());
-        let replies = wait_until(&fixture.worker, |replies| {
-            replies
-                .iter()
-                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
-        });
-        assert!(replies
-            .iter()
-            .any(|reply| matches!(reply, PdfReply::SavedAs { result: Err(_), .. })));
+        assert!(fixture.save_as(destination, empty_save()).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), original);
         assert_eq!(fixture.names(), ["destination.pdf", "sample.pdf"]);
         fixture.save(empty_save()).unwrap();
@@ -1177,17 +1206,7 @@ mod tests {
         let link = fixture.dir.join("link.pdf");
         symlink("destination.pdf", &link).unwrap();
         fixture.open(source.clone());
-        fixture
-            .worker
-            .save_as(fixture.id, link.clone(), empty_save());
-        let replies = wait_until(&fixture.worker, |replies| {
-            replies
-                .iter()
-                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
-        });
-        assert!(replies
-            .iter()
-            .any(|reply| matches!(reply, PdfReply::SavedAs { result: Ok(_), .. })));
+        fixture.save_as(link.clone(), empty_save()).unwrap();
         assert!(std::fs::symlink_metadata(&link)
             .unwrap()
             .file_type()
@@ -1219,8 +1238,12 @@ mod tests {
     #[cfg(unix)]
     impl PausedSave {
         fn start(fixture: &SaveFixture) -> (Self, PathBuf) {
-            let ready = fixture.dir.with_extension("ready");
-            let resume = fixture.dir.with_extension("resume");
+            Self::start_for(&fixture.dir.join("sample.pdf"))
+        }
+
+        fn start_for(path: &std::path::Path) -> (Self, PathBuf) {
+            let ready = path.with_extension("ready");
+            let resume = path.with_extension("resume");
             let child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
@@ -1228,7 +1251,7 @@ mod tests {
                     "--ignored",
                     "--nocapture",
                 ])
-                .env("MARKER_TEST_SAVE_PDF", fixture.dir.join("sample.pdf"))
+                .env("MARKER_TEST_SAVE_PDF", path)
                 .env("MARKER_TEST_SAVE_READY", &ready)
                 .env("MARKER_TEST_SAVE_RESUME", &resume)
                 .spawn()
@@ -1269,6 +1292,8 @@ mod tests {
     #[cfg(unix)]
     impl Drop for PausedSave {
         fn drop(&mut self) {
+            // The child may already have exited and files may never have been
+            // created. Best-effort teardown must not mask an assertion panic.
             let _ = self.child.kill();
             let _ = self.child.wait();
             let _ = std::fs::remove_file(&self.ready);
@@ -1330,6 +1355,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn long_pdf_names_keep_active_and_unrelated_candidates_protected() {
+        let fixture = SaveFixture::new();
+        let prefix = "x".repeat(225);
+        let path = fixture.dir.join(format!("{prefix}a.pdf"));
+        let other_path = fixture.dir.join(format!("{prefix}b.pdf"));
+        std::fs::rename(fixture.dir.join("sample.pdf"), &path).unwrap();
+        std::fs::copy(&path, &other_path).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let (mut active, candidate) = PausedSave::start_for(&path);
+        fixture.open(path.clone());
+        assert!(
+            candidate.exists(),
+            "an active long-name save must survive open"
+        );
+        let (mut unrelated, other_candidate) = PausedSave::start_for(&other_path);
+        unrelated.child.kill().unwrap();
+        unrelated.child.wait().unwrap();
+        drop(unrelated);
+        active.child.kill().unwrap();
+        active.child.wait().unwrap();
+        drop(active);
+        fixture.worker.close(fixture.id);
+        fixture.open(path.clone());
+        assert!(
+            !candidate.exists(),
+            "the associated abandoned save must be removed"
+        );
+        assert!(
+            other_candidate.exists(),
+            "another PDF's abandoned save must survive"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        fixture.worker.close(fixture.id);
+        fixture.open(other_path);
+        assert!(!other_candidate.exists());
+        assert_eq!(fixture.names().len(), 2);
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn opening_protects_another_process_save_then_cleans_its_abandoned_candidate() {
         use std::os::unix::fs::PermissionsExt;
         let fixture = SaveFixture::new();
@@ -1376,6 +1441,11 @@ mod tests {
         let (mut process, abandoned) = PausedSave::start(&fixture);
         process.child.kill().unwrap();
         process.child.wait().unwrap();
+        let legacy = fixture.dir.join(format!(
+            "sample.pdf.marker-save-v1-{}-123-0.marker-tmp",
+            process.child.id()
+        ));
+        std::fs::write(&legacy, b"abandoned v1 save").unwrap();
         drop(process);
         assert!(abandoned.exists());
         std::fs::set_permissions(&abandoned, std::fs::Permissions::from_mode(0o400)).unwrap();
@@ -1386,6 +1456,7 @@ mod tests {
             !abandoned.exists(),
             "reopening must remove the dead process's candidate"
         );
+        assert!(!legacy.exists(), "owned v1 saves must still be cleaned");
         assert_eq!(
             std::fs::read(fixture.dir.join("sample.pdf")).unwrap(),
             saved
@@ -1460,18 +1531,7 @@ mod tests {
         let destination = fixture.dir.join("copy.pdf");
         let mut snapshot = empty_save();
         snapshot.upserts.push(note.clone());
-        fixture
-            .worker
-            .save_as(fixture.id, destination.clone(), snapshot);
-        let replies = wait_until(&fixture.worker, |replies| {
-            replies
-                .iter()
-                .any(|reply| matches!(reply, PdfReply::SavedAs { .. }))
-        });
-        note.xref = replies.into_iter().find_map(|reply| match reply {
-            PdfReply::SavedAs { result, .. } => Some(result.unwrap()[0].xref),
-            _ => None,
-        });
+        note.xref = Some(fixture.save_as(destination.clone(), snapshot).unwrap()[0].xref);
         if let AnnotKind::Note { content, .. } = &mut note.kind {
             *content = "saved after retarget".into();
         }
@@ -1502,6 +1562,7 @@ mod tests {
         struct RestoreDirectory(PathBuf);
         impl Drop for RestoreDirectory {
             fn drop(&mut self) {
+                // Best-effort restoration must not mask an assertion panic.
                 let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
             }
         }

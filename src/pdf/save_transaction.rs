@@ -9,6 +9,11 @@ static NEXT_SAVE: AtomicU64 = AtomicU64::new(0);
 
 /// Run a write against an exclusively created sibling, then replace the target.
 /// Cleanup errors are returned alongside the original failure.
+///
+/// # Errors
+/// Returns target resolution/access-metadata errors, exclusive creation or lock
+/// failures, callback errors, and synchronization or replacement failures.
+/// Cleanup failures retain both the original save error and the removal error.
 pub(super) fn write<T>(
     target: &Path,
     write_candidate: impl FnOnce(&Path, &mut File) -> Result<T, Error>,
@@ -45,10 +50,11 @@ pub(super) fn write<T>(
     match (result, candidate.cleanup()) {
         (Ok(value), Ok(())) => Ok(value),
         (Err(error), Ok(())) => Err(error),
-        (result, Err(cleanup)) => Err(Error::Message(match result {
-            Ok(_) => format!("could not remove temporary save: {cleanup}"),
-            Err(error) => format!("{error}; could not remove temporary save: {cleanup}"),
-        })),
+        (Ok(_), Err(source)) => Err(Error::TemporarySaveCleanup { source }),
+        (Err(save), Err(cleanup)) => Err(Error::SaveAndCleanup {
+            save: Box::new(save),
+            cleanup,
+        }),
     }
 }
 
@@ -169,6 +175,9 @@ fn apply_acl(file: &File, acl: Option<&[u8]>) -> Result<(), Error> {
 
 /// Resolve an existing symbolic link to its target; a dangling link is an error.
 /// New destinations still resolve their parent so candidates share its filesystem.
+///
+/// # Errors
+/// Returns filesystem metadata/canonicalization errors or an invalid-path error.
 fn resolve_target(path: &Path) -> Result<PathBuf, Error> {
     match std::fs::symlink_metadata(path) {
         Ok(_) => Ok(path.canonicalize()?),
@@ -177,7 +186,7 @@ fn resolve_target(path: &Path) -> Result<PathBuf, Error> {
                 .parent()
                 .filter(|parent| !parent.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
-            let name = path.file_name().ok_or("The PDF path has no file name.")?;
+            let name = path.file_name().ok_or("the PDF path has no file name")?;
             Ok(parent.canonicalize()?.join(name))
         }
         Err(error) => Err(error.into()),
@@ -187,6 +196,10 @@ fn resolve_target(path: &Path) -> Result<PathBuf, Error> {
 /// Remove only versioned candidates whose owning process has exited and whose
 /// exclusive lock can be acquired. PID liveness also protects the interval
 /// between exclusive creation and locking; reused PIDs conservatively retain files.
+///
+/// # Errors
+/// Returns target resolution or directory/entry metadata errors. Candidate open,
+/// lock, and removal failures retain the abandoned candidate path and I/O source.
 #[cfg(unix)]
 pub(super) fn cleanup_abandoned(path: &Path) -> Result<(), Error> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -194,18 +207,18 @@ pub(super) fn cleanup_abandoned(path: &Path) -> Result<(), Error> {
     let name = target
         .file_name()
         .and_then(|name| name.to_str())
-        .ok_or("The PDF path is not valid UTF-8.")?;
-    let prefix = format!("{name}.marker-save-v1-");
+        .ok_or("the PDF path is not valid UTF-8")?;
+    let prefix = candidate_prefix(name);
+    let legacy_prefix = format!("{name}.marker-save-v1-");
     let parent = target
         .parent()
-        .ok_or("The PDF path has no parent directory.")?;
+        .ok_or("the PDF path has no parent directory")?;
     for entry in std::fs::read_dir(parent)? {
         let entry = entry?;
         let filename = entry.file_name();
-        let Some(owner) = filename
-            .to_str()
-            .and_then(|name| candidate_owner(name, &prefix))
-        else {
+        let Some(owner) = filename.to_str().and_then(|name| {
+            candidate_owner(name, &prefix).or_else(|| candidate_owner(name, &legacy_prefix))
+        }) else {
             continue;
         };
         if !owner_is_dead(owner) || !entry.file_type()?.is_file() {
@@ -246,6 +259,10 @@ pub(super) fn cleanup_abandoned(path: &Path) -> Result<(), Error> {
 
 // Without a supported cross-process ownership check, retaining a candidate is
 // safer than guessing it is abandoned. Marker currently ships Linux binaries.
+/// Retain candidates when cross-process ownership checks are unavailable.
+///
+/// # Errors
+/// This fallback always succeeds without removing files.
 #[cfg(not(unix))]
 pub(super) fn cleanup_abandoned(_path: &Path) -> Result<(), Error> {
     Ok(())
@@ -253,10 +270,22 @@ pub(super) fn cleanup_abandoned(_path: &Path) -> Result<(), Error> {
 
 #[cfg(unix)]
 fn cleanup_error(path: &Path, error: std::io::Error) -> Error {
-    Error::Message(format!(
-        "could not remove abandoned save {}: {error}",
-        path.display()
-    ))
+    Error::AbandonedSaveCleanup {
+        path: path.to_path_buf(),
+        source: error,
+    }
+}
+
+/// FNV-1a 128 over the full basename keeps the target identifier stable across
+/// processes and directory renames. Even maximum-width owner/nonce fields keep
+/// the candidate basename below 160 bytes, independent of the PDF name length.
+fn candidate_prefix(name: &str) -> String {
+    let mut identifier = 0x6c62272e07bb014262b821756295c58d_u128;
+    for byte in name.bytes() {
+        identifier ^= u128::from(byte);
+        identifier = identifier.wrapping_mul(0x0000000001000000000000000000013b);
+    }
+    format!(".marker-save-v2-{identifier:032x}-")
 }
 
 #[cfg(unix)]
@@ -305,7 +334,7 @@ impl Candidate {
         let name = target
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or("The PDF path is not valid UTF-8.")?;
+            .ok_or("the PDF path is not valid UTF-8")?;
         loop {
             let nonce = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -313,7 +342,8 @@ impl Candidate {
                 .as_nanos();
             let sequence = NEXT_SAVE.fetch_add(1, Ordering::Relaxed);
             let path = target.with_file_name(format!(
-                "{name}.marker-save-v1-{}-{nonce}-{sequence}.marker-tmp",
+                "{}{}-{nonce}-{sequence}.marker-tmp",
+                candidate_prefix(name),
                 std::process::id()
             ));
             let mut options = OpenOptions::new();

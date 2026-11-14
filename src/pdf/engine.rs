@@ -1,5 +1,5 @@
 use std::collections::{HashMap, VecDeque};
-use std::fs::File;
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use mupdf::pdf::{PdfDocument, PdfWriteOptions};
@@ -41,6 +41,23 @@ pub enum Error {
     /// MuPDF reported no pages (and Poppler repair was unavailable or also failed).
     #[error("This PDF has no readable pages. It may be damaged.")]
     NoReadablePages,
+    #[error("could not remove temporary save: {source}")]
+    TemporarySaveCleanup {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("{save} (could not remove temporary save: {cleanup})")]
+    SaveAndCleanup {
+        #[source]
+        save: Box<Error>,
+        cleanup: std::io::Error,
+    },
+    #[error("could not remove abandoned save {}: {source}", path.display())]
+    AbandonedSaveCleanup {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("{0}")]
     Message(String),
 }
@@ -150,8 +167,6 @@ pub struct DocumentEngine {
     list_order: VecDeque<usize>,
     /// Byte length at open, reset after a compacting rewrite.
     opened_len: u64,
-    /// Whether this open already attempted a `.bak` of the pristine file.
-    bak_ensured: bool,
 }
 
 impl DocumentEngine {
@@ -178,6 +193,7 @@ impl DocumentEngine {
     }
 
     fn open_mupdf(path: &Path) -> Result<LoadedPdf, Error> {
+        super::save_transaction::cleanup_abandoned(path)?;
         let doc = PdfDocument::open(path)?;
         if doc.needs_password().unwrap_or(false) {
             return Err("This PDF is password protected.".into());
@@ -209,7 +225,6 @@ impl DocumentEngine {
                 lists: HashMap::new(),
                 list_order: VecDeque::new(),
                 opened_len,
-                bak_ensured: false,
             },
             annotations,
             repaired_from: None,
@@ -368,13 +383,9 @@ impl DocumentEngine {
         let same = paths_equal(&old_path, new_path);
         let saved = (|| {
             let xrefs = self.apply(snapshot)?;
-            if same {
-                self.ensure_bak()?;
-            }
             self.rewrite_all(new_path)?;
             if !same {
                 self.path = new_path.to_path_buf();
-                self.bak_ensured = false;
             }
             if let Ok(meta) = std::fs::metadata(new_path) {
                 self.opened_len = meta.len();
@@ -505,76 +516,51 @@ impl DocumentEngine {
         Ok(saved)
     }
 
-    /// `Ok(true)` when a compacting rewrite ran and annotation xrefs may have moved.
+    /// Stage incremental output and any compaction before one atomic replacement.
+    /// `Ok(true)` means xrefs may have moved during a full rewrite.
+    ///
+    /// # Errors
+    /// Returns PDF encoding/validation errors or transaction metadata, write,
+    /// synchronization, replacement, and cleanup failures.
     fn persist(&mut self) -> Result<bool, Error> {
-        self.ensure_bak()?;
         let path = self.path.clone();
-        let Some(path_str) = path.to_str() else {
-            return Err("The PDF path is not valid UTF-8.".into());
-        };
-        let incremental_ok = self.doc.can_be_saved_incrementally() && {
+        let incremental = self.doc.can_be_saved_incrementally();
+        let (doc, rewritten, len) = super::save_transaction::write(&path, |candidate, file| {
             let mut options = PdfWriteOptions::default();
-            options.set_incremental(true);
             options.set_appearance(false);
-            self.doc.save_with_options(path_str, options).is_ok()
-        };
-        if !incremental_ok {
-            self.rewrite_all(&path)?;
-        }
-        self.maybe_compact()
-    }
-
-    /// Once per open: if `path.bak` is missing, copy the pristine on-disk bytes there
-    /// before the first in-place write. Does not rotate or overwrite an existing bak.
-    fn ensure_bak(&mut self) -> Result<(), Error> {
-        if self.bak_ensured {
-            return Ok(());
-        }
-        let bak = bak_path(&self.path);
-        if !bak.exists() {
-            std::fs::copy(&self.path, &bak)?;
-        }
-        self.bak_ensured = true;
-        Ok(())
-    }
-
-    /// Full rewrite with garbage collection when incremental updates have grown
-    /// the file by more than 25% since it was opened. Level 1 drops unreferenced
-    /// objects without renumbering; xrefs are remapped anyway in case they move.
-    fn maybe_compact(&mut self) -> Result<bool, Error> {
-        if self.opened_len == 0 {
-            return Ok(false);
-        }
-        let len = std::fs::metadata(&self.path)
-            .map(|meta| meta.len())
-            .unwrap_or(0);
-        if len <= self.opened_len.saturating_mul(5) / 4 {
-            return Ok(false);
-        }
-        self.compact_rewrite()?;
-        Ok(true)
-    }
-
-    fn compact_rewrite(&mut self) -> Result<(), Error> {
-        let path = self.path.clone();
-        let tmp = temp_path(&path);
-        {
-            let mut options = PdfWriteOptions::default();
-            options.set_incremental(false);
-            options.set_appearance(false);
-            options.set_garbage(true);
-            let mut file = File::create(&tmp)?;
-            self.doc.write_to_with_options(&mut file, options)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, &path)?;
-        self.doc = PdfDocument::open(path.as_path())?;
+            if incremental {
+                options.set_incremental(true);
+                let name = candidate
+                    .to_str()
+                    .ok_or("the PDF path is not valid UTF-8")?;
+                self.doc.save_with_options(name, options)?;
+            } else {
+                self.doc.write_to_with_options(file, options)?;
+            }
+            let compact = incremental
+                && self.opened_len != 0
+                && file.metadata()?.len() > self.opened_len.saturating_mul(5) / 4;
+            if compact {
+                file.set_len(0)?;
+                file.seek(SeekFrom::Start(0))?;
+                let mut options = PdfWriteOptions::default();
+                options.set_appearance(false);
+                options.set_garbage(true);
+                self.doc.write_to_with_options(file, options)?;
+            }
+            Ok((
+                PdfDocument::open(candidate)?,
+                !incremental || compact,
+                file.metadata()?.len(),
+            ))
+        })?;
+        self.doc = doc;
         self.lists.clear();
         self.list_order.clear();
-        if let Ok(meta) = std::fs::metadata(&path) {
-            self.opened_len = meta.len();
+        if rewritten {
+            self.opened_len = len;
         }
-        Ok(())
+        Ok(rewritten)
     }
 
     fn remap_xrefs(&self, saved: &mut [SavedXref]) {
@@ -598,31 +584,19 @@ impl DocumentEngine {
     }
 
     fn rewrite_all(&mut self, path: &Path) -> Result<(), Error> {
-        let tmp = temp_path(path);
-        {
-            let mut file = File::create(&tmp)?;
-            self.doc.write_to(&mut file)?;
-            file.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
-        self.doc = PdfDocument::open(path)?;
+        let doc = super::save_transaction::write(path, |candidate, file| {
+            self.doc.write_to(file)?;
+            Ok(PdfDocument::open(candidate)?)
+        })?;
+        self.doc = doc;
         self.lists.clear();
         self.list_order.clear();
         Ok(())
     }
 }
 
-fn temp_path(path: &Path) -> PathBuf {
-    let mut tmp = path.to_path_buf();
-    let name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("document.pdf");
-    tmp.set_file_name(format!("{name}.marker-tmp"));
-    tmp
-}
-
 /// `name.pdf.bak` — append `.bak` to the file name, not a replaced extension.
+#[cfg(test)]
 fn bak_path(path: &Path) -> PathBuf {
     let name = path
         .file_name()
